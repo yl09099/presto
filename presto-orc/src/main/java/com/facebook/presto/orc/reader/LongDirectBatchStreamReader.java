@@ -22,6 +22,7 @@ import com.facebook.presto.common.type.BigintType;
 import com.facebook.presto.common.type.DateType;
 import com.facebook.presto.common.type.IntegerType;
 import com.facebook.presto.common.type.SmallintType;
+import com.facebook.presto.common.type.TimeType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.orc.OrcCorruptionException;
 import com.facebook.presto.orc.OrcLocalMemoryContext;
@@ -37,6 +38,7 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.Optional;
+import java.util.function.LongFunction;
 
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.DATA;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.PRESENT;
@@ -45,7 +47,8 @@ import static com.facebook.presto.orc.reader.ReaderUtils.unpackIntNulls;
 import static com.facebook.presto.orc.reader.ReaderUtils.unpackLongNulls;
 import static com.facebook.presto.orc.reader.ReaderUtils.unpackShortNulls;
 import static com.facebook.presto.orc.reader.ReaderUtils.verifyStreamType;
-import static com.facebook.presto.orc.stream.MissingInputStreamSource.missingStreamSource;
+import static com.facebook.presto.orc.stream.MissingInputStreamSource.getBooleanMissingStreamSource;
+import static com.facebook.presto.orc.stream.MissingInputStreamSource.getLongMissingStreamSource;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.SizeOf.sizeOf;
@@ -58,15 +61,16 @@ public class LongDirectBatchStreamReader
 
     private final Type type;
     private final StreamDescriptor streamDescriptor;
+    private final LongFunction<Long> convertUnits;
 
     private int readOffset;
     private int nextBatchSize;
 
-    private InputStreamSource<BooleanInputStream> presentStreamSource = missingStreamSource(BooleanInputStream.class);
+    private InputStreamSource<BooleanInputStream> presentStreamSource = getBooleanMissingStreamSource();
     @Nullable
     private BooleanInputStream presentStream;
 
-    private InputStreamSource<LongInputStream> dataStreamSource = missingStreamSource(LongInputStream.class);
+    private InputStreamSource<LongInputStream> dataStreamSource = getLongMissingStreamSource();
     @Nullable
     private LongInputStream dataStream;
 
@@ -83,10 +87,16 @@ public class LongDirectBatchStreamReader
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
-        verifyStreamType(streamDescriptor, type, t -> t instanceof BigintType || t instanceof IntegerType || t instanceof SmallintType || t instanceof DateType);
+        verifyStreamType(streamDescriptor, type, t -> t instanceof BigintType || t instanceof IntegerType || t instanceof SmallintType || t instanceof DateType || t instanceof TimeType);
         this.type = type;
         this.streamDescriptor = requireNonNull(streamDescriptor, "stream is null");
         this.systemMemoryContext = requireNonNull(systemMemoryContext, "systemMemoryContext is null");
+        if (this.type instanceof TimeType) {
+            this.convertUnits = longValue -> Math.floorDiv(longValue, 1000L);
+        }
+        else {
+            this.convertUnits = longValue -> longValue;
+        }
     }
 
     @Override
@@ -157,6 +167,14 @@ public class LongDirectBatchStreamReader
             dataStream.next(values, nextBatchSize);
             return new LongArrayBlock(nextBatchSize, Optional.empty(), values);
         }
+        if (type instanceof TimeType) {
+            long[] values = new long[nextBatchSize];
+            dataStream.next(values, nextBatchSize);
+            for (int i = 0; i < values.length; i++) {
+                values[i] = convertUnits.apply(values[i]);
+            }
+            return new LongArrayBlock(nextBatchSize, Optional.empty(), values);
+        }
         if (type instanceof IntegerType || type instanceof DateType) {
             int[] values = new int[nextBatchSize];
             dataStream.next(values, nextBatchSize);
@@ -174,6 +192,9 @@ public class LongDirectBatchStreamReader
             throws IOException
     {
         if (type instanceof BigintType) {
+            return longReadNullBlock(isNull, nonNullCount);
+        }
+        if (type instanceof TimeType) {
             return longReadNullBlock(isNull, nonNullCount);
         }
         if (type instanceof IntegerType || type instanceof DateType) {
@@ -198,6 +219,13 @@ public class LongDirectBatchStreamReader
         dataStream.next(longNonNullValueTemp, nonNullCount);
 
         long[] result = unpackLongNulls(longNonNullValueTemp, isNull);
+        if (type instanceof TimeType) {
+            for (int i = 0; i < result.length; i++) {
+                if (!isNull[i]) {
+                    result[i] = convertUnits.apply(result[i]);
+                }
+            }
+        }
 
         return new LongArrayBlock(nextBatchSize, Optional.of(isNull), result);
     }
@@ -248,8 +276,8 @@ public class LongDirectBatchStreamReader
     @Override
     public void startStripe(Stripe stripe)
     {
-        presentStreamSource = missingStreamSource(BooleanInputStream.class);
-        dataStreamSource = missingStreamSource(LongInputStream.class);
+        presentStreamSource = getBooleanMissingStreamSource();
+        dataStreamSource = getLongMissingStreamSource();
 
         readOffset = 0;
         nextBatchSize = 0;

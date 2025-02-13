@@ -24,21 +24,27 @@ import com.facebook.presto.execution.QueryManager;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.ConnectorId;
-import com.facebook.presto.spi.ConnectorMaterializedViewDefinition;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.ConnectorTableMetadata;
 import com.facebook.presto.spi.Constraint;
-import com.facebook.presto.spi.MaterializedViewStatus;
+import com.facebook.presto.spi.MaterializedViewDefinition;
+import com.facebook.presto.spi.NewTableLayout;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.TableLayoutFilterCoverage;
+import com.facebook.presto.spi.TableMetadata;
+import com.facebook.presto.spi.analyzer.MetadataResolver;
+import com.facebook.presto.spi.analyzer.ViewDefinition;
 import com.facebook.presto.spi.api.Experimental;
 import com.facebook.presto.spi.connector.ConnectorCapabilities;
 import com.facebook.presto.spi.connector.ConnectorOutputMetadata;
 import com.facebook.presto.spi.connector.ConnectorPartitioningHandle;
+import com.facebook.presto.spi.connector.ConnectorTableVersion;
+import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.function.SqlFunction;
+import com.facebook.presto.spi.plan.PartitioningHandle;
 import com.facebook.presto.spi.security.GrantInfo;
 import com.facebook.presto.spi.security.PrestoPrincipal;
 import com.facebook.presto.spi.security.Privilege;
@@ -46,7 +52,6 @@ import com.facebook.presto.spi.security.RoleGrant;
 import com.facebook.presto.spi.statistics.ComputedStatistics;
 import com.facebook.presto.spi.statistics.TableStatistics;
 import com.facebook.presto.spi.statistics.TableStatisticsMetadata;
-import com.facebook.presto.sql.planner.PartitioningHandle;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.slice.Slice;
 
@@ -67,18 +72,14 @@ public interface Metadata
 
     void registerBuiltInFunctions(List<? extends SqlFunction> functions);
 
-    boolean schemaExists(Session session, CatalogSchemaName schema);
-
-    boolean catalogExists(Session session, String catalogName);
-
     List<String> listSchemaNames(Session session, String catalogName);
 
-    /**
-     * Returns a table handle for the specified table name.
-     */
-    Optional<TableHandle> getTableHandle(Session session, QualifiedObjectName tableName);
-
     Optional<SystemTable> getSystemTable(Session session, QualifiedObjectName tableName);
+
+    /**
+     * Returns a table handle for time travel expression
+     */
+    Optional<TableHandle> getHandleVersion(Session session, QualifiedObjectName tableName, Optional<ConnectorTableVersion> tableVersion);
 
     Optional<TableHandle> getTableHandleForStatisticsCollection(Session session, QualifiedObjectName tableName, Map<String, Object> analyzeProperties);
 
@@ -212,6 +213,11 @@ public interface Metadata
     void renameTable(Session session, TableHandle tableHandle, QualifiedObjectName newTableName);
 
     /**
+     * Set properties to the specified table.
+     */
+    void setTableProperties(Session session, TableHandle tableHandle, Map<String, Object> properties);
+
+    /**
      * Rename the specified column.
      */
     void renameColumn(Session session, TableHandle tableHandle, ColumnHandle source, String target);
@@ -240,9 +246,6 @@ public interface Metadata
 
     Optional<NewTableLayout> getNewTableLayout(Session session, String catalogName, ConnectorTableMetadata tableMetadata);
 
-    @Experimental
-    Optional<NewTableLayout> getPreferredShuffleLayoutForNewTable(Session session, String catalogName, ConnectorTableMetadata tableMetadata);
-
     /**
      * Begin the atomic creation of a table with data.
      */
@@ -254,9 +257,6 @@ public interface Metadata
     Optional<ConnectorOutputMetadata> finishCreateTable(Session session, OutputTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics);
 
     Optional<NewTableLayout> getInsertLayout(Session session, TableHandle target);
-
-    @Experimental
-    Optional<NewTableLayout> getPreferredShuffleLayoutForInsert(Session session, TableHandle target);
 
     /**
      * Describes statistics that must be collected during a write.
@@ -300,9 +300,14 @@ public interface Metadata
     Optional<ConnectorOutputMetadata> finishInsert(Session session, InsertTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics);
 
     /**
+     * Get the row ID column handle used with UpdatablePageSource#deleteRows.
+     */
+    ColumnHandle getDeleteRowIdColumnHandle(Session session, TableHandle tableHandle);
+
+    /**
      * Get the row ID column handle used with UpdatablePageSource.
      */
-    ColumnHandle getUpdateRowIdColumnHandle(Session session, TableHandle tableHandle);
+    ColumnHandle getUpdateRowIdColumnHandle(Session session, TableHandle tableHandle, List<ColumnHandle> updatedColumns);
 
     /**
      * @return whether delete without table scan is supported
@@ -327,6 +332,16 @@ public interface Metadata
     void finishDelete(Session session, TableHandle tableHandle, Collection<Slice> fragments);
 
     /**
+     * Begin update query
+     */
+    TableHandle beginUpdate(Session session, TableHandle tableHandle, List<ColumnHandle> updatedColumns);
+
+    /**
+     * Finish update query
+     */
+    void finishUpdate(Session session, TableHandle tableHandle, Collection<Slice> fragments);
+
+    /**
      * Returns a connector id for the specified catalog name.
      */
     Optional<ConnectorId> getCatalogHandle(Session session, String catalogName);
@@ -349,22 +364,14 @@ public interface Metadata
     Map<QualifiedObjectName, ViewDefinition> getViews(Session session, QualifiedTablePrefix prefix);
 
     /**
-     * Returns the view definition for the specified view name.
-     */
-    Optional<ViewDefinition> getView(Session session, QualifiedObjectName viewName);
-
-    /**
-     * Is the specified table a view.
-     */
-    default boolean isView(Session session, QualifiedObjectName viewName)
-    {
-        return getView(session, viewName).isPresent();
-    }
-
-    /**
      * Creates the specified view with the specified view definition.
      */
     void createView(Session session, String catalogName, ConnectorTableMetadata viewMetadata, String viewData, boolean replace);
+
+    /**
+     * Rename the specified view.
+     */
+    void renameView(Session session, QualifiedObjectName existingViewName, QualifiedObjectName newViewName);
 
     /**
      * Drops the specified view.
@@ -372,32 +379,14 @@ public interface Metadata
     void dropView(Session session, QualifiedObjectName viewName);
 
     /**
-     * Returns the materialized view definition for the specified materialized view name.
-     */
-    Optional<ConnectorMaterializedViewDefinition> getMaterializedView(Session session, QualifiedObjectName viewName);
-
-    /**
-     * Is the specified table a materialized view.
-     */
-    default boolean isMaterializedView(Session session, QualifiedObjectName viewName)
-    {
-        return getMaterializedView(session, viewName).isPresent();
-    }
-
-    /**
      * Creates the specified materialized view with the specified view definition.
      */
-    void createMaterializedView(Session session, String catalogName, ConnectorTableMetadata viewMetadata, ConnectorMaterializedViewDefinition viewDefinition, boolean ignoreExisting);
+    void createMaterializedView(Session session, String catalogName, ConnectorTableMetadata viewMetadata, MaterializedViewDefinition viewDefinition, boolean ignoreExisting);
 
     /**
      * Drops the specified materialized view.
      */
     void dropMaterializedView(Session session, QualifiedObjectName viewName);
-
-    /**
-     * Get Materialized view status
-     */
-    MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName materializedViewName, TupleDomain<String> baseQueryDomain);
 
     /**
      * Begin refresh materialized view
@@ -494,6 +483,7 @@ public interface Metadata
 
     MetadataUpdates getMetadataUpdateResults(Session session, QueryManager queryManager, MetadataUpdates metadataUpdates, QueryId queryId);
 
+    // TODO: metadata should not provide FunctionAndTypeManager
     FunctionAndTypeManager getFunctionAndTypeManager();
 
     ProcedureRegistry getProcedureRegistry();
@@ -510,6 +500,8 @@ public interface Metadata
 
     AnalyzePropertyManager getAnalyzePropertyManager();
 
+    MetadataResolver getMetadataResolver(Session session);
+
     Set<ConnectorCapabilities> getConnectorCapabilities(Session session, ConnectorId catalogName);
 
     /**
@@ -521,4 +513,8 @@ public interface Metadata
     {
         return NOT_APPLICABLE;
     }
+
+    void dropConstraint(Session session, TableHandle tableHandle, Optional<String> constraintName, Optional<String> columnName);
+
+    void addConstraint(Session session, TableHandle tableHandle, TableConstraint<String> tableConstraint);
 }

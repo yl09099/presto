@@ -31,6 +31,9 @@ public class SelectorSpec
     private final Optional<String> queryType;
     private final Optional<List<String>> clientTags;
     private final Optional<SelectorResourceEstimate> selectorResourceEstimate;
+    private final Optional<Pattern> clientInfoRegex;
+    private final Optional<String> schema;
+    private final Optional<Pattern> principalRegex;
     private final ResourceGroupIdTemplate group;
 
     @JsonCreator
@@ -40,6 +43,9 @@ public class SelectorSpec
             @JsonProperty("queryType") Optional<String> queryType,
             @JsonProperty("clientTags") Optional<List<String>> clientTags,
             @JsonProperty("selectorResourceEstimate") Optional<SelectorResourceEstimate> selectorResourceEstimate,
+            @JsonProperty("clientInfo") Optional<Pattern> clientInfoRegex,
+            @JsonProperty("schema") Optional<String> schema,
+            @JsonProperty("principal") Optional<Pattern> principal,
             @JsonProperty("group") ResourceGroupIdTemplate group)
     {
         this.userRegex = requireNonNull(userRegex, "userRegex is null");
@@ -48,6 +54,9 @@ public class SelectorSpec
         this.clientTags = requireNonNull(clientTags, "clientTags is null");
         this.selectorResourceEstimate = requireNonNull(selectorResourceEstimate, "selectorResourceEstimate is null");
         this.group = requireNonNull(group, "group is null");
+        this.clientInfoRegex = requireNonNull(clientInfoRegex, "clientInfoRegex is null");
+        this.schema = requireNonNull(schema, "schema is null");
+        this.principalRegex = requireNonNull(principal, "principal is null");
     }
 
     public Optional<Pattern> getUserRegex()
@@ -80,6 +89,21 @@ public class SelectorSpec
         return group;
     }
 
+    public Optional<Pattern> getClientInfoRegex()
+    {
+        return clientInfoRegex;
+    }
+
+    public Optional<String> getSchema()
+    {
+        return schema;
+    }
+
+    public Optional<Pattern> getPrincipalRegex()
+    {
+        return principalRegex;
+    }
+
     @Override
     public boolean equals(Object other)
     {
@@ -96,7 +120,11 @@ public class SelectorSpec
                 sourceRegex.map(Pattern::pattern).equals(that.sourceRegex.map(Pattern::pattern))) &&
                 sourceRegex.map(Pattern::flags).equals(that.sourceRegex.map(Pattern::flags)) &&
                 queryType.equals(that.queryType) &&
-                clientTags.equals(that.clientTags);
+                clientTags.equals(that.clientTags) &&
+                clientInfoRegex.map(Pattern::pattern).equals(that.clientInfoRegex.map(Pattern::pattern)) &&
+                clientInfoRegex.map(Pattern::flags).equals(that.clientInfoRegex.map(Pattern::flags)) &&
+                schema.equals(that.schema) &&
+                principalRegex.equals(that.principalRegex);
     }
 
     @Override
@@ -109,7 +137,9 @@ public class SelectorSpec
                 sourceRegex.map(Pattern::pattern),
                 sourceRegex.map(Pattern::flags),
                 queryType,
-                clientTags);
+                clientTags,
+                principalRegex.map(Pattern::pattern),
+                principalRegex.map(Pattern::flags));
     }
 
     @Override
@@ -123,6 +153,9 @@ public class SelectorSpec
                 .add("sourceFlags", sourceRegex.map(Pattern::flags))
                 .add("queryType", queryType)
                 .add("clientTags", clientTags)
+                .add("clientInfoRegex", clientInfoRegex)
+                .add("principalRegex", principalRegex)
+                .add("principalFlags", principalRegex.map(Pattern::flags))
                 .toString();
     }
 }

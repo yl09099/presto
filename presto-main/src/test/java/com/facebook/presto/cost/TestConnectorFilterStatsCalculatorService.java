@@ -24,6 +24,7 @@ import com.facebook.presto.spi.statistics.ColumnStatistics;
 import com.facebook.presto.spi.statistics.DoubleRange;
 import com.facebook.presto.spi.statistics.Estimate;
 import com.facebook.presto.spi.statistics.TableStatistics;
+import com.facebook.presto.sql.InMemoryExpressionOptimizerProvider;
 import com.facebook.presto.sql.TestingRowExpressionTranslator;
 import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.tree.Expression;
@@ -56,7 +57,12 @@ public class TestConnectorFilterStatsCalculatorService
     {
         session = testSessionBuilder().build();
         MetadataManager metadata = MetadataManager.createTestMetadataManager();
-        FilterStatsCalculator statsCalculator = new FilterStatsCalculator(metadata, new ScalarStatsCalculator(metadata), new StatsNormalizer());
+        FilterStatsCalculator statsCalculator = new FilterStatsCalculator(
+                metadata,
+                new ScalarStatsCalculator(
+                        metadata,
+                        new InMemoryExpressionOptimizerProvider(metadata)),
+                new StatsNormalizer());
         statsCalculatorService = new ConnectorFilterStatsCalculatorService(statsCalculator);
         xStats = ColumnStatistics.builder()
                 .setDistinctValuesCount(Estimate.of(40))
@@ -98,20 +104,20 @@ public class TestConnectorFilterStatsCalculatorService
         TableStatistics filteredToZeroStatistics = TableStatistics.builder()
                 .setRowCount(Estimate.zero())
                 .setTotalSize(Estimate.zero())
-                .setColumnStatistics(xColumn, new ColumnStatistics(Estimate.of(1.0), Estimate.zero(), Estimate.zero(), Optional.empty()))
+                .setColumnStatistics(xColumn, new ColumnStatistics(Estimate.of(1.0), Estimate.zero(), Estimate.zero(), Optional.empty(), Optional.empty()))
                 .build();
         assertPredicate("false", originalTableStatistics, filteredToZeroStatistics);
 
         TableStatistics filteredStatistics = TableStatistics.builder()
                 .setRowCount(Estimate.of(37.5))
                 .setTotalSize(Estimate.of(300))
-                .setColumnStatistics(xColumn, new ColumnStatistics(Estimate.zero(), Estimate.of(20), Estimate.unknown(), Optional.of(new DoubleRange(-10, 0))))
+                .setColumnStatistics(xColumn, new ColumnStatistics(Estimate.zero(), Estimate.of(20), Estimate.unknown(), Optional.of(new DoubleRange(-10, 0)), Optional.empty()))
                 .build();
         assertPredicate("x < 0", originalTableStatistics, filteredStatistics);
 
         TableStatistics filteredStatisticsWithoutTotalSize = TableStatistics.builder()
                 .setRowCount(Estimate.of(37.5))
-                .setColumnStatistics(xColumn, new ColumnStatistics(Estimate.zero(), Estimate.of(20), Estimate.unknown(), Optional.of(new DoubleRange(-10, 0))))
+                .setColumnStatistics(xColumn, new ColumnStatistics(Estimate.zero(), Estimate.of(20), Estimate.unknown(), Optional.of(new DoubleRange(-10, 0)), Optional.empty()))
                 .build();
         assertPredicate("x < 0", originalTableStatisticsWithoutTotalSize, filteredStatisticsWithoutTotalSize);
     }

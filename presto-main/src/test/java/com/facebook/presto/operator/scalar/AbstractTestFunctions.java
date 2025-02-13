@@ -19,15 +19,16 @@ import com.facebook.presto.common.type.DecimalParseResult;
 import com.facebook.presto.common.type.Decimals;
 import com.facebook.presto.common.type.SqlDecimal;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.FunctionListBuilder;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.SqlScalarFunction;
 import com.facebook.presto.spi.ErrorCodeSupplier;
-import com.facebook.presto.spi.Plugin;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.StandardErrorCode;
 import com.facebook.presto.spi.function.SqlFunction;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
+import com.facebook.presto.sql.analyzer.FunctionsConfig;
 import com.facebook.presto.sql.analyzer.SemanticErrorCode;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
@@ -43,7 +44,6 @@ import java.util.Map;
 import static com.facebook.airlift.testing.Closeables.closeAllRuntimeException;
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
 import static com.facebook.presto.common.type.DecimalType.createDecimalType;
-import static com.facebook.presto.metadata.FunctionExtractor.extractFunctions;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.String.format;
@@ -56,7 +56,8 @@ public abstract class AbstractTestFunctions
     private static final double DELTA = 1e-5;
 
     protected final Session session;
-    private final FeaturesConfig config;
+    private final FeaturesConfig featuresConfig;
+    private final FunctionsConfig functionsConfig;
     protected FunctionAssertions functionAssertions;
 
     protected AbstractTestFunctions()
@@ -66,24 +67,32 @@ public abstract class AbstractTestFunctions
 
     protected AbstractTestFunctions(Session session)
     {
-        this(session, new FeaturesConfig());
+        this(session, new FeaturesConfig(), new FunctionsConfig());
     }
 
-    protected AbstractTestFunctions(FeaturesConfig config)
+    protected AbstractTestFunctions(FeaturesConfig featuresConfig)
     {
-        this(TEST_SESSION, config);
+        this(TEST_SESSION, featuresConfig, new FunctionsConfig());
     }
 
-    protected AbstractTestFunctions(Session session, FeaturesConfig config)
+    protected AbstractTestFunctions(FunctionsConfig functionsConfig)
+    {
+        this(TEST_SESSION, new FeaturesConfig(), functionsConfig);
+    }
+
+    protected AbstractTestFunctions(Session session, FeaturesConfig featuresConfig, FunctionsConfig functionsConfig)
     {
         this.session = requireNonNull(session, "session is null");
-        this.config = requireNonNull(config, "config is null").setLegacyLogFunction(true);
+        this.featuresConfig = requireNonNull(featuresConfig, "featuresConfig is null");
+        this.functionsConfig = requireNonNull(functionsConfig, "config is null")
+                .setLegacyLogFunction(true)
+                .setUseNewNanDefinition(true);
     }
 
     @BeforeClass
     public final void initTestFunctions()
     {
-        functionAssertions = new FunctionAssertions(session, config);
+        functionAssertions = new FunctionAssertions(session, featuresConfig, functionsConfig, false);
     }
 
     @AfterClass(alwaysRun = true)
@@ -93,13 +102,27 @@ public abstract class AbstractTestFunctions
         functionAssertions = null;
     }
 
+    public FunctionAndTypeManager getFunctionAndTypeManager()
+    {
+        return functionAssertions.getFunctionAndTypeManager();
+    }
+
     protected void assertFunction(String projection, Type expectedType, Object expected)
     {
         functionAssertions.assertFunction(projection, expectedType, expected);
     }
 
-    protected void assertFunctionWithError(String projection, Type expectedType, double expected)
+    protected void assertFunctionString(String projection, Type expectedType, String expected)
     {
+        functionAssertions.assertFunctionString(projection, expectedType, expected);
+    }
+
+    protected void assertFunctionWithError(String projection, Type expectedType, Double expected)
+    {
+        if (expected == null) {
+            assertFunction(projection, expectedType, null);
+            return;
+        }
         assertFunctionWithError(projection, expectedType, expected, DELTA);
     }
 
@@ -113,19 +136,22 @@ public abstract class AbstractTestFunctions
         functionAssertions.assertFunction(format("\"%s\"(%s)", operator.getFunctionName().getObjectName(), value), expectedType, expected);
     }
 
+    protected void assertFunctionDoubleArrayWithError(String projection, Type expectedType, List<Double> expected, double delta)
+    {
+        functionAssertions.assertFunctionDoubleArrayWithError(projection, expectedType, expected, delta);
+    }
+
+    protected void assertFunctionFloatArrayWithError(String projection, Type expectedType, List<Float> expected, float delta)
+    {
+        functionAssertions.assertFunctionFloatArrayWithError(projection, expectedType, expected, delta);
+    }
+
     protected void assertDecimalFunction(String statement, SqlDecimal expectedResult)
     {
         assertFunction(
                 statement,
                 createDecimalType(expectedResult.getPrecision(), expectedResult.getScale()),
                 expectedResult);
-    }
-
-    // this is not safe as it catches all RuntimeExceptions
-    @Deprecated
-    protected void assertInvalidFunction(String projection)
-    {
-        functionAssertions.assertInvalidFunction(projection);
     }
 
     protected void assertInvalidFunction(String projection, StandardErrorCode errorCode, String messagePattern)
@@ -161,6 +187,11 @@ public abstract class AbstractTestFunctions
     protected void assertNumericOverflow(String projection, String message)
     {
         functionAssertions.assertNumericOverflow(projection, message);
+    }
+
+    protected void assertInvalidTypeDefinition(String projection, String message)
+    {
+        functionAssertions.assertInvalidTypeDefinition(projection, message);
     }
 
     protected void assertInvalidCast(String projection)
@@ -223,18 +254,6 @@ public abstract class AbstractTestFunctions
                 .scalar(clazz)
                 .getFunctions();
         metadata.getFunctionAndTypeManager().registerBuiltInFunctions(functions);
-    }
-
-    protected void registerFunctions(Plugin plugin)
-    {
-        functionAssertions.getMetadata().registerBuiltInFunctions(extractFunctions(plugin.getFunctions()));
-    }
-
-    protected void registerTypes(Plugin plugin)
-    {
-        for (Type type : plugin.getTypes()) {
-            functionAssertions.getFunctionAndTypeManager().addType(type);
-        }
     }
 
     protected static SqlDecimal decimal(String decimalString)

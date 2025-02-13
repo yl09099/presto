@@ -45,6 +45,7 @@ import static com.facebook.airlift.discovery.client.ServiceDescriptor.serviceDes
 import static com.facebook.airlift.discovery.client.ServiceSelectorConfig.DEFAULT_POOL;
 import static com.facebook.airlift.http.client.HttpStatus.OK;
 import static com.facebook.airlift.testing.Assertions.assertEqualsIgnoreOrder;
+import static com.facebook.presto.server.ServerConfig.POOL_TYPE;
 import static com.facebook.presto.spi.NodeState.ACTIVE;
 import static com.facebook.presto.spi.NodeState.INACTIVE;
 import static org.testng.Assert.assertEquals;
@@ -57,6 +58,8 @@ public class TestDiscoveryNodeManager
     private final NodeInfo coordinatorNodeInfo = new NodeInfo("test");
     private final NodeInfo resourceManagerNodeInfo = new NodeInfo("test");
     private final NodeInfo catalogServerNodeInfo = new NodeInfo("test");
+    private final NodeInfo coordinatorSidecarNodeInfo = new NodeInfo("test");
+
     private final InternalCommunicationConfig internalCommunicationConfig = new InternalCommunicationConfig();
     private NodeVersion expectedVersion;
     private Set<InternalNode> activeNodes;
@@ -68,6 +71,8 @@ public class TestDiscoveryNodeManager
     private InternalNode resourceManager;
     private InternalNode catalogServer;
     private InternalNode inActiveCatalogServer;
+    private InternalNode coordinatorSidecar;
+    private InternalNode inActiveCoordinatorSidecar;
     private InternalNode workerNode1;
     private final PrestoNodeServiceSelector selector = new PrestoNodeServiceSelector();
     private HttpClient testHttpClient;
@@ -89,11 +94,21 @@ public class TestDiscoveryNodeManager
                 expectedVersion,
                 false,
                 true,
+                false,
                 false);
         catalogServer = new InternalNode(
                 catalogServerNodeInfo.getNodeId(),
                 URI.create("https://192.0.3.1"),
                 expectedVersion,
+                false,
+                false,
+                true,
+                false);
+        coordinatorSidecar = new InternalNode(
+                coordinatorSidecarNodeInfo.getNodeId(),
+                URI.create("https://192.0.3.1"),
+                expectedVersion,
+                false,
                 false,
                 false,
                 true);
@@ -106,11 +121,21 @@ public class TestDiscoveryNodeManager
                 new NodeVersion("2"),
                 false,
                 true,
+                false,
                 false);
         inActiveCatalogServer = new InternalNode(
                 catalogServerNodeInfo.getNodeId(),
                 URI.create("https://192.0.3.2"),
                 new NodeVersion("2"),
+                false,
+                false,
+                true,
+                false);
+        inActiveCoordinatorSidecar = new InternalNode(
+                coordinatorSidecarNodeInfo.getNodeId(),
+                URI.create("https://192.0.3.2"),
+                new NodeVersion("2"),
+                false,
                 false,
                 false,
                 true);
@@ -124,11 +149,13 @@ public class TestDiscoveryNodeManager
                 .add(coordinator)
                 .add(resourceManager)
                 .add(catalogServer)
+                .add(coordinatorSidecar)
                 .build();
         inactiveNodes = ImmutableSet.of(
                 inActiveCoordinator,
                 inActiveResourceManager,
                 inActiveCatalogServer,
+                inActiveCoordinatorSidecar,
                 inActiveWorkerNode1,
                 inActiveWorkerNode2);
 
@@ -143,7 +170,7 @@ public class TestDiscoveryNodeManager
             AllNodes allNodes = manager.getAllNodes();
 
             Set<InternalNode> activeNodes = allNodes.getActiveNodes();
-            assertEqualsIgnoreOrder(activeNodes, ImmutableSet.of(resourceManager, catalogServer));
+            assertEqualsIgnoreOrder(activeNodes, ImmutableSet.of(resourceManager, catalogServer, coordinatorSidecar));
 
             for (InternalNode actual : activeNodes) {
                 for (InternalNode expected : this.activeNodes) {
@@ -154,7 +181,7 @@ public class TestDiscoveryNodeManager
             assertEqualsIgnoreOrder(activeNodes, manager.getNodes(ACTIVE));
 
             Set<InternalNode> inactiveNodes = allNodes.getInactiveNodes();
-            assertEqualsIgnoreOrder(inactiveNodes, ImmutableSet.of(inActiveResourceManager, inActiveCatalogServer));
+            assertEqualsIgnoreOrder(inactiveNodes, ImmutableSet.of(inActiveResourceManager, inActiveCatalogServer, inActiveCoordinatorSidecar));
 
             for (InternalNode actual : inactiveNodes) {
                 for (InternalNode expected : this.inactiveNodes) {
@@ -238,6 +265,40 @@ public class TestDiscoveryNodeManager
     }
 
     @Test
+    public void testGetAllNodesForCoordinatorSidecar()
+    {
+        DiscoveryNodeManager manager = new DiscoveryNodeManager(selector, coordinatorSidecarNodeInfo, new NoOpFailureDetector(), Optional.empty(), expectedVersion, testHttpClient, new TestingDriftClient<>(), internalCommunicationConfig);
+        try {
+            AllNodes allNodes = manager.getAllNodes();
+
+            Set<InternalNode> activeNodes = allNodes.getActiveNodes();
+            assertEqualsIgnoreOrder(activeNodes, this.activeNodes);
+
+            for (InternalNode actual : activeNodes) {
+                for (InternalNode expected : this.activeNodes) {
+                    assertNotSame(actual, expected);
+                }
+            }
+
+            assertEqualsIgnoreOrder(activeNodes, manager.getNodes(ACTIVE));
+
+            Set<InternalNode> inactiveNodes = allNodes.getInactiveNodes();
+            assertEqualsIgnoreOrder(inactiveNodes, this.inactiveNodes);
+
+            for (InternalNode actual : inactiveNodes) {
+                for (InternalNode expected : this.inactiveNodes) {
+                    assertNotSame(actual, expected);
+                }
+            }
+
+            assertEqualsIgnoreOrder(inactiveNodes, manager.getNodes(INACTIVE));
+        }
+        finally {
+            manager.stop();
+        }
+    }
+
+    @Test
     public void testGetCurrentNode()
     {
         DiscoveryNodeManager manager = new DiscoveryNodeManager(selector, workerNodeInfo, new NoOpFailureDetector(), Optional.empty(), expectedVersion, testHttpClient, new TestingDriftClient<>(), internalCommunicationConfig);
@@ -279,6 +340,18 @@ public class TestDiscoveryNodeManager
         DiscoveryNodeManager manager = new DiscoveryNodeManager(selector, workerNodeInfo, new NoOpFailureDetector(), Optional.of(host -> false), expectedVersion, testHttpClient, new TestingDriftClient<>(), internalCommunicationConfig);
         try {
             assertEquals(manager.getCatalogServers(), ImmutableSet.of(catalogServer));
+        }
+        finally {
+            manager.stop();
+        }
+    }
+
+    @Test
+    public void testGetCoordinatorSidecar()
+    {
+        DiscoveryNodeManager manager = new DiscoveryNodeManager(selector, coordinatorSidecarNodeInfo, new NoOpFailureDetector(), Optional.of(host -> false), expectedVersion, testHttpClient, new TestingDriftClient<>(), internalCommunicationConfig);
+        try {
+            assertEquals(manager.getCoordinatorSidecars(), ImmutableSet.of(coordinatorSidecar));
         }
         finally {
             manager.stop();
@@ -338,6 +411,8 @@ public class TestDiscoveryNodeManager
                         .addProperty("coordinator", String.valueOf(node.isCoordinator()))
                         .addProperty("resource_manager", String.valueOf(node.isResourceManager()))
                         .addProperty("catalog_server", String.valueOf(node.isCatalogServer()))
+                        .addProperty("sidecar", String.valueOf(node.isCoordinatorSidecar()))
+                        .addProperty(POOL_TYPE, node.getPoolType().name())
                         .build());
             }
 

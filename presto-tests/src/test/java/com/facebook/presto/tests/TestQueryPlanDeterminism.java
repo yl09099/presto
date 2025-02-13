@@ -182,6 +182,16 @@ public class TestQueryPlanDeterminism
     }
 
     @Override
+    public void testExplainValidate()
+    {
+    }
+
+    @Override
+    public void testSetSessionNativeWorkerSessionProperty()
+    {
+    }
+
+    @Override
     protected void assertAccessAllowed(@Language("SQL") String sql, TestingAccessControlManager.TestingPrivilege... deniedPrivileges)
     {
     }
@@ -206,11 +216,25 @@ public class TestQueryPlanDeterminism
     {
     }
 
+    @Test
+    public void testUse()
+    {
+        // USE statement is not supported
+    }
+
     @Override
     protected MaterializedResult computeExpected(@Language("SQL") String sql, List<? extends Type> resultTypes)
     {
         determinismChecker.checkPlanIsDeterministic(sql);
         return super.computeExpected(sql, resultTypes);
+    }
+
+    // Give more time for large queries in plan determinsm check.
+    @Override
+    @Test(timeOut = 100_000)
+    public void testLargeQuery()
+    {
+        super.testLargeQuery();
     }
 
     @Test

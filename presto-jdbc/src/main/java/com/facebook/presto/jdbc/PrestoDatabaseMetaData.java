@@ -33,6 +33,7 @@ import static java.util.Objects.requireNonNull;
 public class PrestoDatabaseMetaData
         implements DatabaseMetaData
 {
+    private static final String JDBC_URL_START = "jdbc:";
     private static final String SEARCH_STRING_ESCAPE = "\\";
 
     private final PrestoConnection connection;
@@ -60,7 +61,7 @@ public class PrestoDatabaseMetaData
     public String getURL()
             throws SQLException
     {
-        return connection.getURI().toString();
+        return JDBC_URL_START + connection.getURI().toString();
     }
 
     @Override
@@ -1347,11 +1348,11 @@ public class PrestoDatabaseMetaData
     public ResultSet getClientInfoProperties()
             throws SQLException
     {
-        return select(format("SELECT * FROM (VALUES\n" +
-                        "        ('ApplicationName', %s, 'presto-jdbc', 'Sets the source of the session'),\n" +
-                        "        ('ClientInfo', %s, NULL, 'Sets the client info of the session'),        \n" +
-                        "        ('ClientTags', %s, NULL, 'Comma-delimited string of tags for the session'),        \n" +
-                        "        ('TraceToken', %s, NULL, 'Sets the trace token of the session')        \n" +
+        return select(format("SELECT * FROM (VALUES%n" +
+                        "        ('ApplicationName', %s, 'presto-jdbc', 'Sets the source of the session'),%n" +
+                        "        ('ClientInfo', %s, NULL, 'Sets the client info of the session'),        %n" +
+                        "        ('ClientTags', %s, NULL, 'Comma-delimited string of tags for the session'),        %n" +
+                        "        ('TraceToken', %s, NULL, 'Sets the trace token of the session')        %n" +
                         ") AS t (NAME, MAX_LEN, DEFAULT_VALUE, DESCRIPTION)",
                 MAX_LENGTH,
                 MAX_LENGTH,

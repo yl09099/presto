@@ -24,7 +24,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.OptionalLong;
 
 import static com.facebook.presto.spi.schedule.NodeSelectionStrategy.SOFT_AFFINITY;
 import static com.google.common.base.MoreObjects.toStringHelper;
@@ -40,6 +39,7 @@ public class HudiSplit
     private final List<HudiFile> logFiles;
     private final List<HostAddress> addresses;
     private final NodeSelectionStrategy nodeSelectionStrategy;
+    private final SplitWeight splitWeight;
 
     @JsonCreator
     public HudiSplit(
@@ -49,7 +49,8 @@ public class HudiSplit
             @JsonProperty("baseFile") Optional<HudiFile> baseFile,
             @JsonProperty("logFiles") List<HudiFile> logFiles,
             @JsonProperty("addresses") List<HostAddress> addresses,
-            @JsonProperty("nodeSelectionStrategy") NodeSelectionStrategy nodeSelectionStrategy)
+            @JsonProperty("nodeSelectionStrategy") NodeSelectionStrategy nodeSelectionStrategy,
+            @JsonProperty("splitWeight") SplitWeight splitWeight)
     {
         this.table = requireNonNull(table, "table is null");
         this.instantTime = requireNonNull(instantTime, "instantTime is null");
@@ -58,6 +59,7 @@ public class HudiSplit
         this.logFiles = requireNonNull(logFiles, "logFiles is null");
         this.addresses = requireNonNull(addresses, "addresses is null");
         this.nodeSelectionStrategy = requireNonNull(nodeSelectionStrategy, "nodeSelectionStrategy is null");
+        this.splitWeight = requireNonNull(splitWeight, "splitWeight is null");
     }
 
     @JsonProperty
@@ -107,7 +109,7 @@ public class HudiSplit
     public List<HostAddress> getPreferredNodes(NodeProvider nodeProvider)
     {
         if (getNodeSelectionStrategy() == SOFT_AFFINITY) {
-            return baseFile.map(file -> nodeProvider.get(file.getPath(), 2)).orElse(addresses);
+            return baseFile.map(file -> nodeProvider.get(file.getPath())).orElse(addresses);
         }
         return addresses;
     }
@@ -118,22 +120,11 @@ public class HudiSplit
         return this;
     }
 
-    @Override
-    public Object getSplitIdentifier()
-    {
-        return this;
-    }
-
-    @Override
-    public OptionalLong getSplitSizeInBytes()
-    {
-        return OptionalLong.empty();
-    }
-
+    @JsonProperty
     @Override
     public SplitWeight getSplitWeight()
     {
-        return ConnectorSplit.super.getSplitWeight();
+        return splitWeight;
     }
 
     @Override

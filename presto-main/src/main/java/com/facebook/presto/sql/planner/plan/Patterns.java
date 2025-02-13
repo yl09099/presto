@@ -16,16 +16,29 @@ package com.facebook.presto.sql.planner.plan;
 import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.matching.Property;
 import com.facebook.presto.spi.plan.AggregationNode;
+import com.facebook.presto.spi.plan.CteConsumerNode;
+import com.facebook.presto.spi.plan.CteProducerNode;
+import com.facebook.presto.spi.plan.CteReferenceNode;
+import com.facebook.presto.spi.plan.DeleteNode;
 import com.facebook.presto.spi.plan.FilterNode;
 import com.facebook.presto.spi.plan.IntersectNode;
+import com.facebook.presto.spi.plan.JoinNode;
+import com.facebook.presto.spi.plan.JoinType;
 import com.facebook.presto.spi.plan.LimitNode;
 import com.facebook.presto.spi.plan.MarkDistinctNode;
+import com.facebook.presto.spi.plan.OutputNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.spi.plan.SemiJoinNode;
+import com.facebook.presto.spi.plan.SortNode;
+import com.facebook.presto.spi.plan.SpatialJoinNode;
+import com.facebook.presto.spi.plan.TableFinishNode;
 import com.facebook.presto.spi.plan.TableScanNode;
+import com.facebook.presto.spi.plan.TableWriterNode;
 import com.facebook.presto.spi.plan.TopNNode;
 import com.facebook.presto.spi.plan.UnionNode;
 import com.facebook.presto.spi.plan.ValuesNode;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 
@@ -50,6 +63,11 @@ public class Patterns
         return typeOf(AggregationNode.class);
     }
 
+    public static Pattern<GroupIdNode> groupId()
+    {
+        return typeOf(GroupIdNode.class);
+    }
+
     public static Pattern<ApplyNode> applyNode()
     {
         return typeOf(ApplyNode.class);
@@ -58,6 +76,10 @@ public class Patterns
     public static Pattern<DeleteNode> delete()
     {
         return typeOf(DeleteNode.class);
+    }
+    public static Pattern<UpdateNode> update()
+    {
+        return typeOf(UpdateNode.class);
     }
 
     public static Pattern<ExchangeNode> exchange()
@@ -115,9 +137,34 @@ public class Patterns
         return typeOf(OutputNode.class);
     }
 
+    public static Pattern<CteProducerNode> cteProducer()
+    {
+        return typeOf(CteProducerNode.class);
+    }
+
+    public static Pattern<CteConsumerNode> cteConsumer()
+    {
+        return typeOf(CteConsumerNode.class);
+    }
+
+    public static Pattern<CteReferenceNode> cteReference()
+    {
+        return typeOf(CteReferenceNode.class);
+    }
+
+    public static Pattern<SequenceNode> sequenceNode()
+    {
+        return typeOf(SequenceNode.class);
+    }
+
     public static Pattern<ProjectNode> project()
     {
         return typeOf(ProjectNode.class);
+    }
+
+    public static Pattern<RemoteSourceNode> remoteSource()
+    {
+        return typeOf(RemoteSourceNode.class);
     }
 
     public static Pattern<SampleNode> sample()
@@ -225,7 +272,7 @@ public class Patterns
 
     public static class Join
     {
-        public static Property<JoinNode, JoinNode.Type> type()
+        public static Property<JoinNode, JoinType> type()
         {
             return property("type", JoinNode::getType);
         }
@@ -278,6 +325,19 @@ public class Patterns
         public static Property<ValuesNode, List<List<RowExpression>>> rows()
         {
             return property("rows", ValuesNode::getRows);
+        }
+    }
+
+    public static class Exchange
+    {
+        public static Property<ExchangeNode, ExchangeNode.Scope> scope()
+        {
+            return property("scope", ExchangeNode::getScope);
+        }
+
+        public static Property<ExchangeNode, ExchangeNode.Type> type()
+        {
+            return property("type", ExchangeNode::getType);
         }
     }
 }

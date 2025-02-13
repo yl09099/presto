@@ -35,6 +35,7 @@ import com.facebook.presto.operator.scalar.ArraySubscriptOperator;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.StandardErrorCode;
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.function.FunctionHandle;
 import com.facebook.presto.spi.function.FunctionImplementationType;
@@ -47,7 +48,6 @@ import com.facebook.presto.sql.analyzer.SemanticErrorCode;
 import com.facebook.presto.sql.analyzer.SemanticException;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.Interpreters.LambdaVariableResolver;
-import com.facebook.presto.sql.planner.iterative.rule.DesugarCurrentUser;
 import com.facebook.presto.sql.tree.ArithmeticBinaryExpression;
 import com.facebook.presto.sql.tree.ArithmeticUnaryExpression;
 import com.facebook.presto.sql.tree.ArrayConstructor;
@@ -123,7 +123,6 @@ import static com.facebook.presto.common.type.TypeUtils.isEnumType;
 import static com.facebook.presto.common.type.TypeUtils.writeNativeValue;
 import static com.facebook.presto.common.type.VarcharType.createVarcharType;
 import static com.facebook.presto.metadata.CastType.CAST;
-import static com.facebook.presto.metadata.FunctionAndTypeManager.qualifyObjectName;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.function.FunctionImplementationType.JAVA;
 import static com.facebook.presto.spi.function.FunctionImplementationType.SQL;
@@ -195,7 +194,7 @@ public class ExpressionInterpreter
 
     public static Object evaluateConstantExpression(Expression expression, Type expectedType, Metadata metadata, Session session, Map<NodeRef<Parameter>, Expression> parameters)
     {
-        ExpressionAnalyzer analyzer = createConstantAnalyzer(metadata, session, parameters, WarningCollector.NOOP);
+        ExpressionAnalyzer analyzer = createConstantAnalyzer(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver(), session, parameters, WarningCollector.NOOP);
         analyzer.analyze(expression, Scope.create());
 
         Type actualType = analyzer.getExpressionTypes().get(NodeRef.of(expression));
@@ -229,7 +228,7 @@ public class ExpressionInterpreter
         Expression rewrite = Coercer.addCoercions(expression, coercions, typeOnlyCoercions);
 
         // redo the analysis since above expression rewriter might create new expressions which do not have entries in the type map
-        ExpressionAnalyzer analyzer = createConstantAnalyzer(metadata, session, parameters, WarningCollector.NOOP);
+        ExpressionAnalyzer analyzer = createConstantAnalyzer(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver(), session, parameters, WarningCollector.NOOP);
         analyzer.analyze(rewrite, Scope.create());
 
         // remove syntax sugar
@@ -241,7 +240,7 @@ public class ExpressionInterpreter
 
         // The optimization above may have rewritten the expression tree which breaks all the identity maps, so redo the analysis
         // to re-analyze coercions that might be necessary
-        analyzer = createConstantAnalyzer(metadata, session, parameters, WarningCollector.NOOP);
+        analyzer = createConstantAnalyzer(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver(), session, parameters, WarningCollector.NOOP);
         analyzer.analyze(canonicalized, Scope.create());
 
         // evaluate the expression
@@ -919,7 +918,7 @@ public class ExpressionInterpreter
             FunctionHandle functionHandle = metadata.getFunctionAndTypeManager().resolveFunction(
                     Optional.of(session.getSessionFunctions()),
                     session.getTransactionId(),
-                    qualifyObjectName(node.getName()),
+                    metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver().qualifyObjectName(node.getName()),
                     fromTypes(argumentTypes));
             FunctionMetadata functionMetadata = metadata.getFunctionAndTypeManager().getFunctionMetadata(functionHandle);
             if (!functionMetadata.isCalledOnNullInput()) {
@@ -943,8 +942,8 @@ public class ExpressionInterpreter
             Object result;
 
             FunctionImplementationType implementationType = functionMetadata.getImplementationType();
-            if (implementationType.isExternal()) {
-                // do not interpret remote functions on coordinator
+            if (!implementationType.canBeEvaluatedInCoordinator()) {
+                // do not interpret remote functions or cpp UDF on coordinator
                 return new FunctionCall(node.getName(), node.getWindow(), node.isDistinct(), node.isIgnoreNulls(), toExpressions(argumentValues, argumentTypes));
             }
             else if (implementationType.equals(JAVA)) {
@@ -952,7 +951,13 @@ public class ExpressionInterpreter
             }
             else {
                 checkState(implementationType.equals(SQL));
-                Expression function = getSqlFunctionExpression(functionMetadata, (SqlInvokedScalarFunctionImplementation) metadata.getFunctionAndTypeManager().getScalarFunctionImplementation(functionHandle), metadata, new PlanVariableAllocator(), session.getSqlFunctionProperties(), node.getArguments());
+                Expression function = getSqlFunctionExpression(
+                        functionMetadata,
+                        (SqlInvokedScalarFunctionImplementation) metadata.getFunctionAndTypeManager().getScalarFunctionImplementation(functionHandle),
+                        metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver(),
+                        new VariableAllocator(),
+                        session.getSqlFunctionProperties(),
+                        node.getArguments());
                 ExpressionInterpreter functionInterpreter = new ExpressionInterpreter(
                         function,
                         metadata,
@@ -1188,7 +1193,7 @@ public class ExpressionInterpreter
         @Override
         protected Object visitCurrentUser(CurrentUser node, Object context)
         {
-            FunctionCall functionCall = DesugarCurrentUser.getCall(node);
+            FunctionCall functionCall = new FunctionCall(QualifiedName.of("$current_user"), ImmutableList.of());
             addGeneratedExpressionType(functionCall, type(node));
             return visitFunctionCall(functionCall, context);
         }

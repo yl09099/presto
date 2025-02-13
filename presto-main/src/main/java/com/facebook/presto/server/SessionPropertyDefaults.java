@@ -15,7 +15,7 @@ package com.facebook.presto.server;
 
 import com.facebook.airlift.log.Logger;
 import com.facebook.airlift.node.NodeInfo;
-import com.facebook.presto.Session;
+import com.facebook.presto.client.NodeVersion;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
 import com.facebook.presto.spi.resourceGroups.SessionPropertyConfigurationManagerContext;
 import com.facebook.presto.spi.session.SessionConfigurationContext;
@@ -34,11 +34,13 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.facebook.presto.Session.SessionBuilder;
 import static com.facebook.presto.util.PropertiesUtil.loadProperties;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
 
 public class SessionPropertyDefaults
 {
@@ -49,11 +51,13 @@ public class SessionPropertyDefaults
     private final SessionPropertyConfigurationManagerContext configurationManagerContext;
     private final Map<String, SessionPropertyConfigurationManagerFactory> factories = new ConcurrentHashMap<>();
     private final AtomicReference<SessionPropertyConfigurationManager> delegate = new AtomicReference<>();
+    private final String prestoServerVersion;
 
     @Inject
-    public SessionPropertyDefaults(NodeInfo nodeInfo)
+    public SessionPropertyDefaults(NodeInfo nodeInfo, NodeVersion nodeVersion)
     {
         this.configurationManagerContext = new SessionPropertyConfigurationManagerContextInstance(nodeInfo.getEnvironment());
+        this.prestoServerVersion = requireNonNull(nodeVersion.getVersion(), "prestoServerVersion is null");
     }
 
     public void addConfigurationManagerFactory(SessionPropertyConfigurationManagerFactory sessionConfigFactory)
@@ -102,26 +106,28 @@ public class SessionPropertyDefaults
         log.info("-- Loaded session property configuration manager %s --", configManagerName);
     }
 
-    public Session newSessionWithDefaultProperties(
-            Session session,
+    public void applyDefaultProperties(
+            SessionBuilder sessionBuilder,
             Optional<String> queryType,
             Optional<ResourceGroupId> resourceGroupId)
     {
         SessionPropertyConfigurationManager configurationManager = delegate.get();
         if (configurationManager == null) {
-            return session;
+            return;
         }
 
         SessionConfigurationContext context = new SessionConfigurationContext(
-                session.getIdentity().getUser(),
-                session.getSource(),
-                session.getClientTags(),
+                sessionBuilder.getIdentity().getUser(),
+                sessionBuilder.getSchema(),
+                sessionBuilder.getSource(),
+                sessionBuilder.getClientTags(),
                 queryType,
                 resourceGroupId,
-                session.getClientInfo());
+                sessionBuilder.getClientInfo(),
+                prestoServerVersion);
 
         SystemSessionPropertyConfiguration systemPropertyConfiguration = configurationManager.getSystemSessionProperties(context);
         Map<String, Map<String, String>> catalogPropertyOverrides = configurationManager.getCatalogSessionProperties(context);
-        return session.withDefaultProperties(systemPropertyConfiguration, catalogPropertyOverrides);
+        sessionBuilder.applyDefaultProperties(systemPropertyConfiguration, catalogPropertyOverrides);
     }
 }

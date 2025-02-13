@@ -217,6 +217,10 @@ public class TaskResourceUtils
                 operatorStats.getPlanNodeId(),
                 operatorStats.getOperatorType(),
                 operatorStats.getTotalDrivers(),
+                operatorStats.getIsBlockedCalls(),
+                operatorStats.getIsBlockedWall(),
+                operatorStats.getIsBlockedCpu(),
+                operatorStats.getIsBlockedAllocation(),
                 operatorStats.getAddInputCalls(),
                 operatorStats.getAddInputWall(),
                 operatorStats.getAddInputCpu(),
@@ -248,7 +252,12 @@ public class TaskResourceUtils
                 operatorStats.getSpilledDataSize(),
                 operatorStats.getBlockedReason(),
                 operatorStats.getRuntimeStats(),
-                convertToOperatorInfoUnion(operatorStats.getInfo()));
+                operatorStats.getDynamicFilterStats(),
+                convertToOperatorInfoUnion(operatorStats.getInfo()),
+                operatorStats.getNullJoinBuildKeyCount(),
+                operatorStats.getJoinBuildKeyCount(),
+                operatorStats.getNullJoinProbeKeyCount(),
+                operatorStats.getJoinProbeKeyCount());
     }
 
     private static MetadataUpdates convertToThriftMetadataUpdates(
@@ -447,6 +456,10 @@ public class TaskResourceUtils
                 thriftOperatorStats.getPlanNodeId(),
                 thriftOperatorStats.getOperatorType(),
                 thriftOperatorStats.getTotalDrivers(),
+                thriftOperatorStats.getIsBlockedCalls(),
+                thriftOperatorStats.getIsBlockedWall(),
+                thriftOperatorStats.getIsBlockedCpu(),
+                thriftOperatorStats.getIsBlockedAllocation(),
                 thriftOperatorStats.getAddInputCalls(),
                 thriftOperatorStats.getAddInputWall(),
                 thriftOperatorStats.getAddInputCpu(),
@@ -478,7 +491,12 @@ public class TaskResourceUtils
                 thriftOperatorStats.getSpilledDataSize(),
                 thriftOperatorStats.getBlockedReason(),
                 convertToOperatorInfo(thriftOperatorStats.getInfoUnion()),
-                thriftOperatorStats.getRuntimeStats());
+                thriftOperatorStats.getRuntimeStats(),
+                thriftOperatorStats.getDynamicFilterStats(),
+                thriftOperatorStats.getNullJoinBuildKeyCount(),
+                thriftOperatorStats.getJoinBuildKeyCount(),
+                thriftOperatorStats.getNullJoinProbeKeyCount(),
+                thriftOperatorStats.getJoinProbeKeyCount());
     }
 
     private static MetadataUpdates convertFromThriftMetadataUpdates(

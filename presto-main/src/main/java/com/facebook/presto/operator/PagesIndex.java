@@ -58,6 +58,7 @@ import static com.facebook.presto.operator.SyntheticAddress.decodePosition;
 import static com.facebook.presto.operator.SyntheticAddress.decodeSliceIndex;
 import static com.facebook.presto.operator.SyntheticAddress.encodeSyntheticAddress;
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.airlift.units.DataSize.Unit.BYTE;
@@ -81,7 +82,6 @@ public class PagesIndex
     private final OrderingCompiler orderingCompiler;
     private final JoinCompiler joinCompiler;
     private final FunctionAndTypeManager functionAndTypeManager;
-    private final boolean groupByUsesEqualTo;
 
     private final List<Type> types;
     private final AdaptiveLongBigArray valueAddresses;
@@ -97,7 +97,6 @@ public class PagesIndex
             OrderingCompiler orderingCompiler,
             JoinCompiler joinCompiler,
             FunctionAndTypeManager functionAndTypeManager,
-            boolean groupByUsesEqualTo,
             List<Type> types,
             int expectedPositions,
             boolean eagerCompact)
@@ -105,7 +104,6 @@ public class PagesIndex
         this.orderingCompiler = requireNonNull(orderingCompiler, "orderingCompiler is null");
         this.joinCompiler = requireNonNull(joinCompiler, "joinCompiler is null");
         this.functionAndTypeManager = requireNonNull(functionAndTypeManager, "functionManager is null");
-        this.groupByUsesEqualTo = groupByUsesEqualTo;
         this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
         this.valueAddresses = new AdaptiveLongBigArray();
         this.valueAddresses.ensureCapacity(expectedPositions);
@@ -129,8 +127,7 @@ public class PagesIndex
             implements Factory
     {
         private static final OrderingCompiler ORDERING_COMPILER = new OrderingCompiler();
-        private static final JoinCompiler JOIN_COMPILER = new JoinCompiler(MetadataManager.createTestMetadataManager(), new FeaturesConfig());
-        private final boolean groupByUsesEqualTo = new FeaturesConfig().isGroupByUsesEqualTo();
+        private static final JoinCompiler JOIN_COMPILER = new JoinCompiler(MetadataManager.createTestMetadataManager());
         private final boolean eagerCompact;
 
         public TestingFactory(boolean eagerCompact)
@@ -141,7 +138,7 @@ public class PagesIndex
         @Override
         public PagesIndex newPagesIndex(List<Type> types, int expectedPositions)
         {
-            return new PagesIndex(ORDERING_COMPILER, JOIN_COMPILER, MetadataManager.createTestMetadataManager().getFunctionAndTypeManager(), groupByUsesEqualTo, types, expectedPositions, eagerCompact);
+            return new PagesIndex(ORDERING_COMPILER, JOIN_COMPILER, MetadataManager.createTestMetadataManager().getFunctionAndTypeManager(), types, expectedPositions, eagerCompact);
         }
     }
 
@@ -152,7 +149,6 @@ public class PagesIndex
         private final JoinCompiler joinCompiler;
         private final boolean eagerCompact;
         private final FunctionAndTypeManager functionAndTypeManager;
-        private final boolean groupByUsesEqualTo;
 
         @Inject
         public DefaultFactory(OrderingCompiler orderingCompiler, JoinCompiler joinCompiler, FeaturesConfig featuresConfig, Metadata metadata)
@@ -161,13 +157,12 @@ public class PagesIndex
             this.joinCompiler = requireNonNull(joinCompiler, "joinCompiler is null");
             this.eagerCompact = requireNonNull(featuresConfig, "featuresConfig is null").isPagesIndexEagerCompactionEnabled();
             this.functionAndTypeManager = requireNonNull(metadata, "metadata is null").getFunctionAndTypeManager();
-            this.groupByUsesEqualTo = featuresConfig.isGroupByUsesEqualTo();
         }
 
         @Override
         public PagesIndex newPagesIndex(List<Type> types, int expectedPositions)
         {
-            return new PagesIndex(orderingCompiler, joinCompiler, functionAndTypeManager, groupByUsesEqualTo, types, expectedPositions, eagerCompact);
+            return new PagesIndex(orderingCompiler, joinCompiler, functionAndTypeManager, types, expectedPositions, eagerCompact);
         }
     }
 
@@ -434,13 +429,18 @@ public class PagesIndex
         // if compilation fails, use interpreter
         return new SimplePagesHashStrategy(
                 types,
-                outputChannels.orElse(rangeList(types.size())),
+                outputChannels.orElseGet(() -> rangeList(types.size())),
                 ImmutableList.copyOf(channels),
                 joinChannels,
                 hashChannel,
                 Optional.empty(),
-                functionAndTypeManager,
-                groupByUsesEqualTo);
+                functionAndTypeManager);
+    }
+
+    public PagesIndexComparator createChannelComparator(int leftChannel, int rightChannel, SortOrder sortOrder)
+    {
+        checkArgument(types.get(leftChannel).equals(types.get(rightChannel)), "comparing channels of different types: %s and %s", types.get(leftChannel), types.get(rightChannel));
+        return new SimpleChannelComparator(leftChannel, rightChannel, types.get(leftChannel), sortOrder);
     }
 
     public LookupSourceSupplier createLookupSourceSupplier(
@@ -505,13 +505,12 @@ public class PagesIndex
         // if compilation fails
         PagesHashStrategy hashStrategy = new SimplePagesHashStrategy(
                 types,
-                outputChannels.orElse(rangeList(types.size())),
+                outputChannels.orElseGet(() -> rangeList(types.size())),
                 channels,
                 joinChannels,
                 hashChannel,
                 sortChannel,
-                functionAndTypeManager,
-                groupByUsesEqualTo);
+                functionAndTypeManager);
 
         return new JoinHashSupplier(
                 session,

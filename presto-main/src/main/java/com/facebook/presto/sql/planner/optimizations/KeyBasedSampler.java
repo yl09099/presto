@@ -14,6 +14,7 @@
 package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.common.function.OperatorType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.common.type.Varchars;
@@ -21,26 +22,26 @@ import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.PrestoWarning;
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.DistinctLimitNode;
+import com.facebook.presto.spi.plan.EquiJoinClause;
 import com.facebook.presto.spi.plan.FilterNode;
+import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.spi.plan.SemiJoinNode;
 import com.facebook.presto.spi.plan.TableScanNode;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.ConstantExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.parser.SqlParser;
-import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.facebook.presto.sql.planner.TypeProvider;
-import com.facebook.presto.sql.planner.plan.JoinNode;
 import com.facebook.presto.sql.planner.plan.RowNumberNode;
-import com.facebook.presto.sql.planner.plan.SemiJoinNode;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
 import com.facebook.presto.sql.planner.plan.TopNRowNumberNode;
-import com.facebook.presto.sql.planner.plan.WindowNode;
 import com.facebook.presto.type.TypeUtils;
 import com.google.common.collect.ImmutableList;
 
@@ -54,6 +55,7 @@ import static com.facebook.presto.SystemSessionProperties.isKeyBasedSamplingEnab
 import static com.facebook.presto.common.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.common.type.DoubleType.DOUBLE;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
+import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.JAVA_BUILTIN_NAMESPACE;
 import static com.facebook.presto.metadata.CastType.CAST;
 import static com.facebook.presto.spi.StandardErrorCode.FUNCTION_NOT_FOUND;
 import static com.facebook.presto.spi.StandardWarningCode.SAMPLED_FIELDS;
@@ -68,29 +70,45 @@ public class KeyBasedSampler
         implements PlanOptimizer
 {
     private final Metadata metadata;
+    private boolean isEnabledForTesting;
 
-    public KeyBasedSampler(Metadata metadata, SqlParser sqlParser)
+    public KeyBasedSampler(Metadata metadata)
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, PlanVariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public void setEnabledForTesting(boolean isSet)
     {
-        if (isKeyBasedSamplingEnabled(session)) {
+        isEnabledForTesting = isSet;
+    }
+
+    @Override
+    public boolean isEnabled(Session session)
+    {
+        return isEnabledForTesting || isKeyBasedSamplingEnabled(session);
+    }
+
+    @Override
+    public PlanOptimizerResult optimize(PlanNode plan, Session session, TypeProvider types, VariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    {
+        if (isEnabled(session)) {
             List<String> sampledFields = new ArrayList<>(2);
             PlanNode rewritten = SimplePlanRewriter.rewriteWith(new Rewriter(session, metadata.getFunctionAndTypeManager(), idAllocator, sampledFields), plan, null);
-            if (!sampledFields.isEmpty()) {
-                warningCollector.add(new PrestoWarning(SAMPLED_FIELDS, String.format("Sampled the following columns/derived columns at %s percent:\n\t%s", getKeyBasedSamplingPercentage(session) * 100., String.join("\n\t", sampledFields))));
-            }
-            else {
-                warningCollector.add(new PrestoWarning(SEMANTIC_WARNING, "Sampling could not be performed due to the query structure"));
+
+            if (!isEnabledForTesting) {
+                if (!sampledFields.isEmpty()) {
+                    warningCollector.add(new PrestoWarning(SAMPLED_FIELDS, String.format("Sampled the following columns/derived columns at %s percent:%n\t%s", getKeyBasedSamplingPercentage(session) * 100., String.join("\n\t", sampledFields))));
+                }
+                else {
+                    warningCollector.add(new PrestoWarning(SEMANTIC_WARNING, "Sampling could not be performed due to the query structure"));
+                }
             }
 
-            return rewritten;
+            return PlanOptimizerResult.optimizerResult(rewritten, true);
         }
 
-        return plan;
+        return PlanOptimizerResult.optimizerResult(plan, false);
     }
 
     private static class Rewriter
@@ -132,9 +150,9 @@ public class KeyBasedSampler
             try {
                 sampledArg = call(
                         functionAndTypeManager,
-                        getKeyBasedSamplingFunction(session),
+                        QualifiedObjectName.valueOf(JAVA_BUILTIN_NAMESPACE, getKeyBasedSamplingFunction(session)),
                         DOUBLE,
-                        arg);
+                        ImmutableList.of(arg));
             }
             catch (PrestoException prestoException) {
                 throw new PrestoException(FUNCTION_NOT_FOUND, String.format("Sampling function: %s not cannot be resolved", getKeyBasedSamplingFunction(session)), prestoException);
@@ -161,7 +179,7 @@ public class KeyBasedSampler
                 tableName = ((TableScanNode) tableScanNode).getTable().getConnectorHandle().toString();
             }
             else {
-                tableName = "plan node: " + String.valueOf(tableScanNode.getId());
+                tableName = "plan node: " + tableScanNode.getId();
             }
 
             sampledFields.add(String.format("%s from %s", rowExpression, tableName));
@@ -211,7 +229,7 @@ public class KeyBasedSampler
 
                 // Find the best equijoin clause so we sample both sides the same way optimally
                 // First see if there is a int/bigint key
-                Optional<JoinNode.EquiJoinClause> equiJoinClause = node.getCriteria().stream()
+                Optional<EquiJoinClause> equiJoinClause = node.getCriteria().stream()
                         .filter(x -> TypeUtils.isIntegralType(x.getLeft().getType().getTypeSignature(), functionAndTypeManager))
                         .findFirst();
                 if (!equiJoinClause.isPresent()) {

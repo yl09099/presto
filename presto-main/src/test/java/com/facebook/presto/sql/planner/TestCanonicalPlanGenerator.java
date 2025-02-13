@@ -22,6 +22,9 @@ import com.facebook.presto.common.type.TestingTypeDeserializer;
 import com.facebook.presto.common.type.TestingTypeManager;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.plan.Partitioning;
+import com.facebook.presto.spi.plan.PartitioningHandle;
+import com.facebook.presto.spi.plan.PartitioningScheme;
 import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.sql.planner.CanonicalTableScanNode.CanonicalTableHandle;
 import com.facebook.presto.sql.planner.assertions.BasePlanTest;
@@ -38,10 +41,11 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.CONNECTOR;
-import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.REMOVE_SAFE_CONSTANTS;
+import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.IGNORE_SAFE_CONSTANTS;
+import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.IGNORE_SCAN_CONSTANTS;
+import static com.facebook.presto.sql.Optimizer.PlanStage.OPTIMIZED_AND_VALIDATED;
 import static com.facebook.presto.sql.planner.CanonicalPlanGenerator.generateCanonicalPlan;
 import static com.facebook.presto.sql.planner.CanonicalPlanGenerator.generateCanonicalPlanFragment;
-import static com.facebook.presto.sql.planner.LogicalPlanner.Stage.OPTIMIZED_AND_VALIDATED;
 import static com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
@@ -175,14 +179,17 @@ public class TestCanonicalPlanGenerator
         assertDifferentCanonicalLeafSubPlan("SELECT totalprice FROM orders", "SELECT orderkey, totalprice FROM orders");
         assertDifferentCanonicalLeafSubPlan("SELECT * FROM orders", "SELECT orderkey, totalprice FROM orders");
     }
+
     @Test
     public void testTableScanAndProjectWithStrategy()
             throws Exception
     {
         assertSameCanonicalLeafPlan("SELECT 1 from orders", "SELECT 1 from orders", CONNECTOR);
         assertDifferentCanonicalLeafPlan("SELECT 1 from orders", "SELECT 2 from orders", CONNECTOR);
-        assertSameCanonicalLeafPlan("SELECT 1 from orders", "SELECT 2 from orders", REMOVE_SAFE_CONSTANTS);
-        assertSameCanonicalLeafPlan("SELECT CAST(1 AS VARCHAR) from orders", "SELECT CAST(2 AS VARCHAR) from orders", REMOVE_SAFE_CONSTANTS);
+        assertSameCanonicalLeafPlan("SELECT 1 from orders", "SELECT 2 from orders", IGNORE_SAFE_CONSTANTS);
+        assertSameCanonicalLeafPlan("SELECT CAST(1 AS VARCHAR) from orders", "SELECT CAST(2 AS VARCHAR) from orders", IGNORE_SAFE_CONSTANTS);
+        assertSameCanonicalLeafPlan("SELECT 1 from orders", "SELECT 2 from orders", IGNORE_SCAN_CONSTANTS);
+        assertSameCanonicalLeafPlan("SELECT CAST(1 AS VARCHAR) from orders", "SELECT CAST(2 AS VARCHAR) from orders", IGNORE_SCAN_CONSTANTS);
 
         assertSameCanonicalLeafPlan(
                 "SELECT totalprice, custkey + (totalprice / 10) from orders",
@@ -195,7 +202,11 @@ public class TestCanonicalPlanGenerator
         assertSameCanonicalLeafPlan(
                 "SELECT totalprice, custkey + (totalprice / 10) from orders",
                 "SELECT custkey + (totalprice / 5), totalprice from orders",
-                REMOVE_SAFE_CONSTANTS);
+                IGNORE_SAFE_CONSTANTS);
+        assertSameCanonicalLeafPlan(
+                "SELECT totalprice, custkey + (totalprice / 10) from orders",
+                "SELECT custkey + (totalprice / 5), totalprice from orders",
+                IGNORE_SCAN_CONSTANTS);
     }
 
     @Test
@@ -213,7 +224,11 @@ public class TestCanonicalPlanGenerator
         assertDifferentCanonicalLeafPlan(
                 "SELECT totalprice from orders WHERE custkey > 100 AND custkey < 120",
                 "SELECT totalprice from orders WHERE custkey > 100 AND custkey < 110",
-                REMOVE_SAFE_CONSTANTS);
+                IGNORE_SAFE_CONSTANTS);
+        assertDifferentCanonicalLeafPlan(
+                "SELECT totalprice from orders WHERE custkey > 100 AND custkey < 120",
+                "SELECT totalprice from orders WHERE custkey > 100 AND custkey < 110",
+                IGNORE_SCAN_CONSTANTS);
 
         assertSameCanonicalLeafPlan(
                 "SELECT totalprice from orders WHERE custkey IN (10,20,30)",
@@ -222,11 +237,19 @@ public class TestCanonicalPlanGenerator
         assertDifferentCanonicalLeafPlan(
                 "SELECT totalprice from orders WHERE custkey IN (10,20,30)",
                 "SELECT totalprice from orders WHERE custkey IN (10,30,40)",
-                REMOVE_SAFE_CONSTANTS);
+                IGNORE_SAFE_CONSTANTS);
         assertSameCanonicalLeafPlan(
                 "SELECT totalprice, CAST(3 AS VARCHAR) from orders WHERE custkey > 100 AND custkey < 120",
                 "SELECT totalprice, CAST(2 AS VARCHAR) as x from orders WHERE custkey > 100 AND custkey < 120",
-                REMOVE_SAFE_CONSTANTS);
+                IGNORE_SAFE_CONSTANTS);
+        assertDifferentCanonicalLeafPlan(
+                "SELECT totalprice from orders WHERE custkey IN (10,20,30)",
+                "SELECT totalprice from orders WHERE custkey IN (10,30,40)",
+                IGNORE_SCAN_CONSTANTS);
+        assertSameCanonicalLeafPlan(
+                "SELECT totalprice, CAST(3 AS VARCHAR) from orders WHERE custkey > 100 AND custkey < 120",
+                "SELECT totalprice, CAST(2 AS VARCHAR) as x from orders WHERE custkey > 100 AND custkey < 120",
+                IGNORE_SCAN_CONSTANTS);
     }
 
     private static List<SubPlan> getLeafSubPlans(SubPlan subPlan)
@@ -257,7 +280,7 @@ public class TestCanonicalPlanGenerator
                 false);
         List<CanonicalPlanFragment> leafCanonicalPlans = getLeafSubPlans(subplan).stream()
                 .map(SubPlan::getFragment)
-                .map(fragment -> generateCanonicalPlanFragment(fragment.getRoot(), fragment.getPartitioningScheme()))
+                .map(fragment -> generateCanonicalPlanFragment(fragment.getRoot(), fragment.getPartitioningScheme(), objectMapper, getQueryRunner().getDefaultSession()))
                 .map(Optional::get)
                 .collect(Collectors.toList());
         assertEquals(leafCanonicalPlans.size(), 2);
@@ -272,8 +295,8 @@ public class TestCanonicalPlanGenerator
     {
         PlanFragment fragment1 = getOnlyElement(getLeafSubPlans(subplan(sql1, OPTIMIZED_AND_VALIDATED, false))).getFragment();
         PlanFragment fragment2 = getOnlyElement(getLeafSubPlans(subplan(sql2, OPTIMIZED_AND_VALIDATED, false))).getFragment();
-        Optional<CanonicalPlanFragment> canonicalPlan1 = generateCanonicalPlanFragment(fragment1.getRoot(), fragment1.getPartitioningScheme());
-        Optional<CanonicalPlanFragment> canonicalPlan2 = generateCanonicalPlanFragment(fragment2.getRoot(), fragment2.getPartitioningScheme());
+        Optional<CanonicalPlanFragment> canonicalPlan1 = generateCanonicalPlanFragment(fragment1.getRoot(), fragment1.getPartitioningScheme(), objectMapper, getQueryRunner().getDefaultSession());
+        Optional<CanonicalPlanFragment> canonicalPlan2 = generateCanonicalPlanFragment(fragment2.getRoot(), fragment2.getPartitioningScheme(), objectMapper, getQueryRunner().getDefaultSession());
         assertTrue(canonicalPlan1.isPresent());
         assertTrue(canonicalPlan2.isPresent());
         assertNotEquals(objectMapper.writeValueAsString(canonicalPlan1), objectMapper.writeValueAsString(canonicalPlan2));
@@ -288,7 +311,7 @@ public class TestCanonicalPlanGenerator
                 false);
         List<CanonicalPlan> leafCanonicalPlans = getLeafSubPlans(subplan).stream()
                 .map(SubPlan::getFragment)
-                .map(fragment -> generateCanonicalPlan(fragment.getRoot(), strategy))
+                .map(fragment -> generateCanonicalPlan(fragment.getRoot(), strategy, objectMapper, getQueryRunner().getDefaultSession()))
                 .map(Optional::get)
                 .collect(Collectors.toList());
         assertEquals(leafCanonicalPlans.size(), 2);
@@ -303,8 +326,8 @@ public class TestCanonicalPlanGenerator
     {
         PlanFragment fragment1 = getOnlyElement(getLeafSubPlans(subplan(sql1, OPTIMIZED_AND_VALIDATED, false))).getFragment();
         PlanFragment fragment2 = getOnlyElement(getLeafSubPlans(subplan(sql2, OPTIMIZED_AND_VALIDATED, false))).getFragment();
-        Optional<CanonicalPlan> canonicalPlan1 = generateCanonicalPlan(fragment1.getRoot(), strategy);
-        Optional<CanonicalPlan> canonicalPlan2 = generateCanonicalPlan(fragment2.getRoot(), strategy);
+        Optional<CanonicalPlan> canonicalPlan1 = generateCanonicalPlan(fragment1.getRoot(), strategy, objectMapper, getQueryRunner().getDefaultSession());
+        Optional<CanonicalPlan> canonicalPlan2 = generateCanonicalPlan(fragment2.getRoot(), strategy, objectMapper, getQueryRunner().getDefaultSession());
         assertTrue(canonicalPlan1.isPresent());
         assertTrue(canonicalPlan2.isPresent());
         assertNotEquals(objectMapper.writeValueAsString(canonicalPlan1), objectMapper.writeValueAsString(canonicalPlan2));
@@ -323,7 +346,7 @@ public class TestCanonicalPlanGenerator
                         .filter(f -> !f.isSynthetic())
                         .map(Field::getName)
                         .collect(toImmutableSet()),
-                ImmutableSet.of("partitioning", "outputLayout", "hashColumn", "replicateNullsAndAny", "bucketToPartition"));
+                ImmutableSet.of("partitioning", "outputLayout", "hashColumn", "replicateNullsAndAny", "scaleWriters", "encoding", "bucketToPartition"));
         assertEquals(
                 Arrays.stream(Partitioning.class.getDeclaredFields())
                         .filter(f -> !f.isSynthetic())
@@ -352,7 +375,7 @@ public class TestCanonicalPlanGenerator
                         .filter(f -> !f.isSynthetic())
                         .map(Field::getName)
                         .collect(toImmutableSet()),
-                ImmutableSet.of("table", "assignments", "outputVariables", "currentConstraint", "enforcedConstraint", "tableConstraints"));
+                ImmutableSet.of("table", "assignments", "outputVariables", "currentConstraint", "enforcedConstraint", "tableConstraints", "cteMaterializationInfo"));
         assertEquals(
                 Arrays.stream(CanonicalTableScanNode.class.getDeclaredFields())
                         .filter(f -> !f.isSynthetic())

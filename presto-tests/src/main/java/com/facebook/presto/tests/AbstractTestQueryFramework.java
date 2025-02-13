@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.tests;
 
+import com.facebook.airlift.node.NodeInfo;
 import com.facebook.presto.Session;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.cost.CostCalculator;
@@ -21,11 +22,15 @@ import com.facebook.presto.cost.CostCalculatorWithEstimatedExchanges;
 import com.facebook.presto.cost.CostComparator;
 import com.facebook.presto.cost.TaskCountEstimator;
 import com.facebook.presto.execution.QueryManagerConfig;
+import com.facebook.presto.execution.TaskManagerConfig;
+import com.facebook.presto.metadata.InMemoryNodeManager;
 import com.facebook.presto.metadata.Metadata;
+import com.facebook.presto.nodeManager.PluginNodeManager;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.security.AccessDeniedException;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.analyzer.QueryExplainer;
+import com.facebook.presto.sql.expressions.ExpressionOptimizerManager;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.PartitioningProviderManager;
 import com.facebook.presto.sql.planner.Plan;
@@ -41,6 +46,7 @@ import com.facebook.presto.testing.ExpectedQueryRunner;
 import com.facebook.presto.testing.MaterializedResult;
 import com.facebook.presto.testing.QueryRunner;
 import com.facebook.presto.testing.TestingAccessControlManager.TestingPrivilege;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
@@ -57,9 +63,9 @@ import java.util.OptionalLong;
 import java.util.function.Consumer;
 
 import static com.facebook.airlift.testing.Closeables.closeAllRuntimeException;
-import static com.facebook.presto.sql.ParsingUtil.createParsingOptions;
 import static com.facebook.presto.sql.SqlFormatter.formatSql;
 import static com.facebook.presto.transaction.TransactionBuilder.transaction;
+import static com.facebook.presto.util.AnalyzerUtil.createParsingOptions;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.nullToEmpty;
@@ -67,10 +73,13 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.String.format;
 import static java.util.Collections.emptyList;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
 public abstract class AbstractTestQueryFramework
 {
+    private static final NodeInfo NODE_INFO = new NodeInfo("test");
     private QueryRunner queryRunner;
     private ExpectedQueryRunner expectedQueryRunner;
     private SqlParser sqlParser;
@@ -82,7 +91,10 @@ public abstract class AbstractTestQueryFramework
         queryRunner = createQueryRunner();
         expectedQueryRunner = createExpectedQueryRunner();
         sqlParser = new SqlParser();
+        createTables();
     }
+
+    protected void createTables() {}
 
     protected abstract QueryRunner createQueryRunner()
             throws Exception;
@@ -91,6 +103,16 @@ public abstract class AbstractTestQueryFramework
             throws Exception
     {
         return new H2QueryRunner();
+    }
+
+    protected ObjectMapper createObjectMapper()
+    {
+        return new ObjectMapper();
+    }
+
+    protected FeaturesConfig createFeaturesConfig()
+    {
+        return new FeaturesConfig().setOptimizeHashGeneration(true);
     }
 
     @AfterClass(alwaysRun = true)
@@ -133,6 +155,16 @@ public abstract class AbstractTestQueryFramework
         return computeActual(session, sql).getOnlyValue();
     }
 
+    protected MaterializedResult computeActual(QueryRunner queryRunner, Session session, @Language("SQL") String sql)
+    {
+        return queryRunner.execute(session, sql).toTestTypes();
+    }
+
+    protected Object computeScalarExpected(Session session, @Language("SQL") String sql)
+    {
+        return computeActual((QueryRunner) expectedQueryRunner, session, sql).getOnlyValue();
+    }
+
     protected void assertQuery(@Language("SQL") String sql)
     {
         assertQuery(getSession(), sql);
@@ -146,6 +178,35 @@ public abstract class AbstractTestQueryFramework
     protected void assertQuery(@Language("SQL") String actual, @Language("SQL") String expected)
     {
         QueryAssertions.assertQuery(queryRunner, getSession(), actual, expectedQueryRunner, expected, false, false);
+    }
+
+    protected void assertQueryWithSameQueryRunner(@Language("SQL") String actual, @Language("SQL") String expected)
+    {
+        checkArgument(!actual.equals(expected));
+        QueryAssertions.assertQuery(queryRunner, getSession(), actual, queryRunner, expected, false, false);
+    }
+
+    protected void assertQueryWithSameQueryRunner(Session session, @Language("SQL") String actual, @Language("SQL") String expected)
+    {
+        checkArgument(!actual.equals(expected));
+        QueryAssertions.assertQuery(queryRunner, session, actual, queryRunner, expected, false, false);
+    }
+
+    protected void assertQueryOrderedWithSameQueryRunner(@Language("SQL") String actual, @Language("SQL") String expected)
+    {
+        checkArgument(!actual.equals(expected));
+        QueryAssertions.assertQuery(queryRunner, getSession(), actual, queryRunner, expected, true, false);
+    }
+
+    protected void assertQueryWithSameQueryRunner(Session actualSession, @Language("SQL") String query, Session expectedSession)
+    {
+        QueryAssertions.assertQuery(queryRunner, actualSession, query, queryRunner, expectedSession, query, false, false);
+    }
+
+    protected void assertQueryWithSameQueryRunner(Session actualSession, @Language("SQL") String actual, Session expectedSession, @Language("SQL") String expected)
+    {
+        checkArgument(!actual.equals(expected));
+        QueryAssertions.assertQuery(queryRunner, actualSession, actual, queryRunner, expectedSession, expected, false, false);
     }
 
     protected void assertQuery(Session session, @Language("SQL") String actual, @Language("SQL") String expected)
@@ -225,6 +286,11 @@ public abstract class AbstractTestQueryFramework
         QueryAssertions.assertUpdate(queryRunner, session, sql, OptionalLong.of(count), Optional.of(planAssertion));
     }
 
+    protected void assertUpdateExpected(Session session, @Language("SQL") String sql, long count)
+    {
+        QueryAssertions.assertUpdate((QueryRunner) expectedQueryRunner, session, sql, OptionalLong.of(count), Optional.empty());
+    }
+
     protected void assertQuerySucceeds(Session session, @Language("SQL") String sql)
     {
         QueryAssertions.assertQuerySucceeds(queryRunner, session, sql);
@@ -245,9 +311,29 @@ public abstract class AbstractTestQueryFramework
         QueryAssertions.assertQueryFails(queryRunner, getSession(), sql, expectedMessageRegExp);
     }
 
+    protected void assertQueryFails(QueryRunner queryRunner, @Language("SQL") String sql, @Language("RegExp") String expectedMessageRegExp)
+    {
+        QueryAssertions.assertQueryFails(queryRunner, getSession(), sql, expectedMessageRegExp);
+    }
+
     protected void assertQueryFails(Session session, @Language("SQL") String sql, @Language("RegExp") String expectedMessageRegExp)
     {
         QueryAssertions.assertQueryFails(queryRunner, session, sql, expectedMessageRegExp);
+    }
+
+    protected void assertQueryError(QueryRunner queryRunner, Session session, @Language("SQL") String sql, @Language("RegExp") String expectedMessageRegExp)
+    {
+        try {
+            queryRunner.execute(session, sql);
+        }
+        catch (AssertionError e) {
+            assertErrorMessage(sql, e, expectedMessageRegExp);
+        }
+    }
+
+    protected void assertQueryError(@Language("SQL") String sql, @Language("RegExp") String expectedMessageRegExp)
+    {
+        assertQueryError(queryRunner, getSession(), sql, expectedMessageRegExp);
     }
 
     protected void assertQueryReturnsEmptyResult(@Language("SQL") String sql)
@@ -318,6 +404,42 @@ public abstract class AbstractTestQueryFramework
     {
         if (!nullToEmpty(exception.getMessage()).matches(regex)) {
             fail(format("Expected exception message '%s' to match '%s' for query: %s", exception.getMessage(), regex, sql), exception);
+        }
+    }
+
+    protected void assertExplainAnalyze(@Language("SQL") String query)
+    {
+        String value = (String) computeActual(query).getOnlyValue();
+
+        assertTrue(value.matches("(?s:.*)CPU:.*, Input:.*, Output(?s:.*)"), format("Expected output to contain \"CPU:.*, Input:.*, Output\", but it is %s", value));
+
+        // TODO: check that rendered plan is as expected, once stats are collected in a consistent way
+        // assertTrue(value.contains("Cost: "), format("Expected output to contain \"Cost: \", but it is %s", value));
+    }
+
+    protected void assertCreateTableAsSelect(String table, @Language("SQL") String query, @Language("SQL") String rowCountQuery)
+    {
+        assertCreateTableAsSelect(getSession(), table, query, query, rowCountQuery);
+    }
+
+    protected void assertCreateTableAsSelect(String table, @Language("SQL") String query, @Language("SQL") String expectedQuery, @Language("SQL") String rowCountQuery)
+    {
+        assertCreateTableAsSelect(getSession(), table, query, expectedQuery, rowCountQuery);
+    }
+
+    protected void assertCreateTableAsSelect(Session session, String table, @Language("SQL") String query, @Language("SQL") String expectedQuery, @Language("SQL") String rowCountQuery)
+    {
+        assertUpdate(session, "CREATE TABLE " + table + " AS " + query, rowCountQuery);
+        assertQuery(session, "SELECT * FROM " + table, expectedQuery);
+        assertUpdate(session, "DROP TABLE " + table);
+
+        assertFalse(getQueryRunner().tableExists(session, table));
+    }
+
+    private static void assertErrorMessage(String sql, AssertionError error, @Language("RegExp") String regex)
+    {
+        if (!nullToEmpty(error.getMessage()).matches(regex)) {
+            fail(format("Expected error message '%s' to match '%s' for query: %s", error.getMessage(), regex, sql), error);
         }
     }
 
@@ -434,14 +556,14 @@ public abstract class AbstractTestQueryFramework
     private QueryExplainer getQueryExplainer()
     {
         Metadata metadata = queryRunner.getMetadata();
-        FeaturesConfig featuresConfig = new FeaturesConfig().setOptimizeHashGeneration(true);
-        boolean forceSingleNode = queryRunner.getNodeCount() == 1;
+        FeaturesConfig featuresConfig = createFeaturesConfig();
+        boolean noExchange = queryRunner.getNodeCount() == 1;
         TaskCountEstimator taskCountEstimator = new TaskCountEstimator(queryRunner::getNodeCount);
         CostCalculator costCalculator = new CostCalculatorUsingExchanges(taskCountEstimator);
         List<PlanOptimizer> optimizers = new PlanOptimizers(
                 metadata,
                 sqlParser,
-                forceSingleNode,
+                noExchange,
                 new MBeanExporter(new TestingMBeanServer()),
                 queryRunner.getSplitManager(),
                 queryRunner.getPlanOptimizerManager(),
@@ -451,17 +573,23 @@ public abstract class AbstractTestQueryFramework
                 new CostCalculatorWithEstimatedExchanges(costCalculator, taskCountEstimator),
                 new CostComparator(featuresConfig),
                 taskCountEstimator,
-                new PartitioningProviderManager()).getPlanningTimeOptimizers();
+                new PartitioningProviderManager(),
+                featuresConfig,
+                new ExpressionOptimizerManager(
+                        new PluginNodeManager(new InMemoryNodeManager()),
+                        queryRunner.getMetadata().getFunctionAndTypeManager()),
+                new TaskManagerConfig())
+                .getPlanningTimeOptimizers();
         return new QueryExplainer(
                 optimizers,
-                new PlanFragmenter(metadata, queryRunner.getNodePartitioningManager(), new QueryManagerConfig(), sqlParser, new FeaturesConfig()),
+                new PlanFragmenter(metadata, queryRunner.getNodePartitioningManager(), new QueryManagerConfig(), featuresConfig, queryRunner.getPlanCheckerProviderManager()),
                 metadata,
                 queryRunner.getAccessControl(),
                 sqlParser,
                 queryRunner.getStatsCalculator(),
                 costCalculator,
                 ImmutableMap.of(),
-                new PlanChecker(new FeaturesConfig(), false));
+                new PlanChecker(featuresConfig, false, queryRunner.getPlanCheckerProviderManager()));
     }
 
     protected static void skipTestUnless(boolean requirement)
@@ -477,14 +605,33 @@ public abstract class AbstractTestQueryFramework
         return queryRunner;
     }
 
+    protected DistributedQueryRunner getDistributedQueryRunner()
+    {
+        checkState(queryRunner != null, "queryRunner not set");
+        checkState(queryRunner instanceof DistributedQueryRunner, "queryRunner is not an instance of DistributedQueryRunner");
+        return (DistributedQueryRunner) queryRunner;
+    }
+
+    protected ExpectedQueryRunner getExpectedQueryRunner()
+    {
+        checkState(expectedQueryRunner != null, "expectedQueryRunner not set");
+        return expectedQueryRunner;
+    }
+
     public interface QueryRunnerSupplier
     {
         QueryRunner get()
                 throws Exception;
     }
+
     public interface ExpectedQueryRunnerSupplier
     {
         ExpectedQueryRunner get()
                 throws Exception;
+    }
+
+    public static void dropTableIfExists(QueryRunner queryRunner, String catalogName, String schemaName, String tableName)
+    {
+        queryRunner.execute(format("DROP TABLE IF EXISTS %s.%s.%s", catalogName, schemaName, tableName));
     }
 }

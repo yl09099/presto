@@ -32,6 +32,7 @@ import static io.airlift.tpch.TpchTable.getTables;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertThrows;
 
+@Test(singleThreaded = true)
 public class TestHiveDistributedQueriesWithExchangeMaterialization
         extends AbstractTestDistributedQueries
 {
@@ -60,7 +61,7 @@ public class TestHiveDistributedQueriesWithExchangeMaterialization
             HiveStorageFormat storageFormat,
             boolean usePageFileForHiveUnsupportedType)
     {
-        Session session = Session.builder(getSession())
+        Session session = sessionBuilderNoConstantGrouping()
                 .setCatalogSessionProperty("hive", "temporary_table_storage_format", storageFormat.name())
                 .setCatalogSessionProperty("hive", "use_pagefile_for_hive_unsupported_type", String.valueOf(usePageFileForHiveUnsupportedType))
                 .setSystemProperty(ENABLE_STATS_COLLECTION_FOR_TEMPORARY_TABLE, "true")
@@ -133,7 +134,7 @@ public class TestHiveDistributedQueriesWithExchangeMaterialization
             BucketFunctionType bucketFunctionType,
             boolean usePageFileForHiveUnsupportedType)
     {
-        Session session = Session.builder(getSession())
+        Session session = sessionBuilderNoConstantGrouping()
                 .setCatalogSessionProperty("hive", "temporary_table_storage_format", storageFormat.name())
                 .setCatalogSessionProperty("hive", "bucket_function_type_for_exchange", bucketFunctionType.name())
                 .setCatalogSessionProperty("hive", "use_pagefile_for_hive_unsupported_type", String.valueOf(usePageFileForHiveUnsupportedType))
@@ -171,10 +172,29 @@ public class TestHiveDistributedQueriesWithExchangeMaterialization
         assertUpdate("DROP TABLE IF EXISTS test_materialize_bucket_by_non_hive_types");
     }
 
+    // We need to disable optimize_constant_grouping_keys so Optimizer does NOT optimize
+    // [Aggregate() -> Project(add constant) -> TableScan()] ==> [Project(add constant) -> Aggregate() -> TableScan()]
+    // which will lead to type changes in materialized tables
+    private Session.SessionBuilder sessionBuilderNoConstantGrouping()
+    {
+        return Session.builder(getSession())
+                // We need to disable optimize_constant_grouping_keys so Optimizer does NOT optimize
+                // [Aggregate() -> Project(add constant) -> TableScan()] ==> [Project(add constant) -> Aggregate() -> TableScan()]
+                // which will lead to type changes in materialized tables
+                .setSystemProperty("optimize_constant_grouping_keys", "false")
+                .setSystemProperty("rewrite_expression_with_constant_expression", "false");
+    }
+
     @Override
     public void testDelete()
     {
         // Hive connector currently does not support row-by-row delete
+    }
+
+    @Override
+    public void testUpdate()
+    {
+        // Updates are not supported by the connector
     }
 
     @Override

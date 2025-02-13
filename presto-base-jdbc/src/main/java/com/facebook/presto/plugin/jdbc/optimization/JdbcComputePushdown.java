@@ -18,6 +18,7 @@ import com.facebook.presto.expressions.translator.TranslatedExpression;
 import com.facebook.presto.plugin.jdbc.JdbcTableHandle;
 import com.facebook.presto.plugin.jdbc.JdbcTableLayoutHandle;
 import com.facebook.presto.spi.ConnectorPlanOptimizer;
+import com.facebook.presto.spi.ConnectorPlanRewriter;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.VariableAllocator;
@@ -26,25 +27,24 @@ import com.facebook.presto.spi.function.StandardFunctionResolution;
 import com.facebook.presto.spi.plan.FilterNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
-import com.facebook.presto.spi.plan.PlanVisitor;
 import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.relation.DeterminismEvaluator;
-import com.facebook.presto.spi.relation.ExpressionOptimizer;
+import com.facebook.presto.spi.relation.ExpressionOptimizerProvider;
 import com.facebook.presto.spi.relation.RowExpression;
-import com.google.common.collect.ImmutableList;
 
 import java.util.Optional;
 import java.util.Set;
 
 import static com.facebook.presto.expressions.translator.FunctionTranslator.buildFunctionTranslator;
 import static com.facebook.presto.expressions.translator.RowExpressionTreeTranslator.translateWith;
+import static com.facebook.presto.spi.ConnectorPlanRewriter.rewriteWith;
 import static com.facebook.presto.spi.relation.ExpressionOptimizer.Level.OPTIMIZED;
 import static java.util.Objects.requireNonNull;
 
 public class JdbcComputePushdown
         implements ConnectorPlanOptimizer
 {
-    private final ExpressionOptimizer expressionOptimizer;
+    private final ExpressionOptimizerProvider expressionOptimizerProvider;
     private final JdbcFilterToSqlTranslator jdbcFilterToSqlTranslator;
     private final LogicalRowExpressions logicalRowExpressions;
 
@@ -52,7 +52,7 @@ public class JdbcComputePushdown
             FunctionMetadataManager functionMetadataManager,
             StandardFunctionResolution functionResolution,
             DeterminismEvaluator determinismEvaluator,
-            ExpressionOptimizer expressionOptimizer,
+            ExpressionOptimizerProvider expressionOptimizerProvider,
             String identifierQuote,
             Set<Class<?>> functionTranslators)
     {
@@ -62,7 +62,7 @@ public class JdbcComputePushdown
         requireNonNull(determinismEvaluator, "determinismEvaluator is null");
         requireNonNull(functionResolution, "functionResolution is null");
 
-        this.expressionOptimizer = requireNonNull(expressionOptimizer, "expressionOptimizer is null");
+        this.expressionOptimizerProvider = requireNonNull(expressionOptimizerProvider, "expressionOptimizerProvider is null");
         this.jdbcFilterToSqlTranslator = new JdbcFilterToSqlTranslator(
                 functionMetadataManager,
                 buildFunctionTranslator(functionTranslators),
@@ -80,42 +80,23 @@ public class JdbcComputePushdown
             VariableAllocator variableAllocator,
             PlanNodeIdAllocator idAllocator)
     {
-        return maxSubplan.accept(new Visitor(session, idAllocator), null);
+        return rewriteWith(new Rewriter(session, idAllocator), maxSubplan);
     }
 
-    private class Visitor
-            extends PlanVisitor<PlanNode, Void>
+    private class Rewriter
+            extends ConnectorPlanRewriter<Void>
     {
         private final ConnectorSession session;
         private final PlanNodeIdAllocator idAllocator;
 
-        public Visitor(ConnectorSession session, PlanNodeIdAllocator idAllocator)
+        public Rewriter(ConnectorSession session, PlanNodeIdAllocator idAllocator)
         {
             this.session = requireNonNull(session, "session is null");
             this.idAllocator = requireNonNull(idAllocator, "idAllocator is null");
         }
 
         @Override
-        public PlanNode visitPlan(PlanNode node, Void context)
-        {
-            ImmutableList.Builder<PlanNode> children = ImmutableList.builder();
-            boolean changed = false;
-            for (PlanNode child : node.getSources()) {
-                PlanNode newChild = child.accept(this, null);
-                if (newChild != child) {
-                    changed = true;
-                }
-                children.add(newChild);
-            }
-
-            if (!changed) {
-                return node;
-            }
-            return node.replaceChildren(children.build());
-        }
-
-        @Override
-        public PlanNode visitFilter(FilterNode node, Void context)
+        public PlanNode visitFilter(FilterNode node, RewriteContext<Void> context)
         {
             if (!(node.getSource() instanceof TableScanNode)) {
                 return node;
@@ -125,7 +106,7 @@ public class JdbcComputePushdown
             TableHandle oldTableHandle = oldTableScanNode.getTable();
             JdbcTableHandle oldConnectorTable = (JdbcTableHandle) oldTableHandle.getConnectorHandle();
 
-            RowExpression predicate = expressionOptimizer.optimize(node.getPredicate(), OPTIMIZED, session);
+            RowExpression predicate = expressionOptimizerProvider.getExpressionOptimizer(session).optimize(node.getPredicate(), OPTIMIZED, session);
             predicate = logicalRowExpressions.convertToConjunctiveNormalForm(predicate);
             TranslatedExpression<JdbcExpression> jdbcExpression = translateWith(
                     predicate,
@@ -158,7 +139,8 @@ public class JdbcComputePushdown
                     oldTableScanNode.getAssignments(),
                     oldTableScanNode.getTableConstraints(),
                     oldTableScanNode.getCurrentConstraint(),
-                    oldTableScanNode.getEnforcedConstraint());
+                    oldTableScanNode.getEnforcedConstraint(),
+                    oldTableScanNode.getCteMaterializationInfo());
 
             return new FilterNode(node.getSourceLocation(), idAllocator.getNextId(), newTableScanNode, node.getPredicate());
         }

@@ -37,6 +37,7 @@ import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.RowExpressionVisitor;
 import com.facebook.presto.spi.relation.SpecialFormExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
 
 import java.time.LocalDate;
@@ -51,6 +52,7 @@ import static com.facebook.presto.pinot.PinotErrorCode.PINOT_UNSUPPORTED_EXPRESS
 import static com.facebook.presto.pinot.PinotPushdownUtils.getLiteralAsString;
 import static com.facebook.presto.pinot.query.PinotExpression.derived;
 import static java.lang.String.format;
+import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -300,6 +302,83 @@ public class PinotFilterExpressionConverter
         throw new PinotException(PINOT_UNSUPPORTED_EXPRESSION, Optional.empty(), format("This type of CAST operator not supported. Received: %s", cast));
     }
 
+    private PinotExpression handleCoalesce(SpecialFormExpression coalesce, Function<VariableReferenceExpression, Selection> context)
+    {
+        // Translating COALESCE into CASE statement form as COALESCE is not supported in Pinot
+        // As of Pinot 0.11.0, IS NULL and IS NOT NULL special forms only support column name arguments
+        // To enable support, we work around this by parsing out the column name and using it in the CASE statement
+        // only for nested arguments that are
+        int numArguments = coalesce.getArguments().size();
+        return derived(format(
+                "CASE TRUE %s ELSE %s END",
+                coalesce.getArguments().subList(0, numArguments - 1).stream()
+                        .map(argument -> {
+                            String expression = getExpressionOrConstantString(argument, context);
+                            while (argument instanceof CallExpression) {
+                                if (((CallExpression) argument).getArguments().size() != 1) {
+                                    throw new PinotException(PINOT_UNSUPPORTED_EXPRESSION, Optional.empty(), format("Coalesce operator not supported: %s", coalesce));
+                                }
+                                argument = ((CallExpression) argument).getArguments().get(0);
+                            }
+                            if (argument instanceof VariableReferenceExpression) {
+                                if (Origin.TABLE_COLUMN != context.apply((VariableReferenceExpression) argument).getOrigin()) {
+                                    throw new PinotException(PINOT_UNSUPPORTED_EXPRESSION, Optional.empty(), format("Coalesce operator can not push down non-table column: %s", argument));
+                                }
+                            }
+                            else {
+                                throw new PinotException(PINOT_UNSUPPORTED_EXPRESSION, Optional.empty(), format("Coalesce operator does not support: %s", argument));
+                            }
+                            return format("WHEN %s IS NOT NULL THEN %s",
+                                    getExpressionOrConstantString(argument, context),
+                                    expression);
+                        }).collect(Collectors.joining(" ")),
+                getExpressionOrConstantString(coalesce.getArguments().get(numArguments - 1), context)));
+    }
+
+    private PinotExpression handleFunction(
+            CallExpression function,
+            Function<VariableReferenceExpression, Selection> context)
+    {
+        String functionName = function.getDisplayName().toLowerCase(ENGLISH);
+        List<RowExpression> arguments = function.getArguments();
+        switch (functionName) {
+            case "lower":
+            case "trim":
+                return derived(String.format(
+                        "%s(%s)",
+                        functionName,
+                        arguments.get(0).accept(this, context).getDefinition()));
+            case "concat":
+                // Pinot's concat function is a bit different from Presto's, taking only two arguments (and a separator) at a time.
+                // We nest and repeat concat function calls to handle additional arguments.
+                int numArguments = arguments.size();
+                return derived(String.format(
+                        "%s%s%s",
+                        Strings.repeat(String.format("%s(", functionName), numArguments - 1),
+                        getExpressionOrConstantString(function.getArguments().get(0), context),
+                        arguments.subList(1, numArguments).stream()
+                                .map(argument -> String.format(", %s, '')", getExpressionOrConstantString(argument, context)))
+                                .collect(Collectors.joining(""))));
+            case "strpos":
+                // Pinot strings are 0-indexed, while Presto strings are 1-indexed.
+                if (arguments.size() == 2) {
+                    return derived(String.format(
+                            "%s(%s,%s) + 1",
+                            functionName,
+                            arguments.get(0).accept(this, context).getDefinition(),
+                            arguments.get(1).accept(this, context).getDefinition()));
+                }
+                return derived(String.format(
+                        "%s(%s,%s,%s) + 1",
+                        functionName,
+                        arguments.get(0).accept(this, context).getDefinition(),
+                        arguments.get(1).accept(this, context).getDefinition(),
+                        arguments.get(2).accept(this, context).getDefinition()));
+            default:
+                throw new PinotException(PINOT_UNSUPPORTED_EXPRESSION, Optional.empty(), format("function %s not supported in filter yet", function.getDisplayName()));
+        }
+    }
+
     @Override
     public PinotExpression visitCall(CallExpression call, Function<VariableReferenceExpression, Selection> context)
     {
@@ -331,7 +410,7 @@ public class PinotFilterExpressionConverter
                 functionMetadata.getName().getObjectName().equalsIgnoreCase("$literal$date")) {
             return handleDateAndTimestampMagicLiteralFunction(call, context);
         }
-        throw new PinotException(PINOT_UNSUPPORTED_EXPRESSION, Optional.empty(), format("function %s not supported in filter", call));
+        return handleFunction(call, context);
     }
 
     private PinotExpression handleDateAndTimestampMagicLiteralFunction(CallExpression timestamp, Function<VariableReferenceExpression, Selection> context)
@@ -387,9 +466,7 @@ public class PinotFilterExpressionConverter
     public PinotExpression visitSpecialForm(SpecialFormExpression specialForm, Function<VariableReferenceExpression, Selection> context)
     {
         switch (specialForm.getForm()) {
-            case IF:
             case NULL_IF:
-            case COALESCE:
             case DEREFERENCE:
             case ROW_CONSTRUCTOR:
             case BIND:
@@ -410,6 +487,15 @@ public class PinotFilterExpressionConverter
                         specialForm.getForm().toString(),
                         getExpressionOrConstantString(specialForm.getArguments().get(0), context),
                         getExpressionOrConstantString(specialForm.getArguments().get(1), context)));
+            case IF:
+                // Translating IF into CASE statement as IF is not supported in Pinot
+                return derived(format(
+                        "CASE TRUE WHEN %s THEN %s ELSE %s END",
+                        getExpressionOrConstantString(specialForm.getArguments().get(0), context),
+                        getExpressionOrConstantString(specialForm.getArguments().get(1), context),
+                        getExpressionOrConstantString(specialForm.getArguments().get(2), context)));
+            case COALESCE:
+                return handleCoalesce(specialForm, context);
             case IN:
                 return handleIn(specialForm, true, context);
             case AND:

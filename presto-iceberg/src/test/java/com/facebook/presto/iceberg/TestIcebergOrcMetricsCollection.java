@@ -21,7 +21,6 @@ import com.facebook.presto.tests.AbstractTestQueryFramework;
 import com.facebook.presto.tests.DistributedQueryRunner;
 import com.facebook.presto.tpch.TpchPlugin;
 import com.google.common.collect.ImmutableMap;
-import org.apache.iceberg.FileContent;
 import org.testng.annotations.Test;
 
 import java.nio.file.Path;
@@ -30,7 +29,10 @@ import java.util.Map;
 import static com.facebook.presto.SystemSessionProperties.MAX_DRIVERS_PER_TASK;
 import static com.facebook.presto.SystemSessionProperties.TASK_CONCURRENCY;
 import static com.facebook.presto.SystemSessionProperties.TASK_WRITER_COUNT;
+import static com.facebook.presto.iceberg.CatalogType.HIVE;
+import static com.facebook.presto.iceberg.FileContent.DATA;
 import static com.facebook.presto.iceberg.IcebergQueryRunner.ICEBERG_CATALOG;
+import static com.facebook.presto.iceberg.IcebergQueryRunner.getIcebergDataDirectoryPath;
 import static com.facebook.presto.iceberg.TestIcebergOrcMetricsCollection.DataFileRecord.toDataFileRecord;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static org.testng.Assert.assertEquals;
@@ -58,12 +60,13 @@ public class TestIcebergOrcMetricsCollection
         queryRunner.installPlugin(new TpchPlugin());
         queryRunner.createCatalog("tpch", "tpch");
 
-        Path catalogDir = queryRunner.getCoordinator().getBaseDataDir().resolve("iceberg_data").resolve("catalog");
+        Path dataDirectory = queryRunner.getCoordinator().getDataDirectory();
+        Path catalogDirectory = getIcebergDataDirectoryPath(dataDirectory, HIVE.name(), new IcebergConfig().getFileFormat(), false);
 
         queryRunner.installPlugin(new IcebergPlugin());
         Map<String, String> icebergProperties = ImmutableMap.<String, String>builder()
                 .put("hive.metastore", "file")
-                .put("hive.metastore.catalog.dir", catalogDir.toFile().toURI().toString())
+                .put("hive.metastore.catalog.dir", catalogDirectory.toFile().toURI().toString())
                 .build();
 
         queryRunner.createCatalog(ICEBERG_CATALOG, "iceberg", icebergProperties);
@@ -82,7 +85,7 @@ public class TestIcebergOrcMetricsCollection
         DataFileRecord datafile = toDataFileRecord(materializedResult.getMaterializedRows().get(0));
 
         // check content
-        assertEquals(datafile.getContent(), FileContent.DATA.id());
+        assertEquals(datafile.getContent(), DATA.id());
 
         // Check file format
         assertEquals(datafile.getFileFormat(), "ORC");
@@ -293,11 +296,6 @@ public class TestIcebergOrcMetricsCollection
             return content;
         }
 
-        public String getFilePath()
-        {
-            return filePath;
-        }
-
         public String getFileFormat()
         {
             return fileFormat;
@@ -306,16 +304,6 @@ public class TestIcebergOrcMetricsCollection
         public long getRecordCount()
         {
             return recordCount;
-        }
-
-        public long getFileSizeInBytes()
-        {
-            return fileSizeInBytes;
-        }
-
-        public Map<Integer, Long> getColumnSizes()
-        {
-            return columnSizes;
         }
 
         public Map<Integer, Long> getValueCounts()

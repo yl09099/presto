@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.iceberg;
 
+import com.facebook.presto.spi.PrestoException;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -20,6 +21,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.Types.DecimalType;
 
 import java.io.IOException;
 import java.io.StringWriter;
@@ -27,6 +29,7 @@ import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
+import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -93,6 +96,19 @@ public class PartitionData
         }
     }
 
+    public static PartitionData fromStructLike(StructLike partitionData, Type[] types)
+    {
+        if (partitionData.size() != types.length) {
+            throw new PrestoException(GENERIC_INTERNAL_ERROR, "Conversion failed for PartitionData: Invalid arguments");
+        }
+
+        Object[] objects = new Object[types.length];
+        for (int index = 0; index < partitionData.size(); ++index) {
+            objects[index] = partitionData.get(index, types[index].typeId().javaClass());
+        }
+        return new PartitionData(objects);
+    }
+
     public static PartitionData fromJson(String partitionDataAsJson, Type[] types)
     {
         if (partitionDataAsJson == null) {
@@ -136,8 +152,26 @@ public class PartitionData
             case TIME:
                 return partitionValue.asLong();
             case FLOAT:
+                if (partitionValue.asText().equalsIgnoreCase("NaN")) {
+                    return Float.NaN;
+                }
+                if (partitionValue.asText().equalsIgnoreCase("Infinity")) {
+                    return Float.POSITIVE_INFINITY;
+                }
+                if (partitionValue.asText().equalsIgnoreCase("-Infinity")) {
+                    return Float.NEGATIVE_INFINITY;
+                }
                 return partitionValue.floatValue();
             case DOUBLE:
+                if (partitionValue.asText().equalsIgnoreCase("NaN")) {
+                    return Double.NaN;
+                }
+                if (partitionValue.asText().equalsIgnoreCase("Infinity")) {
+                    return Double.POSITIVE_INFINITY;
+                }
+                if (partitionValue.asText().equalsIgnoreCase("-Infinity")) {
+                    return Double.NEGATIVE_INFINITY;
+                }
                 return partitionValue.doubleValue();
             case STRING:
                 return partitionValue.asText();
@@ -150,7 +184,7 @@ public class PartitionData
                     throw new UncheckedIOException("Failed during JSON conversion of " + partitionValue, e);
                 }
             case DECIMAL:
-                return partitionValue.decimalValue();
+                return partitionValue.decimalValue().setScale(((DecimalType) type).scale());
         }
         throw new UnsupportedOperationException("Type not supported as partition column: " + type);
     }

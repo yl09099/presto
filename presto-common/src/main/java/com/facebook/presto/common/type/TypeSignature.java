@@ -13,6 +13,10 @@
  */
 package com.facebook.presto.common.type;
 
+import com.facebook.drift.annotations.ThriftConstructor;
+import com.facebook.drift.annotations.ThriftField;
+import com.facebook.drift.annotations.ThriftStruct;
+import com.facebook.presto.common.InvalidTypeDefinitionException;
 import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.common.type.BigintEnumType.LongEnumMap;
 import com.facebook.presto.common.type.VarcharEnumType.VarcharEnumMap;
@@ -45,6 +49,7 @@ import static java.util.Collections.singletonList;
 import static java.util.Collections.unmodifiableList;
 import static java.util.Locale.ENGLISH;
 
+@ThriftStruct
 public class TypeSignature
 {
     private final TypeSignatureBase base;
@@ -96,9 +101,10 @@ public class TypeSignature
         this(TypeSignatureBase.of(base), parameters);
     }
 
-    private TypeSignature(TypeSignatureBase base, List<TypeSignatureParameter> parameters)
+    @ThriftConstructor
+    public TypeSignature(TypeSignatureBase typeSignatureBase, List<TypeSignatureParameter> parameters)
     {
-        this.base = base;
+        this.base = typeSignatureBase;
         checkArgument(parameters != null, "parameters is null");
         this.parameters = unmodifiableList(new ArrayList<>(parameters));
 
@@ -110,6 +116,7 @@ public class TypeSignature
         return new TypeSignature(base.getStandardTypeBase(), parameters);
     }
 
+    @ThriftField(1)
     public TypeSignatureBase getTypeSignatureBase()
     {
         return base;
@@ -120,22 +127,30 @@ public class TypeSignature
         return base.toString();
     }
 
+    @ThriftField(2)
     public List<TypeSignatureParameter> getParameters()
     {
         return parameters;
     }
 
-    public List<TypeSignature> getTypeParametersAsTypeSignatures()
+    public List<TypeSignature> getTypeOrNamedTypeParametersAsTypeSignatures()
     {
         List<TypeSignature> result = new ArrayList<>();
         for (TypeSignatureParameter parameter : parameters) {
-            if (parameter.getKind() != ParameterKind.TYPE) {
-                throw new IllegalStateException(
-                        format("Expected all parameters to be TypeSignatures but [%s] was found", parameter.toString()));
+            switch (parameter.getKind()) {
+                case TYPE:
+                    result.add(parameter.getTypeSignature());
+                    break;
+                case NAMED_TYPE:
+                    result.add(parameter.getNamedTypeSignature().getTypeSignature());
+                    break;
+                default:
+                    throw new IllegalStateException(
+                            format("Expected all parameters to be of kind TYPE or NAMED_TYPE but [%s] kind was found for parameter: [%s]",
+                                    parameter.getKind(), parameter));
             }
-            result.add(parameter.getTypeSignature());
         }
-        return result;
+        return unmodifiableList(result);
     }
 
     public boolean isCalculated()
@@ -503,6 +518,7 @@ public class TypeSignature
 
         List<TypeSignatureParameter> fields = new ArrayList<>();
 
+        Set<String> distinctFieldNames = new HashSet<>();
         for (int i = StandardTypes.ROW.length() + 1; i < signature.length(); i++) {
             char c = signature.charAt(i);
             switch (state) {
@@ -549,13 +565,19 @@ public class TypeSignature
                     }
                     else if (c == ')') {
                         verify(tokenStart >= 0, "Expect tokenStart to be non-negative");
-                        fields.add(parseTypeOrNamedType(signature.substring(tokenStart, i).trim(), literalParameters));
+                        TypeSignatureParameter parameter = parseTypeOrNamedType(signature.substring(tokenStart, i).trim(), literalParameters);
+                        parameter.getNamedTypeSignature().getName()
+                                .ifPresent(fieldName -> checkDuplicateAndAdd(distinctFieldNames, fieldName));
+                        fields.add(parameter);
                         tokenStart = -1;
                         state = RowTypeSignatureParsingState.FINISHED;
                     }
                     else if (c == ',' && bracketLevel == 1) {
                         verify(tokenStart >= 0, "Expect tokenStart to be non-negative");
-                        fields.add(parseTypeOrNamedType(signature.substring(tokenStart, i).trim(), literalParameters));
+                        TypeSignatureParameter parameter = parseTypeOrNamedType(signature.substring(tokenStart, i).trim(), literalParameters);
+                        parameter.getNamedTypeSignature().getName()
+                                .ifPresent(fieldName -> checkDuplicateAndAdd(distinctFieldNames, fieldName));
+                        fields.add(parameter);
                         tokenStart = -1;
                         state = RowTypeSignatureParsingState.START_OF_FIELD;
                     }
@@ -571,6 +593,7 @@ public class TypeSignature
                     else if (c == ')') {
                         verify(tokenStart >= 0, "Expect tokenStart to be non-negative");
                         verify(delimitedColumnName != null, "Expect delimitedColumnName to be non-null");
+                        checkDuplicateAndAdd(distinctFieldNames, delimitedColumnName);
                         fields.add(TypeSignatureParameter.of(new NamedTypeSignature(
                                 Optional.of(new RowFieldName(delimitedColumnName, true)),
                                 parseTypeSignature(signature.substring(tokenStart, i).trim(), literalParameters))));
@@ -581,6 +604,7 @@ public class TypeSignature
                     else if (c == ',' && bracketLevel == 1) {
                         verify(tokenStart >= 0, "Expect tokenStart to be non-negative");
                         verify(delimitedColumnName != null, "Expect delimitedColumnName to be non-null");
+                        checkDuplicateAndAdd(distinctFieldNames, delimitedColumnName);
                         fields.add(TypeSignatureParameter.of(new NamedTypeSignature(
                                 Optional.of(new RowFieldName(delimitedColumnName, true)),
                                 parseTypeSignature(signature.substring(tokenStart, i).trim(), literalParameters))));
@@ -600,6 +624,13 @@ public class TypeSignature
 
         checkArgument(state == RowTypeSignatureParsingState.FINISHED, "Bad type signature: '%s'", signature);
         return new TypeSignature(signature.substring(0, StandardTypes.ROW.length()), fields);
+    }
+
+    private static void checkDuplicateAndAdd(Set<String> fieldNames, String fieldName)
+    {
+        if (!fieldNames.add(fieldName)) {
+            throw new InvalidTypeDefinitionException("Duplicate field: " + fieldName);
+        }
     }
 
     private static TypeSignatureParameter parseTypeOrNamedType(String typeOrNamedType, Set<String> literalParameters)
@@ -633,7 +664,7 @@ public class TypeSignature
             Map<Integer, DistinctTypeParsingData> parsedDistinctTypes)
     {
         String parameterName = signature.substring(begin, end).trim();
-        if (isDigit(signature.charAt(begin))) {
+        if (isDigit(parameterName.charAt(0))) {
             return TypeSignatureParameter.of(Long.parseLong(parameterName));
         }
         else if (literalCalculationParameters.contains(parameterName)) {

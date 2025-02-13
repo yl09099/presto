@@ -24,16 +24,21 @@ import com.facebook.presto.execution.QueryManager;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.ConnectorId;
-import com.facebook.presto.spi.ConnectorMaterializedViewDefinition;
 import com.facebook.presto.spi.ConnectorTableMetadata;
 import com.facebook.presto.spi.Constraint;
-import com.facebook.presto.spi.MaterializedViewStatus;
+import com.facebook.presto.spi.MaterializedViewDefinition;
+import com.facebook.presto.spi.NewTableLayout;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.TableMetadata;
+import com.facebook.presto.spi.analyzer.ViewDefinition;
 import com.facebook.presto.spi.connector.ConnectorCapabilities;
 import com.facebook.presto.spi.connector.ConnectorOutputMetadata;
+import com.facebook.presto.spi.connector.ConnectorTableVersion;
+import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.function.SqlFunction;
+import com.facebook.presto.spi.plan.PartitioningHandle;
 import com.facebook.presto.spi.security.GrantInfo;
 import com.facebook.presto.spi.security.PrestoPrincipal;
 import com.facebook.presto.spi.security.Privilege;
@@ -41,7 +46,6 @@ import com.facebook.presto.spi.security.RoleGrant;
 import com.facebook.presto.spi.statistics.ComputedStatistics;
 import com.facebook.presto.spi.statistics.TableStatistics;
 import com.facebook.presto.spi.statistics.TableStatisticsMetadata;
-import com.facebook.presto.sql.planner.PartitioningHandle;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.slice.Slice;
 
@@ -86,33 +90,21 @@ public abstract class DelegatingMetadataManager
     }
 
     @Override
-    public boolean schemaExists(Session session, CatalogSchemaName schema)
-    {
-        return delegate.schemaExists(session, schema);
-    }
-
-    @Override
-    public boolean catalogExists(Session session, String catalogName)
-    {
-        return delegate.catalogExists(session, catalogName);
-    }
-
-    @Override
     public List<String> listSchemaNames(Session session, String catalogName)
     {
         return delegate.listSchemaNames(session, catalogName);
     }
 
     @Override
-    public Optional<TableHandle> getTableHandle(Session session, QualifiedObjectName tableName)
-    {
-        return delegate.getTableHandle(session, tableName);
-    }
-
-    @Override
     public Optional<SystemTable> getSystemTable(Session session, QualifiedObjectName tableName)
     {
         return delegate.getSystemTable(session, tableName);
+    }
+
+    @Override
+    public Optional<TableHandle> getHandleVersion(Session session, QualifiedObjectName tableName, Optional<ConnectorTableVersion> tableVersion)
+    {
+        return delegate.getHandleVersion(session, tableName, tableVersion);
     }
 
     @Override
@@ -247,6 +239,11 @@ public abstract class DelegatingMetadataManager
         delegate.renameTable(session, tableHandle, newTableName);
     }
 
+    public void setTableProperties(Session session, TableHandle tableHandle, Map<String, Object> properties)
+    {
+        delegate.setTableProperties(session, tableHandle, properties);
+    }
+
     @Override
     public void renameColumn(Session session, TableHandle tableHandle, ColumnHandle source, String target)
     {
@@ -284,12 +281,6 @@ public abstract class DelegatingMetadataManager
     }
 
     @Override
-    public Optional<NewTableLayout> getPreferredShuffleLayoutForNewTable(Session session, String catalogName, ConnectorTableMetadata tableMetadata)
-    {
-        return delegate.getPreferredShuffleLayoutForNewTable(session, catalogName, tableMetadata);
-    }
-
-    @Override
     public OutputTableHandle beginCreateTable(Session session, String catalogName, ConnectorTableMetadata tableMetadata, Optional<NewTableLayout> layout)
     {
         return delegate.beginCreateTable(session, catalogName, tableMetadata, layout);
@@ -309,12 +300,6 @@ public abstract class DelegatingMetadataManager
     public Optional<NewTableLayout> getInsertLayout(Session session, TableHandle target)
     {
         return delegate.getInsertLayout(session, target);
-    }
-
-    @Override
-    public Optional<NewTableLayout> getPreferredShuffleLayoutForInsert(Session session, TableHandle target)
-    {
-        return delegate.getPreferredShuffleLayoutForInsert(session, target);
     }
 
     @Override
@@ -370,9 +355,15 @@ public abstract class DelegatingMetadataManager
     }
 
     @Override
-    public ColumnHandle getUpdateRowIdColumnHandle(Session session, TableHandle tableHandle)
+    public ColumnHandle getDeleteRowIdColumnHandle(Session session, TableHandle tableHandle)
     {
-        return delegate.getUpdateRowIdColumnHandle(session, tableHandle);
+        return delegate.getDeleteRowIdColumnHandle(session, tableHandle);
+    }
+
+    @Override
+    public ColumnHandle getUpdateRowIdColumnHandle(Session session, TableHandle tableHandle, List<ColumnHandle> updatedColumns)
+    {
+        return delegate.getUpdateRowIdColumnHandle(session, tableHandle, updatedColumns);
     }
 
     @Override
@@ -400,6 +391,18 @@ public abstract class DelegatingMetadataManager
     }
 
     @Override
+    public TableHandle beginUpdate(Session session, TableHandle tableHandle, List<ColumnHandle> updatedColumns)
+    {
+        return delegate.beginUpdate(session, tableHandle, updatedColumns);
+    }
+
+    @Override
+    public void finishUpdate(Session session, TableHandle tableHandle, Collection<Slice> fragments)
+    {
+        delegate.finishUpdate(session, tableHandle, fragments);
+    }
+
+    @Override
     public Optional<ConnectorId> getCatalogHandle(Session session, String catalogName)
     {
         return delegate.getCatalogHandle(session, catalogName);
@@ -424,15 +427,15 @@ public abstract class DelegatingMetadataManager
     }
 
     @Override
-    public Optional<ViewDefinition> getView(Session session, QualifiedObjectName viewName)
-    {
-        return delegate.getView(session, viewName);
-    }
-
-    @Override
     public void createView(Session session, String catalogName, ConnectorTableMetadata viewMetadata, String viewData, boolean replace)
     {
         delegate.createView(session, catalogName, viewMetadata, viewData, replace);
+    }
+
+    @Override
+    public void renameView(Session session, QualifiedObjectName existingViewName, QualifiedObjectName newViewName)
+    {
+        delegate.renameView(session, existingViewName, newViewName);
     }
 
     @Override
@@ -442,17 +445,11 @@ public abstract class DelegatingMetadataManager
     }
 
     @Override
-    public Optional<ConnectorMaterializedViewDefinition> getMaterializedView(Session session, QualifiedObjectName viewName)
-    {
-        return delegate.getMaterializedView(session, viewName);
-    }
-
-    @Override
     public void createMaterializedView(
             Session session,
             String catalogName,
             ConnectorTableMetadata viewMetadata,
-            ConnectorMaterializedViewDefinition viewDefinition,
+            MaterializedViewDefinition viewDefinition,
             boolean ignoreExisting)
     {
         delegate.createMaterializedView(session, catalogName, viewMetadata, viewDefinition, ignoreExisting);
@@ -462,12 +459,6 @@ public abstract class DelegatingMetadataManager
     public void dropMaterializedView(Session session, QualifiedObjectName viewName)
     {
         delegate.dropMaterializedView(session, viewName);
-    }
-
-    @Override
-    public MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName materializedViewName, TupleDomain<String> baseQueryDomain)
-    {
-        return delegate.getMaterializedViewStatus(session, materializedViewName, baseQueryDomain);
     }
 
     @Override
@@ -638,5 +629,17 @@ public abstract class DelegatingMetadataManager
     public Set<ConnectorCapabilities> getConnectorCapabilities(Session session, ConnectorId catalogName)
     {
         return delegate.getConnectorCapabilities(session, catalogName);
+    }
+
+    @Override
+    public void dropConstraint(Session session, TableHandle tableHandle, Optional<String> constraintName, Optional<String> columnName)
+    {
+        delegate.dropConstraint(session, tableHandle, constraintName, columnName);
+    }
+
+    @Override
+    public void addConstraint(Session session, TableHandle tableHandle, TableConstraint<String> tableConstraint)
+    {
+        delegate.addConstraint(session, tableHandle, tableConstraint);
     }
 }

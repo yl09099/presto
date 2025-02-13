@@ -15,6 +15,8 @@ package com.facebook.presto.delta;
 
 import com.facebook.airlift.bootstrap.Bootstrap;
 import com.facebook.airlift.json.JsonModule;
+import com.facebook.presto.cache.CachingModule;
+import com.facebook.presto.hive.HiveCommonModule;
 import com.facebook.presto.hive.authentication.HiveAuthenticationModule;
 import com.facebook.presto.hive.gcs.HiveGcsModule;
 import com.facebook.presto.hive.metastore.HiveMetastoreModule;
@@ -56,9 +58,11 @@ public class DeltaConnectorFactory
                     new JsonModule(),
                     new DeltaModule(catalogName, context.getTypeManager()),
                     new HiveS3Module(catalogName),
+                    new CachingModule(),
                     new HiveGcsModule(),
                     new HiveAuthenticationModule(),
                     new HiveMetastoreModule(catalogName, Optional.empty()),
+                    new HiveCommonModule(),
                     binder -> {
                         binder.bind(RowExpressionService.class).toInstance(context.getRowExpressionService());
                     });

@@ -29,12 +29,12 @@
             <outputDirectory>plugin/ml</outputDirectory>
         </fileSet>
         <fileSet>
-            <directory>${project.build.directory}/dependency/presto-geospatial-${project.version}</directory>
-            <outputDirectory>plugin/geospatial</outputDirectory>
-        </fileSet>
-        <fileSet>
             <directory>${project.build.directory}/dependency/presto-teradata-functions-${project.version}</directory>
             <outputDirectory>plugin/teradata-functions</outputDirectory>
+        </fileSet>
+        <fileSet>
+            <directory>${project.build.directory}/dependency/presto-hana-${project.version}</directory>
+            <outputDirectory>plugin/hana</outputDirectory>
         </fileSet>
         <fileSet>
             <directory>${project.build.directory}/dependency/presto-hive-hadoop2-${project.version}</directory>

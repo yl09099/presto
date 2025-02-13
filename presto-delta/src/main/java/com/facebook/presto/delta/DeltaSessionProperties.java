@@ -14,25 +14,19 @@
 package com.facebook.presto.delta;
 
 import com.facebook.presto.cache.CacheConfig;
-import com.facebook.presto.hive.HiveClientConfig;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.session.PropertyMetadata;
 import com.google.common.collect.ImmutableList;
-import io.airlift.units.DataSize;
 
 import javax.inject.Inject;
 
 import java.util.List;
 
-import static com.facebook.presto.hive.HiveSessionProperties.dataSizeSessionProperty;
 import static com.facebook.presto.spi.session.PropertyMetadata.booleanProperty;
 
 public final class DeltaSessionProperties
 {
     private static final String CACHE_ENABLED = "cache_enabled";
-    private static final String PARQUET_MAX_READ_BLOCK_SIZE = "parquet_max_read_block_size";
-    private static final String PARQUET_BATCH_READ_OPTIMIZATION_ENABLED = "parquet_batch_read_optimization_enabled";
-    private static final String PARQUET_BATCH_READER_VERIFICATION_ENABLED = "parquet_batch_reader_verification_enabled";
     public static final String PARQUET_DEREFERENCE_PUSHDOWN_ENABLED = "parquet_dereference_pushdown_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
@@ -40,29 +34,14 @@ public final class DeltaSessionProperties
     @Inject
     public DeltaSessionProperties(
             DeltaConfig deltaConfigConfig,
-            HiveClientConfig hiveClientConfig,
             CacheConfig cacheConfig)
     {
         sessionProperties = ImmutableList.of(
                 booleanProperty(
+                        // required by presto-hive module, might be removed in future
                         CACHE_ENABLED,
                         "Enable cache for Delta tables",
                         cacheConfig.isCachingEnabled(),
-                        false),
-                dataSizeSessionProperty(
-                        PARQUET_MAX_READ_BLOCK_SIZE,
-                        "Parquet: Maximum size of a block to read",
-                        hiveClientConfig.getParquetMaxReadBlockSize(),
-                        false),
-                booleanProperty(
-                        PARQUET_BATCH_READ_OPTIMIZATION_ENABLED,
-                        "Is Parquet batch read optimization enabled",
-                        hiveClientConfig.isParquetBatchReadOptimizationEnabled(),
-                        false),
-                booleanProperty(
-                        PARQUET_BATCH_READER_VERIFICATION_ENABLED,
-                        "Is Parquet batch reader verification enabled? This is for testing purposes only, not to be used in production",
-                        hiveClientConfig.isParquetBatchReaderVerificationEnabled(),
                         false),
                 booleanProperty(
                         PARQUET_DEREFERENCE_PUSHDOWN_ENABLED,
@@ -74,26 +53,6 @@ public final class DeltaSessionProperties
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
-    }
-
-    public static boolean isCacheEnabled(ConnectorSession session)
-    {
-        return session.getProperty(CACHE_ENABLED, Boolean.class);
-    }
-
-    public static DataSize getParquetMaxReadBlockSize(ConnectorSession session)
-    {
-        return session.getProperty(PARQUET_MAX_READ_BLOCK_SIZE, DataSize.class);
-    }
-
-    public static boolean isParquetBatchReadsEnabled(ConnectorSession session)
-    {
-        return session.getProperty(PARQUET_BATCH_READ_OPTIMIZATION_ENABLED, Boolean.class);
-    }
-
-    public static boolean isParquetBatchReaderVerificationEnabled(ConnectorSession session)
-    {
-        return session.getProperty(PARQUET_BATCH_READER_VERIFICATION_ENABLED, Boolean.class);
     }
 
     public static boolean isParquetDereferencePushdownEnabled(ConnectorSession session)

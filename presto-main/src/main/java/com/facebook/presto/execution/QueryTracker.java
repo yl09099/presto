@@ -16,6 +16,7 @@ package com.facebook.presto.execution;
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.Session;
 import com.facebook.presto.execution.QueryTracker.TrackedQuery;
+import com.facebook.presto.resourcemanager.ClusterQueryTrackerService;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupQueryLimits;
@@ -48,10 +49,9 @@ import static com.facebook.presto.execution.QueryLimit.Source.RESOURCE_GROUP;
 import static com.facebook.presto.execution.QueryLimit.createDurationLimit;
 import static com.facebook.presto.execution.QueryLimit.getMinimum;
 import static com.facebook.presto.spi.StandardErrorCode.ABANDONED_QUERY;
+import static com.facebook.presto.spi.StandardErrorCode.CLUSTER_HAS_TOO_MANY_RUNNING_TASKS;
 import static com.facebook.presto.spi.StandardErrorCode.EXCEEDED_TIME_LIMIT;
-import static com.facebook.presto.spi.StandardErrorCode.QUERY_HAS_TOO_MANY_STAGES;
 import static com.facebook.presto.spi.StandardErrorCode.SERVER_SHUTTING_DOWN;
-import static com.facebook.presto.sql.planner.PlanFragmenter.TOO_MANY_STAGES_MESSAGE;
 import static com.google.common.base.Preconditions.checkState;
 import static java.lang.String.format;
 import static java.util.Comparator.comparingInt;
@@ -81,7 +81,9 @@ public class QueryTracker<T extends TrackedQuery>
     @GuardedBy("this")
     private ScheduledFuture<?> backgroundTask;
 
-    public QueryTracker(QueryManagerConfig queryManagerConfig, ScheduledExecutorService queryManagementExecutor)
+    private final Optional<ClusterQueryTrackerService> clusterQueryTrackerService;
+
+    public QueryTracker(QueryManagerConfig queryManagerConfig, ScheduledExecutorService queryManagementExecutor, Optional<ClusterQueryTrackerService> clusterQueryTrackerService)
     {
         requireNonNull(queryManagerConfig, "queryManagerConfig is null");
         this.minQueryExpireAge = queryManagerConfig.getMinQueryExpireAge();
@@ -91,6 +93,7 @@ public class QueryTracker<T extends TrackedQuery>
         this.maxQueryRunningTaskCount = queryManagerConfig.getMaxQueryRunningTaskCount();
 
         this.queryManagementExecutor = requireNonNull(queryManagementExecutor, "queryManagementExecutor is null");
+        this.clusterQueryTrackerService = clusterQueryTrackerService;
     }
 
     public synchronized void start()
@@ -193,7 +196,10 @@ public class QueryTracker<T extends TrackedQuery>
     public void expireQuery(QueryId queryId)
     {
         tryGetQuery(queryId)
-                .ifPresent(expirationQueue::add);
+                .ifPresent(query -> {
+                    query.pruneFinishedQueryInfo();
+                    expirationQueue.add(query);
+                });
     }
 
     public long getRunningTaskCount()
@@ -260,8 +266,8 @@ public class QueryTracker<T extends TrackedQuery>
     }
 
     /**
-     *  When cluster reaches max tasks limit and also a single query
-     *  exceeds a threshold,  kill this query
+     * When cluster reaches max tasks limit and also a single query
+     * exceeds a threshold,  kill this query
      */
     @VisibleForTesting
     void enforceTaskLimits()
@@ -280,14 +286,18 @@ public class QueryTracker<T extends TrackedQuery>
             }
         }
 
+        if (clusterQueryTrackerService.isPresent()) {
+            totalRunningTaskCount = clusterQueryTrackerService.get().getRunningTaskCount();
+        }
+
         runningTaskCount.set(totalRunningTaskCount);
         int runningTaskCountAfterKills = totalRunningTaskCount;
 
         while (runningTaskCountAfterKills > maxTotalRunningTaskCountToKillQuery && !taskCountQueue.isEmpty()) {
             QueryAndTaskCount<T> queryAndTaskCount = taskCountQueue.poll();
-            queryAndTaskCount.getQuery().fail(new PrestoException(QUERY_HAS_TOO_MANY_STAGES, format(
-                    "Query killed because the cluster is overloaded with too many tasks (%s) and this query was running with the highest number of tasks (%s). %s Otherwise, please try again later.",
-                    totalRunningTaskCount, queryAndTaskCount.getTaskCount(), TOO_MANY_STAGES_MESSAGE)));
+            queryAndTaskCount.getQuery().fail(new PrestoException(CLUSTER_HAS_TOO_MANY_RUNNING_TASKS, format(
+                    "Query killed because the cluster is overloaded with too many tasks (%s) and this query was running with the highest number of tasks (%s). Please try again later.",
+                    totalRunningTaskCount, queryAndTaskCount.getTaskCount())));
             runningTaskCountAfterKills -= queryAndTaskCount.getTaskCount();
             queriesKilledDueToTooManyTask.incrementAndGet();
         }
@@ -308,7 +318,7 @@ public class QueryTracker<T extends TrackedQuery>
             if (expirationQueue.size() - count <= maxQueryHistory) {
                 break;
             }
-            query.pruneInfo();
+            query.pruneExpiredQueryInfo();
             count++;
         }
     }
@@ -401,6 +411,17 @@ public class QueryTracker<T extends TrackedQuery>
         void fail(Throwable cause);
 
         // XXX: This should be removed when the client protocol is improved, so that we don't need to hold onto so much query history
-        void pruneInfo();
+
+        /**
+         * Prune info from finished queries which are in the expiry queue and the queue length is
+         * greater than {@code query.max-history}
+         */
+        void pruneExpiredQueryInfo();
+
+        /**
+         * Prune info from finished queries which should not be kept around at all after the query
+         * state machine has transitioned into a finished state
+         */
+        void pruneFinishedQueryInfo();
     }
 }

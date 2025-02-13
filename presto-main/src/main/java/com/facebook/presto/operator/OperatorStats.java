@@ -21,13 +21,14 @@ import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.util.Mergeable;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
 
+import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -49,6 +50,11 @@ public class OperatorStats
     private final String operatorType;
 
     private final long totalDrivers;
+
+    private final long isBlockedCalls;
+    private final Duration isBlockedWall;
+    private final Duration isBlockedCpu;
+    private final DataSize isBlockedAllocation;
 
     private final long addInputCalls;
     private final Duration addInputWall;
@@ -95,6 +101,13 @@ public class OperatorStats
 
     private final RuntimeStats runtimeStats;
 
+    private final DynamicFilterStats dynamicFilterStats;
+
+    private final long nullJoinBuildKeyCount;
+    private final long joinBuildKeyCount;
+    private final long nullJoinProbeKeyCount;
+    private final long joinProbeKeyCount;
+
     @JsonCreator
     public OperatorStats(
             @JsonProperty("stageId") int stageId,
@@ -105,6 +118,11 @@ public class OperatorStats
             @JsonProperty("operatorType") String operatorType,
 
             @JsonProperty("totalDrivers") long totalDrivers,
+
+            @JsonProperty("isBlockedCalls") long isBlockedCalls,
+            @JsonProperty("isBlockedWall") Duration isBlockedWall,
+            @JsonProperty("isBlockedCpu") Duration isBlockedCpu,
+            @JsonProperty("isBlockedAllocation") DataSize isBlockedAllocation,
 
             @JsonProperty("addInputCalls") long addInputCalls,
             @JsonProperty("addInputWall") Duration addInputWall,
@@ -146,7 +164,12 @@ public class OperatorStats
 
             @Nullable
             @JsonProperty("info") OperatorInfo info,
-            @JsonProperty("runtimeStats") RuntimeStats runtimeStats)
+            @JsonProperty("runtimeStats") RuntimeStats runtimeStats,
+            @JsonProperty("dynamicFilterStats") DynamicFilterStats dynamicFilterStats,
+            @JsonProperty("nullJoinBuildKeyCount") long nullJoinBuildKeyCount,
+            @JsonProperty("joinBuildKeyCount") long joinBuildKeyCount,
+            @JsonProperty("nullJoinProbeKeyCount") long nullJoinProbeKeyCount,
+            @JsonProperty("joinProbeKeyCount") long joinProbeKeyCount)
     {
         this.stageId = stageId;
         this.stageExecutionId = stageExecutionId;
@@ -158,6 +181,11 @@ public class OperatorStats
         this.operatorType = requireNonNull(operatorType, "operatorType is null");
 
         this.totalDrivers = totalDrivers;
+
+        this.isBlockedCalls = isBlockedCalls;
+        this.isBlockedWall = requireNonNull(isBlockedWall, "isBlockedWall is null");
+        this.isBlockedCpu = requireNonNull(isBlockedCpu, "isBlockedCpu is null");
+        this.isBlockedAllocation = requireNonNull(isBlockedAllocation, "isBlockedAllocation is null");
 
         this.addInputCalls = addInputCalls;
         this.addInputWall = requireNonNull(addInputWall, "addInputWall is null");
@@ -200,10 +228,16 @@ public class OperatorStats
 
         this.runtimeStats = runtimeStats;
 
+        this.dynamicFilterStats = dynamicFilterStats;
+
         this.blockedReason = blockedReason;
 
         this.info = info;
         this.infoUnion = null;
+        this.nullJoinBuildKeyCount = nullJoinBuildKeyCount;
+        this.joinBuildKeyCount = joinBuildKeyCount;
+        this.nullJoinProbeKeyCount = nullJoinProbeKeyCount;
+        this.joinProbeKeyCount = joinProbeKeyCount;
     }
 
     @ThriftConstructor
@@ -216,6 +250,11 @@ public class OperatorStats
             String operatorType,
 
             long totalDrivers,
+
+            long isBlockedCalls,
+            Duration isBlockedWall,
+            Duration isBlockedCpu,
+            DataSize isBlockedAllocation,
 
             long addInputCalls,
             Duration addInputWall,
@@ -256,8 +295,13 @@ public class OperatorStats
             Optional<BlockedReason> blockedReason,
 
             RuntimeStats runtimeStats,
+            DynamicFilterStats dynamicFilterStats,
             @Nullable
-            OperatorInfoUnion infoUnion)
+            OperatorInfoUnion infoUnion,
+            long nullJoinBuildKeyCount,
+            long joinBuildKeyCount,
+            long nullJoinProbeKeyCount,
+            long joinProbeKeyCount)
     {
         this.stageId = stageId;
         this.stageExecutionId = stageExecutionId;
@@ -269,6 +313,11 @@ public class OperatorStats
         this.operatorType = requireNonNull(operatorType, "operatorType is null");
 
         this.totalDrivers = totalDrivers;
+
+        this.isBlockedCalls = isBlockedCalls;
+        this.isBlockedWall = requireNonNull(isBlockedWall, "isBlockedWall is null");
+        this.isBlockedCpu = requireNonNull(isBlockedCpu, "isBlockedCpu is null");
+        this.isBlockedAllocation = requireNonNull(isBlockedAllocation, "isBlockedAllocation is null");
 
         this.addInputCalls = addInputCalls;
         this.addInputWall = requireNonNull(addInputWall, "addInputWall is null");
@@ -311,10 +360,16 @@ public class OperatorStats
 
         this.runtimeStats = runtimeStats;
 
+        this.dynamicFilterStats = dynamicFilterStats;
+
         this.blockedReason = blockedReason;
 
         this.infoUnion = infoUnion;
         this.info = null;
+        this.nullJoinBuildKeyCount = nullJoinBuildKeyCount;
+        this.joinBuildKeyCount = joinBuildKeyCount;
+        this.nullJoinProbeKeyCount = nullJoinProbeKeyCount;
+        this.joinProbeKeyCount = joinProbeKeyCount;
     }
 
     @JsonProperty
@@ -598,60 +653,150 @@ public class OperatorStats
         return infoUnion;
     }
 
-    public OperatorStats add(OperatorStats operatorStats)
+    @JsonProperty
+    @ThriftField(40)
+    public long getNullJoinBuildKeyCount()
     {
-        return add(ImmutableList.of(operatorStats));
+        return nullJoinBuildKeyCount;
     }
 
-    public OperatorStats add(Iterable<OperatorStats> operators)
+    @JsonProperty
+    @ThriftField(41)
+    public long getJoinBuildKeyCount()
     {
-        long totalDrivers = this.totalDrivers;
+        return joinBuildKeyCount;
+    }
 
-        long addInputCalls = this.addInputCalls;
-        long addInputWall = this.addInputWall.roundTo(NANOSECONDS);
-        long addInputCpu = this.addInputCpu.roundTo(NANOSECONDS);
-        long addInputAllocation = this.addInputAllocation.toBytes();
-        long rawInputDataSize = this.rawInputDataSize.toBytes();
-        long rawInputPositions = this.rawInputPositions;
-        long inputDataSize = this.inputDataSize.toBytes();
-        long inputPositions = this.inputPositions;
-        double sumSquaredInputPositions = this.sumSquaredInputPositions;
+    @JsonProperty
+    @ThriftField(42)
+    public long getNullJoinProbeKeyCount()
+    {
+        return nullJoinProbeKeyCount;
+    }
 
-        long getOutputCalls = this.getOutputCalls;
-        long getOutputWall = this.getOutputWall.roundTo(NANOSECONDS);
-        long getOutputCpu = this.getOutputCpu.roundTo(NANOSECONDS);
-        long getOutputAllocation = this.getOutputAllocation.toBytes();
-        long outputDataSize = this.outputDataSize.toBytes();
-        long outputPositions = this.outputPositions;
+    @JsonProperty
+    @ThriftField(43)
+    public long getJoinProbeKeyCount()
+    {
+        return joinProbeKeyCount;
+    }
 
-        long physicalWrittenDataSize = this.physicalWrittenDataSize.toBytes();
+    @Nullable
+    @JsonProperty
+    @ThriftField(44)
+    public DynamicFilterStats getDynamicFilterStats()
+    {
+        return dynamicFilterStats;
+    }
 
-        long additionalCpu = this.additionalCpu.roundTo(NANOSECONDS);
-        long blockedWall = this.blockedWall.roundTo(NANOSECONDS);
+    @JsonProperty
+    @ThriftField(45)
+    public long getIsBlockedCalls()
+    {
+        return isBlockedCalls;
+    }
 
-        long finishCalls = this.finishCalls;
-        long finishWall = this.finishWall.roundTo(NANOSECONDS);
-        long finishCpu = this.finishCpu.roundTo(NANOSECONDS);
-        long finishAllocation = this.finishAllocation.toBytes();
+    @JsonProperty
+    @ThriftField(46)
+    public Duration getIsBlockedWall()
+    {
+        return isBlockedWall;
+    }
 
-        long memoryReservation = this.userMemoryReservation.toBytes();
-        long revocableMemoryReservation = this.revocableMemoryReservation.toBytes();
-        long systemMemoryReservation = this.systemMemoryReservation.toBytes();
-        long peakUserMemory = this.peakUserMemoryReservation.toBytes();
-        long peakSystemMemory = this.peakSystemMemoryReservation.toBytes();
-        long peakTotalMemory = this.peakTotalMemoryReservation.toBytes();
+    @JsonProperty
+    @ThriftField(47)
+    public Duration getIsBlockedCpu()
+    {
+        return isBlockedCpu;
+    }
 
-        long spilledDataSize = this.spilledDataSize.toBytes();
+    @JsonProperty
+    @ThriftField(48)
+    public DataSize getIsBlockedAllocation()
+    {
+        return isBlockedAllocation;
+    }
 
-        Optional<BlockedReason> blockedReason = this.blockedReason;
+    public static Optional<OperatorStats> merge(List<OperatorStats> operators)
+    {
+        if (operators.isEmpty()) {
+            return Optional.empty();
+        }
 
-        RuntimeStats runtimeStats = RuntimeStats.copyOf(this.runtimeStats);
+        OperatorStats first = operators.stream().findFirst().get();
+        int stageId = first.getStageId();
+        int operatorId = first.getOperatorId();
+        int stageExecutionId = first.getStageExecutionId();
+        int pipelineId = first.getPipelineId();
+        PlanNodeId planNodeId = first.getPlanNodeId();
+        String operatorType = first.getOperatorType();
 
-        Mergeable<OperatorInfo> base = getMergeableInfoOrNull(info);
+        long totalDrivers = 0;
+
+        long isBlockedCalls = 0;
+        long isBlockedWall = 0;
+        long isBlockedCpu = 0;
+        long isBlockedAllocation = 0;
+
+        long addInputCalls = 0;
+        long addInputWall = 0;
+        long addInputCpu = 0;
+        long addInputAllocation = 0;
+        long rawInputDataSize = 0;
+        long rawInputPositions = 0;
+        long inputDataSize = 0;
+        long inputPositions = 0;
+
+        double sumSquaredInputPositions = 0.0;
+
+        long getOutputCalls = 0;
+        long getOutputWall = 0;
+        long getOutputCpu = 0;
+        long getOutputAllocation = 0;
+        long outputDataSize = 0;
+        long outputPositions = 0;
+
+        long physicalWrittenDataSize = 0;
+
+        long finishCalls = 0;
+        long finishWall = 0;
+        long finishCpu = 0;
+        long finishAllocation = 0;
+
+        long additionalCpu = 0;
+        long blockedWall = 0;
+
+        long memoryReservation = 0;
+        long revocableMemoryReservation = 0;
+        long systemMemoryReservation = 0;
+
+        long peakUserMemory = 0;
+        long peakSystemMemory = 0;
+        long peakTotalMemory = 0;
+
+        long spilledDataSize = 0;
+
+        long nullJoinBuildKeyCount = 0;
+        long joinBuildKeyCount = 0;
+        long nullJoinProbeKeyCount = 0;
+        long joinProbeKeyCount = 0;
+
+        RuntimeStats runtimeStats = new RuntimeStats();
+        DynamicFilterStats dynamicFilterStats = new DynamicFilterStats(new HashSet<>());
+
+        Optional<BlockedReason> blockedReason = Optional.empty();
+
+        Mergeable<OperatorInfo> base = null;
+
         for (OperatorStats operator : operators) {
             checkArgument(operator.getOperatorId() == operatorId, "Expected operatorId to be %s but was %s", operatorId, operator.getOperatorId());
 
             totalDrivers += operator.totalDrivers;
+
+            isBlockedCalls += operator.getGetOutputCalls();
+            isBlockedWall += operator.getGetOutputWall().roundTo(NANOSECONDS);
+            isBlockedCpu += operator.getGetOutputCpu().roundTo(NANOSECONDS);
+            isBlockedAllocation += operator.getIsBlockedAllocation().toBytes();
 
             addInputCalls += operator.getAddInputCalls();
             addInputWall += operator.getAddInputWall().roundTo(NANOSECONDS);
@@ -695,14 +840,23 @@ public class OperatorStats
             }
 
             OperatorInfo info = operator.getInfo();
-            if (base != null && info != null && base.getClass() == info.getClass()) {
+            if (base == null) {
+                base = getMergeableInfoOrNull(info);
+            }
+            else if (info != null && base.getClass() == info.getClass()) {
                 base = mergeInfo(base, info);
             }
 
             runtimeStats.mergeWith(operator.getRuntimeStats());
+            dynamicFilterStats.mergeWith(operator.getDynamicFilterStats());
+
+            nullJoinBuildKeyCount += operator.getNullJoinBuildKeyCount();
+            joinBuildKeyCount += operator.getJoinBuildKeyCount();
+            nullJoinProbeKeyCount += operator.getNullJoinProbeKeyCount();
+            joinProbeKeyCount += operator.getJoinProbeKeyCount();
         }
 
-        return new OperatorStats(
+        return Optional.of(new OperatorStats(
                 stageId,
                 stageExecutionId,
                 pipelineId,
@@ -712,24 +866,29 @@ public class OperatorStats
 
                 totalDrivers,
 
+                isBlockedCalls,
+                succinctNanos(isBlockedWall),
+                succinctNanos(isBlockedCpu),
+                succinctBytes(isBlockedAllocation),
+
                 addInputCalls,
                 succinctNanos(addInputWall),
                 succinctNanos(addInputCpu),
-                succinctBytes(addInputAllocation),
-                succinctBytes(rawInputDataSize),
+                succinctBytes((long) addInputAllocation),
+                succinctBytes((long) rawInputDataSize),
                 rawInputPositions,
-                succinctBytes(inputDataSize),
+                succinctBytes((long) inputDataSize),
                 inputPositions,
                 sumSquaredInputPositions,
 
                 getOutputCalls,
                 succinctNanos(getOutputWall),
                 succinctNanos(getOutputCpu),
-                succinctBytes(getOutputAllocation),
-                succinctBytes(outputDataSize),
+                succinctBytes((long) getOutputAllocation),
+                succinctBytes((long) outputDataSize),
                 outputPositions,
 
-                succinctBytes(physicalWrittenDataSize),
+                succinctBytes((long) physicalWrittenDataSize),
 
                 succinctNanos(additionalCpu),
                 succinctNanos(blockedWall),
@@ -739,19 +898,24 @@ public class OperatorStats
                 succinctNanos(finishCpu),
                 succinctBytes(finishAllocation),
 
-                succinctBytes(memoryReservation),
-                succinctBytes(revocableMemoryReservation),
-                succinctBytes(systemMemoryReservation),
-                succinctBytes(peakUserMemory),
-                succinctBytes(peakSystemMemory),
-                succinctBytes(peakTotalMemory),
+                succinctBytes((long) memoryReservation),
+                succinctBytes((long) revocableMemoryReservation),
+                succinctBytes((long) systemMemoryReservation),
+                succinctBytes((long) peakUserMemory),
+                succinctBytes((long) peakSystemMemory),
+                succinctBytes((long) peakTotalMemory),
 
-                succinctBytes(spilledDataSize),
+                succinctBytes((long) spilledDataSize),
 
                 blockedReason,
 
                 (OperatorInfo) base,
-                runtimeStats);
+                runtimeStats,
+                dynamicFilterStats,
+                nullJoinBuildKeyCount,
+                joinBuildKeyCount,
+                nullJoinProbeKeyCount,
+                joinProbeKeyCount));
     }
 
     @SuppressWarnings("unchecked")
@@ -784,6 +948,10 @@ public class OperatorStats
                 planNodeId,
                 operatorType,
                 totalDrivers,
+                isBlockedCalls,
+                isBlockedWall,
+                isBlockedCpu,
+                isBlockedAllocation,
                 addInputCalls,
                 addInputWall,
                 addInputCpu,
@@ -815,6 +983,11 @@ public class OperatorStats
                 spilledDataSize,
                 blockedReason,
                 info,
-                runtimeStats);
+                runtimeStats,
+                dynamicFilterStats,
+                nullJoinBuildKeyCount,
+                joinBuildKeyCount,
+                nullJoinProbeKeyCount,
+                joinProbeKeyCount);
     }
 }

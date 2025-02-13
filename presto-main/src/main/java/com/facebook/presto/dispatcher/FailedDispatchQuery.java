@@ -14,11 +14,11 @@
 package com.facebook.presto.dispatcher;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.common.ErrorCode;
 import com.facebook.presto.execution.ExecutionFailureInfo;
 import com.facebook.presto.execution.QueryState;
 import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.server.BasicQueryInfo;
-import com.facebook.presto.spi.ErrorCode;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupQueryLimits;
@@ -115,7 +115,10 @@ public class FailedDispatchQuery
     public void cancel() {}
 
     @Override
-    public void pruneInfo() {}
+    public void pruneExpiredQueryInfo() {}
+
+    @Override
+    public void pruneFinishedQueryInfo() {}
 
     @Override
     public QueryId getQueryId()
@@ -194,5 +197,5 @@ public class FailedDispatchQuery
 
     @Override
     public void setResourceGroupQueryLimits(ResourceGroupQueryLimits resourceGroupQueryLimits)
-    { }
+    {}
 }

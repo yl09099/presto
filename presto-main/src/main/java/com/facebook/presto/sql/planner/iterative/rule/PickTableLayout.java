@@ -228,7 +228,8 @@ public class PickTableLayout
                     tableScanNode.getAssignments(),
                     tableScanNode.getTableConstraints(),
                     layout.getLayout().getPredicate(),
-                    TupleDomain.all()));
+                    TupleDomain.all(),
+                    tableScanNode.getCteMaterializationInfo()));
         }
     }
 
@@ -267,7 +268,7 @@ public class PickTableLayout
         // don't include non-deterministic predicates
         LogicalRowExpressions logicalRowExpressions = new LogicalRowExpressions(
                 new RowExpressionDeterminismEvaluator(metadata.getFunctionAndTypeManager()),
-                new FunctionResolution(metadata.getFunctionAndTypeManager()),
+                new FunctionResolution(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver()),
                 metadata.getFunctionAndTypeManager());
         RowExpression deterministicPredicate = logicalRowExpressions.filterDeterministicConjuncts(predicate);
         DomainTranslator.ExtractionResult<VariableReferenceExpression> decomposedPredicate = domainTranslator.fromPredicate(
@@ -324,7 +325,8 @@ public class PickTableLayout
                 node.getAssignments(),
                 node.getTableConstraints(),
                 layout.getLayout().getPredicate(),
-                computeEnforced(newDomain, layout.getUnenforcedConstraint()));
+                computeEnforced(newDomain, layout.getUnenforcedConstraint()),
+                node.getCteMaterializationInfo());
 
         // The order of the arguments to combineConjuncts matters:
         // * Unenforced constraints go first because they can only be simple column references,
@@ -355,7 +357,7 @@ public class PickTableLayout
         {
             this.assignments = assignments;
 
-            evaluator = new RowExpressionInterpreter(expression, metadata, session.toConnectorSession(), OPTIMIZED);
+            evaluator = new RowExpressionInterpreter(expression, metadata.getFunctionAndTypeManager(), session.toConnectorSession(), OPTIMIZED);
             arguments = VariablesExtractor.extractUnique(expression).stream()
                     .map(assignments::get)
                     .collect(toImmutableSet());

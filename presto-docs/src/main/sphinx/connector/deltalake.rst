@@ -41,6 +41,8 @@ Property Name                                   Description                     
                                                 In order for this option to work, also set
                                                 ``experimental.pushdown-dereference-enabled`` to
                                                 ``true``.
+``delta.case-sensitive-partitions-enabled``     Allows matching the names of partitioned columns in a     ``true``
+                                                case-sensitive manner.
 =============================================== ========================================================= ============
 
 Delta Lake connector reuses many of the modules existing in Hive connector.
@@ -71,17 +73,20 @@ command.
     table location. To get around no columns error in Hive metastore, provide a dummy column
     as schema of the Delta table being registered.
 
-Currently Delta connector doesn't support CREATE TABLE. We can use same hive metastore URI
-in hive catalog to register Delta table in hive metastore.
+Examples
+--------
+
+Create a new Delta table named ``sales_data_new`` in the ``apac`` schema that has Delta Lake
+table location in an S3 bucket named ``db-sa-datasets`` using Delta Lake connector:
 
 .. code-block:: sql
 
-    CREATE TABLE hive.apac.sales_data_new (dummyColumn INT)
-    WITH (external_location = 's3://db-sa-datasets/presto/sales_data_new')
+    CREATE TABLE sales.apac.sales_data_new (dummyColumn INT)
+    WITH (external_location = 's3://db-sa-datasets/presto/sales_data_new');
 
-In the above query
-
-* ``hive`` refers to the Hive catalog.
+To register a partition Delta table in Hive metastore, use the ``CREATE TABLE`` same as above.
+Only ``external_location`` is required in the properties, no need to specify ``partitioned_by`` in
+``CREATE TABLE``
 
 Another option is querying the table directly using the table location as table name.
 
@@ -112,3 +117,10 @@ as suffix to the table name.
 
 Above query reads data from the latest snapshot as of timestamp ``2021-11-18 09:45:00``
 in the table ``sales.apac.sales_data``.
+
+.. code-block:: sql
+
+    DROP TABLE sales.apac.sales_data_new;
+
+Above query drops the external table ``sales.apac.sales_data_new``. This only drops the
+metadata for the table. The referenced data directory is not deleted.

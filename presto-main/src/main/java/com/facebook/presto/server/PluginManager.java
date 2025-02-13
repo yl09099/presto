@@ -15,6 +15,7 @@ package com.facebook.presto.server;
 
 import com.facebook.airlift.log.Logger;
 import com.facebook.airlift.node.NodeInfo;
+import com.facebook.presto.ClientRequestFilterManager;
 import com.facebook.presto.common.block.BlockEncoding;
 import com.facebook.presto.common.block.BlockEncodingManager;
 import com.facebook.presto.common.type.ParametricType;
@@ -27,21 +28,37 @@ import com.facebook.presto.execution.resourceGroups.ResourceGroupManager;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.security.AccessControlManager;
 import com.facebook.presto.server.security.PasswordAuthenticatorManager;
+import com.facebook.presto.server.security.PrestoAuthenticatorManager;
+import com.facebook.presto.spi.ClientRequestFilterFactory;
+import com.facebook.presto.spi.CoordinatorPlugin;
 import com.facebook.presto.spi.Plugin;
+import com.facebook.presto.spi.analyzer.AnalyzerProvider;
+import com.facebook.presto.spi.analyzer.QueryPreparerProvider;
 import com.facebook.presto.spi.classloader.ThreadContextClassLoader;
 import com.facebook.presto.spi.connector.ConnectorFactory;
 import com.facebook.presto.spi.eventlistener.EventListenerFactory;
 import com.facebook.presto.spi.function.FunctionNamespaceManagerFactory;
+import com.facebook.presto.spi.nodestatus.NodeStatusNotificationProviderFactory;
+import com.facebook.presto.spi.plan.PlanCheckerProviderFactory;
 import com.facebook.presto.spi.prerequisites.QueryPrerequisitesFactory;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupConfigurationManagerFactory;
 import com.facebook.presto.spi.security.PasswordAuthenticatorFactory;
+import com.facebook.presto.spi.security.PrestoAuthenticatorFactory;
 import com.facebook.presto.spi.security.SystemAccessControlFactory;
 import com.facebook.presto.spi.session.SessionPropertyConfigurationManagerFactory;
-import com.facebook.presto.spi.statistics.ExternalPlanStatisticsProvider;
+import com.facebook.presto.spi.session.WorkerSessionPropertyProviderFactory;
+import com.facebook.presto.spi.sql.planner.ExpressionOptimizerFactory;
+import com.facebook.presto.spi.statistics.HistoryBasedPlanStatisticsProvider;
 import com.facebook.presto.spi.storage.TempStorageFactory;
+import com.facebook.presto.spi.tracing.TracerProvider;
 import com.facebook.presto.spi.ttl.ClusterTtlProviderFactory;
 import com.facebook.presto.spi.ttl.NodeTtlFetcherFactory;
+import com.facebook.presto.sql.analyzer.AnalyzerProviderManager;
+import com.facebook.presto.sql.analyzer.QueryPreparerProviderManager;
+import com.facebook.presto.sql.expressions.ExpressionOptimizerManager;
+import com.facebook.presto.sql.planner.sanity.PlanCheckerProviderManager;
 import com.facebook.presto.storage.TempStorageManager;
+import com.facebook.presto.tracing.TracerProviderManager;
 import com.facebook.presto.ttl.clusterttlprovidermanagers.ClusterTtlProviderManager;
 import com.facebook.presto.ttl.nodettlfetchermanagers.NodeTtlFetcherManager;
 import com.google.common.collect.ImmutableList;
@@ -96,13 +113,16 @@ public class PluginManager
             .add("com.facebook.drift.TApplicationException")
             .build();
 
+    //  TODO: To make CoordinatorPlugin loading compulsory when native execution is enabled.
+    private static final String COORDINATOR_PLUGIN_SERVICES_FILE = "META-INF/services/" + CoordinatorPlugin.class.getName();
+    private static final String PLUGIN_SERVICES_FILE = "META-INF/services/" + Plugin.class.getName();
     private static final Logger log = Logger.get(PluginManager.class);
-
     private final ConnectorManager connectorManager;
     private final Metadata metadata;
     private final ResourceGroupManager<?> resourceGroupManager;
     private final AccessControlManager accessControlManager;
     private final PasswordAuthenticatorManager passwordAuthenticatorManager;
+    private final PrestoAuthenticatorManager prestoAuthenticatorManager;
     private final EventListenerManager eventListenerManager;
     private final BlockEncodingManager blockEncodingManager;
     private final TempStorageManager tempStorageManager;
@@ -117,6 +137,13 @@ public class PluginManager
     private final AtomicBoolean pluginsLoaded = new AtomicBoolean();
     private final ImmutableSet<String> disabledConnectors;
     private final HistoryBasedPlanStatisticsManager historyBasedPlanStatisticsManager;
+    private final TracerProviderManager tracerProviderManager;
+    private final AnalyzerProviderManager analyzerProviderManager;
+    private final QueryPreparerProviderManager queryPreparerProviderManager;
+    private final NodeStatusNotificationManager nodeStatusNotificationManager;
+    private final ClientRequestFilterManager clientRequestFilterManager;
+    private final PlanCheckerProviderManager planCheckerProviderManager;
+    private final ExpressionOptimizerManager expressionOptimizerManager;
 
     @Inject
     public PluginManager(
@@ -125,8 +152,11 @@ public class PluginManager
             ConnectorManager connectorManager,
             Metadata metadata,
             ResourceGroupManager<?> resourceGroupManager,
+            AnalyzerProviderManager analyzerProviderManager,
+            QueryPreparerProviderManager queryPreparerProviderManager,
             AccessControlManager accessControlManager,
             PasswordAuthenticatorManager passwordAuthenticatorManager,
+            PrestoAuthenticatorManager prestoAuthenticatorManager,
             EventListenerManager eventListenerManager,
             BlockEncodingManager blockEncodingManager,
             TempStorageManager tempStorageManager,
@@ -134,7 +164,12 @@ public class PluginManager
             SessionPropertyDefaults sessionPropertyDefaults,
             NodeTtlFetcherManager nodeTtlFetcherManager,
             ClusterTtlProviderManager clusterTtlProviderManager,
-            HistoryBasedPlanStatisticsManager historyBasedPlanStatisticsManager)
+            HistoryBasedPlanStatisticsManager historyBasedPlanStatisticsManager,
+            TracerProviderManager tracerProviderManager,
+            NodeStatusNotificationManager nodeStatusNotificationManager,
+            ClientRequestFilterManager clientRequestFilterManager,
+            PlanCheckerProviderManager planCheckerProviderManager,
+            ExpressionOptimizerManager expressionOptimizerManager)
     {
         requireNonNull(nodeInfo, "nodeInfo is null");
         requireNonNull(config, "config is null");
@@ -153,6 +188,7 @@ public class PluginManager
         this.resourceGroupManager = requireNonNull(resourceGroupManager, "resourceGroupManager is null");
         this.accessControlManager = requireNonNull(accessControlManager, "accessControlManager is null");
         this.passwordAuthenticatorManager = requireNonNull(passwordAuthenticatorManager, "passwordAuthenticatorManager is null");
+        this.prestoAuthenticatorManager = requireNonNull(prestoAuthenticatorManager, "prestoAuthenticatorManager is null");
         this.eventListenerManager = requireNonNull(eventListenerManager, "eventListenerManager is null");
         this.blockEncodingManager = requireNonNull(blockEncodingManager, "blockEncodingManager is null");
         this.tempStorageManager = requireNonNull(tempStorageManager, "tempStorageManager is null");
@@ -162,6 +198,13 @@ public class PluginManager
         this.clusterTtlProviderManager = requireNonNull(clusterTtlProviderManager, "clusterTtlProviderManager is null");
         this.disabledConnectors = requireNonNull(config.getDisabledConnectors(), "disabledConnectors is null");
         this.historyBasedPlanStatisticsManager = requireNonNull(historyBasedPlanStatisticsManager, "historyBasedPlanStatisticsManager is null");
+        this.tracerProviderManager = requireNonNull(tracerProviderManager, "tracerProviderManager is null");
+        this.analyzerProviderManager = requireNonNull(analyzerProviderManager, "analyzerProviderManager is null");
+        this.queryPreparerProviderManager = requireNonNull(queryPreparerProviderManager, "queryPreparerProviderManager is null");
+        this.nodeStatusNotificationManager = requireNonNull(nodeStatusNotificationManager, "nodeStatusNotificationManager is null");
+        this.clientRequestFilterManager = requireNonNull(clientRequestFilterManager, "clientRequestFilterManager is null");
+        this.planCheckerProviderManager = requireNonNull(planCheckerProviderManager, "planCheckerProviderManager is null");
+        this.expressionOptimizerManager = requireNonNull(expressionOptimizerManager, "expressionManager is null");
     }
 
     public void loadPlugins()
@@ -192,23 +235,32 @@ public class PluginManager
         log.info("-- Loading plugin %s --", plugin);
         URLClassLoader pluginClassLoader = buildClassLoader(plugin);
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(pluginClassLoader)) {
-            loadPlugin(pluginClassLoader);
+            loadPlugin(pluginClassLoader, CoordinatorPlugin.class);
+            loadPlugin(pluginClassLoader, Plugin.class);
         }
         log.info("-- Finished loading plugin %s --", plugin);
     }
 
-    private void loadPlugin(URLClassLoader pluginClassLoader)
+    private void loadPlugin(URLClassLoader pluginClassLoader, Class<?> clazz)
     {
-        ServiceLoader<Plugin> serviceLoader = ServiceLoader.load(Plugin.class, pluginClassLoader);
-        List<Plugin> plugins = ImmutableList.copyOf(serviceLoader);
+        ServiceLoader<?> serviceLoader = ServiceLoader.load(clazz, pluginClassLoader);
+        List<?> plugins = ImmutableList.copyOf(serviceLoader);
 
         if (plugins.isEmpty()) {
-            log.warn("No service providers of type %s", Plugin.class.getName());
+            log.warn("No service providers of type %s", clazz.getName());
         }
 
-        for (Plugin plugin : plugins) {
+        for (Object plugin : plugins) {
             log.info("Installing %s", plugin.getClass().getName());
-            installPlugin(plugin);
+            if (plugin instanceof Plugin) {
+                installPlugin((Plugin) plugin);
+            }
+            else if (plugin instanceof CoordinatorPlugin) {
+                installCoordinatorPlugin((CoordinatorPlugin) plugin);
+            }
+            else {
+                log.warn("Unknown plugin type: %s", plugin.getClass().getName());
+            }
         }
     }
 
@@ -268,6 +320,11 @@ public class PluginManager
             passwordAuthenticatorManager.addPasswordAuthenticatorFactory(authenticatorFactory);
         }
 
+        for (PrestoAuthenticatorFactory authenticatorFactory : plugin.getPrestoAuthenticatorFactories()) {
+            log.info("Registering presto authenticator %s", authenticatorFactory.getName());
+            prestoAuthenticatorManager.addPrestoAuthenticatorFactory(authenticatorFactory);
+        }
+
         for (EventListenerFactory eventListenerFactory : plugin.getEventListenerFactories()) {
             log.info("Registering event listener %s", eventListenerFactory.getName());
             eventListenerManager.addEventListenerFactory(eventListenerFactory);
@@ -293,9 +350,57 @@ public class PluginManager
             clusterTtlProviderManager.addClusterTtlProviderFactory(clusterTtlProviderFactory);
         }
 
-        for (ExternalPlanStatisticsProvider externalPlanStatisticsProvider : plugin.getExternalPlanStatisticsProviders()) {
-            log.info("Registering plan statistics provider %s", externalPlanStatisticsProvider.getName());
-            historyBasedPlanStatisticsManager.addExternalPlanStatisticsProviderFactory(externalPlanStatisticsProvider);
+        for (HistoryBasedPlanStatisticsProvider historyBasedPlanStatisticsProvider : plugin.getHistoryBasedPlanStatisticsProviders()) {
+            log.info("Registering plan statistics provider %s", historyBasedPlanStatisticsProvider.getName());
+            historyBasedPlanStatisticsManager.addHistoryBasedPlanStatisticsProviderFactory(historyBasedPlanStatisticsProvider);
+        }
+
+        for (TracerProvider tracerProvider : plugin.getTracerProviders()) {
+            log.info("Registering tracer provider %s", tracerProvider.getName());
+            tracerProviderManager.addTracerProviderFactory(tracerProvider);
+        }
+
+        for (AnalyzerProvider analyzerProvider : plugin.getAnalyzerProviders()) {
+            log.info("Registering analyzer provider %s", analyzerProvider.getType());
+            analyzerProviderManager.addAnalyzerProvider(analyzerProvider);
+        }
+
+        for (QueryPreparerProvider preparerProvider : plugin.getQueryPreparerProviders()) {
+            log.info("Registering query preparer provider %s", preparerProvider.getType());
+            queryPreparerProviderManager.addQueryPreparerProvider(preparerProvider);
+        }
+
+        for (NodeStatusNotificationProviderFactory nodeStatusNotificationProviderFactory : plugin.getNodeStatusNotificationProviderFactory()) {
+            log.info("Registering node status notification provider %s", nodeStatusNotificationProviderFactory.getName());
+            nodeStatusNotificationManager.addNodeStatusNotificationProviderFactory(nodeStatusNotificationProviderFactory);
+        }
+
+        for (ClientRequestFilterFactory clientRequestFilterFactory : plugin.getClientRequestFilterFactories()) {
+            log.info("Registering client request filter factory");
+            clientRequestFilterManager.registerClientRequestFilterFactory(clientRequestFilterFactory);
+        }
+    }
+
+    public void installCoordinatorPlugin(CoordinatorPlugin plugin)
+    {
+        for (FunctionNamespaceManagerFactory functionNamespaceManagerFactory : plugin.getFunctionNamespaceManagerFactories()) {
+            log.info("Registering function namespace manager %s", functionNamespaceManagerFactory.getName());
+            metadata.getFunctionAndTypeManager().addFunctionNamespaceFactory(functionNamespaceManagerFactory);
+        }
+
+        for (WorkerSessionPropertyProviderFactory providerFactory : plugin.getWorkerSessionPropertyProviderFactories()) {
+            log.info("Registering system session property provider factory %s", providerFactory.getName());
+            metadata.getSessionPropertyManager().addSessionPropertyProviderFactory(providerFactory);
+        }
+
+        for (PlanCheckerProviderFactory planCheckerProviderFactory : plugin.getPlanCheckerProviderFactories()) {
+            log.info("Registering plan checker provider factory %s", planCheckerProviderFactory.getName());
+            planCheckerProviderManager.addPlanCheckerProviderFactory(planCheckerProviderFactory);
+        }
+
+        for (ExpressionOptimizerFactory expressionOptimizerFactory : plugin.getExpressionOptimizerFactories()) {
+            log.info("Registering expression optimizer factory %s", expressionOptimizerFactory.getName());
+            expressionOptimizerManager.addExpressionOptimizerFactory(expressionOptimizerFactory);
         }
     }
 
@@ -319,10 +424,9 @@ public class PluginManager
         URLClassLoader classLoader = createClassLoader(artifacts, pomFile.getPath());
 
         Artifact artifact = artifacts.get(0);
-        Set<String> plugins = discoverPlugins(artifact, classLoader);
-        if (!plugins.isEmpty()) {
-            writePluginServices(plugins, artifact.getFile());
-        }
+
+        processPlugins(artifact, classLoader, COORDINATOR_PLUGIN_SERVICES_FILE, CoordinatorPlugin.class.getName());
+        processPlugins(artifact, classLoader, PLUGIN_SERVICES_FILE, Plugin.class.getName());
 
         return classLoader;
     }
@@ -386,5 +490,14 @@ public class PluginManager
         List<Artifact> list = new ArrayList<>(artifacts);
         Collections.sort(list, Ordering.natural().nullsLast().onResultOf(Artifact::getFile));
         return list;
+    }
+
+    private void processPlugins(Artifact artifact, ClassLoader classLoader, String servicesFile, String className)
+            throws IOException
+    {
+        Set<String> plugins = discoverPlugins(artifact, classLoader, servicesFile, className);
+        if (!plugins.isEmpty()) {
+            writePluginServices(plugins, artifact.getFile(), servicesFile);
+        }
     }
 }

@@ -48,6 +48,7 @@ public class StageId
     public StageId(QueryId queryId, int id)
     {
         this.queryId = requireNonNull(queryId, "queryId is null");
+        checkArgument(id >= 0, "id is negative: %s", id);
         this.id = id;
     }
 
@@ -78,7 +79,15 @@ public class StageId
     @JsonValue
     public String toString()
     {
-        return queryId + "." + id;
+        StringBuilder builder = new StringBuilder();
+        appendString(builder);
+        return builder.toString();
+    }
+
+    public void appendString(StringBuilder builder)
+    {
+        queryId.appendString(builder);
+        builder.append(".").append(id);
     }
 
     @Override

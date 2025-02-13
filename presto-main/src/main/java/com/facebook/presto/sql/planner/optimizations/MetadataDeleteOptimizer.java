@@ -15,17 +15,17 @@ package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.metadata.Metadata;
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.WarningCollector;
+import com.facebook.presto.spi.plan.DeleteNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.spi.plan.TableFinishNode;
 import com.facebook.presto.spi.plan.TableScanNode;
-import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.facebook.presto.sql.planner.TypeProvider;
-import com.facebook.presto.sql.planner.plan.DeleteNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.MetadataDeleteNode;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
-import com.facebook.presto.sql.planner.plan.TableFinishNode;
 import com.google.common.collect.Iterables;
 
 import java.util.List;
@@ -58,9 +58,11 @@ public class MetadataDeleteOptimizer
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, PlanVariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public PlanOptimizerResult optimize(PlanNode plan, Session session, TypeProvider types, VariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
-        return SimplePlanRewriter.rewriteWith(new Optimizer(session, metadata, idAllocator), plan, null);
+        Optimizer optimizer = new Optimizer(session, metadata, idAllocator);
+        PlanNode rewrittenPlan = SimplePlanRewriter.rewriteWith(optimizer, plan, null);
+        return PlanOptimizerResult.optimizerResult(rewrittenPlan, optimizer.isPlanChanged());
     }
 
     private static class Optimizer
@@ -69,12 +71,18 @@ public class MetadataDeleteOptimizer
         private final PlanNodeIdAllocator idAllocator;
         private final Session session;
         private final Metadata metadata;
+        private boolean planChanged;
 
         private Optimizer(Session session, Metadata metadata, PlanNodeIdAllocator idAllocator)
         {
             this.session = session;
             this.metadata = metadata;
             this.idAllocator = idAllocator;
+        }
+
+        public boolean isPlanChanged()
+        {
+            return planChanged;
         }
 
         @Override
@@ -93,6 +101,7 @@ public class MetadataDeleteOptimizer
                 return context.defaultRewrite(node);
             }
 
+            planChanged = true;
             return new MetadataDeleteNode(
                     node.getSourceLocation(),
                     idAllocator.getNextId(),

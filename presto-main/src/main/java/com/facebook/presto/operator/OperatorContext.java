@@ -33,6 +33,7 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
+import java.util.HashSet;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
@@ -62,6 +63,8 @@ public class OperatorContext
     private final DriverContext driverContext;
     private final Executor executor;
 
+    private final OperationTiming isBlockedTiming = new OperationTiming();
+
     private final CounterStat rawInputDataSize = new CounterStat();
     private final CounterStat rawInputPositions = new CounterStat();
 
@@ -72,6 +75,15 @@ public class OperatorContext
     private final OperationTiming getOutputTiming = new OperationTiming();
     private final CounterStat outputDataSize = new CounterStat();
     private final CounterStat outputPositions = new CounterStat();
+
+    // Number of NULL elements in hash table for join operator
+    private final AtomicLong nullJoinBuildKeyCount = new AtomicLong();
+    // Number of elements in hash table for join operator
+    private final AtomicLong joinBuildKeyCount = new AtomicLong();
+    // Number of NULL probe rows for join operator
+    private final AtomicLong nullJoinProbeKeyCount = new AtomicLong();
+    // Number of probe rows for join operator
+    private final AtomicLong joinProbeKeyCount = new AtomicLong();
 
     private final AtomicLong additionalCpuNanos = new AtomicLong();
 
@@ -219,6 +231,26 @@ public class OperatorContext
     {
         outputDataSize.update(sizeInBytes);
         outputPositions.update(positions);
+    }
+
+    public void recordNullJoinBuildKeyCount(long positions)
+    {
+        nullJoinBuildKeyCount.getAndAdd(positions);
+    }
+
+    public void recordJoinBuildKeyCount(long positions)
+    {
+        joinBuildKeyCount.getAndAdd(positions);
+    }
+
+    public void recordNullJoinProbeKeyCount(long positions)
+    {
+        nullJoinProbeKeyCount.getAndAdd(positions);
+    }
+
+    public void recordJoinProbeKeyCount(long positions)
+    {
+        joinProbeKeyCount.getAndAdd(positions);
     }
 
     public void recordPhysicalWrittenData(long sizeInBytes)
@@ -506,6 +538,11 @@ public class OperatorContext
 
                 1,
 
+                isBlockedTiming.getCalls(),
+                succinctNanos(isBlockedTiming.getWallNanos()),
+                succinctNanos(isBlockedTiming.getCpuNanos()),
+                succinctBytes(isBlockedTiming.getAllocationBytes()),
+
                 addInputTiming.getCalls(),
                 succinctNanos(addInputTiming.getWallNanos()),
                 succinctNanos(addInputTiming.getCpuNanos()),
@@ -545,7 +582,12 @@ public class OperatorContext
 
                 memoryFuture.get().isDone() ? Optional.empty() : Optional.of(WAITING_FOR_MEMORY),
                 info,
-                runtimeStats);
+                runtimeStats,
+                new DynamicFilterStats(new HashSet<>()),
+                nullJoinBuildKeyCount.get(),
+                joinBuildKeyCount.get(),
+                nullJoinProbeKeyCount.get(),
+                joinProbeKeyCount.get());
     }
 
     public <C, R> R accept(QueryContextVisitor<C, R> visitor, C context)

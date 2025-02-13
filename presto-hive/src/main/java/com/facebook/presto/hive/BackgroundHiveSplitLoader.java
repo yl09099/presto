@@ -25,6 +25,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.io.IOException;
 import java.util.Deque;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.Executor;
@@ -71,7 +72,7 @@ public class BackgroundHiveSplitLoader
     public BackgroundHiveSplitLoader(
             Table table,
             Iterable<HivePartitionMetadata> partitions,
-            Optional<Domain> pathDomain,
+            Map<Integer, Domain> infoColumnConstraints,
             Optional<BucketSplitInfo> tableBucketInfo,
             ConnectorSession session,
             HdfsEnvironment hdfsEnvironment,
@@ -87,7 +88,7 @@ public class BackgroundHiveSplitLoader
         checkArgument(loaderConcurrency > 0, "loaderConcurrency must be > 0, found: %s", loaderConcurrency);
         this.executor = requireNonNull(executor, "executor is null");
         this.partitions = new ConcurrentLazyQueue<>(requireNonNull(partitions, "partitions is null"));
-        this.delegatingPartitionLoader = new DelegatingPartitionLoader(table, pathDomain, tableBucketInfo, session, hdfsEnvironment, namenodeStats, directoryLister, fileIterators, recursiveDirWalkerEnabled, schedulerUsesHostAddresses, partialAggregationsPushedDown);
+        this.delegatingPartitionLoader = new DelegatingPartitionLoader(table, infoColumnConstraints, tableBucketInfo, session, hdfsEnvironment, namenodeStats, directoryLister, fileIterators, recursiveDirWalkerEnabled, schedulerUsesHostAddresses, partialAggregationsPushedDown);
     }
 
     @Override
@@ -109,11 +110,11 @@ public class BackgroundHiveSplitLoader
             implements ResumableTask
     {
         @Override
-        public TaskStatus process()
+        public ResumableTaskStatus process()
         {
             while (true) {
                 if (stopped) {
-                    return TaskStatus.finished();
+                    return ResumableTaskStatus.finished();
                 }
                 ListenableFuture<?> future;
                 taskExecutionLock.readLock().lock();
@@ -131,14 +132,14 @@ public class BackgroundHiveSplitLoader
                     // Otherwise, a race could occur where the split source is completed before we fail it.
                     hiveSplitSource.fail(e);
                     checkState(stopped);
-                    return TaskStatus.finished();
+                    return ResumableTaskStatus.finished();
                 }
                 finally {
                     taskExecutionLock.readLock().unlock();
                 }
                 invokeNoMoreSplitsIfNecessary();
                 if (!future.isDone()) {
-                    return TaskStatus.continueOn(future);
+                    return ResumableTaskStatus.continueOn(future);
                 }
             }
         }

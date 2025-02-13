@@ -14,20 +14,27 @@
 package com.facebook.presto.execution;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.common.ErrorCode;
 import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.execution.buffer.OutputBuffers;
+import com.facebook.presto.execution.scheduler.ScheduleResult;
 import com.facebook.presto.execution.scheduler.SplitSchedulerStats;
 import com.facebook.presto.execution.scheduler.TableWriteInfo;
 import com.facebook.presto.failureDetector.FailureDetector;
 import com.facebook.presto.metadata.InternalNode;
 import com.facebook.presto.metadata.RemoteTransactionHandle;
 import com.facebook.presto.metadata.Split;
-import com.facebook.presto.spi.ErrorCode;
+import com.facebook.presto.server.remotetask.HttpRemoteTask;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.plan.CteMaterializationInfo;
+import com.facebook.presto.spi.plan.PlanFragmentId;
+import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeId;
+import com.facebook.presto.spi.plan.TableFinishNode;
+import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.split.RemoteSplit;
 import com.facebook.presto.sql.planner.PlanFragment;
-import com.facebook.presto.sql.planner.plan.PlanFragmentId;
+import com.facebook.presto.sql.planner.optimizations.PlanNodeSearcher;
 import com.facebook.presto.sql.planner.plan.RemoteSourceNode;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableMap;
@@ -58,8 +65,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import static com.facebook.presto.SystemSessionProperties.getMaxFailedTaskPercentage;
+import static com.facebook.presto.SystemSessionProperties.isEnhancedCTESchedulingEnabled;
 import static com.facebook.presto.failureDetector.FailureDetector.State.GONE;
 import static com.facebook.presto.operator.ExchangeOperator.REMOTE_CONNECTOR_ID;
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -90,6 +99,8 @@ public final class SqlStageExecution
             REMOTE_TASK_MISMATCH.toErrorCode(),
             REMOTE_TASK_ERROR.toErrorCode());
 
+    public static final int DEFAULT_TASK_ATTEMPT_NUMBER = 0;
+
     private final Session session;
     private final StageExecutionStateMachine stateMachine;
     private final PlanFragment planFragment;
@@ -115,7 +126,7 @@ public final class SqlStageExecution
     @GuardedBy("this")
     private final Set<TaskId> failedTasks = newConcurrentHashSet();
     @GuardedBy("this")
-    private final Set<TaskId> tasksWithFinalInfo = newConcurrentHashSet();
+    private final Set<TaskId> runningTasks = newConcurrentHashSet();
 
     private final Set<Lifespan> finishedLifespans = ConcurrentHashMap.newKeySet();
     private final int totalLifespans;
@@ -210,7 +221,11 @@ public final class SqlStageExecution
     // this is a separate method to ensure that the `this` reference is not leaked during construction
     private void initialize()
     {
-        stateMachine.addStateChangeListener(newState -> checkAllTaskFinal());
+        stateMachine.addStateChangeListener(newState -> {
+            if (newState.isDone()) {
+                checkAllTaskFinal();
+            }
+        });
         completedLifespansChangeListeners.addListener(lifespans -> finishedLifespans.addAll(lifespans));
     }
 
@@ -344,6 +359,17 @@ public final class SqlStageExecution
         return DataSize.succinctBytes(datasize);
     }
 
+    public synchronized DataSize getWrittenIntermediateDataSize()
+    {
+        long datasize = getAllTasks().stream()
+                .filter(remoteTask -> remoteTask instanceof HttpRemoteTask)
+                .map(remoteTask -> (HttpRemoteTask) remoteTask)
+                .filter(httpRemoteTask -> !httpRemoteTask.getPlanFragment().isOutputTableWriterFragment())
+                .mapToLong(task -> task.getTaskInfo().getStats().getPhysicalWrittenDataSizeInBytes())
+                .sum();
+        return DataSize.succinctBytes(datasize);
+    }
+
     public BasicStageExecutionStats getBasicStageStats()
     {
         return stateMachine.getBasicStageStats(this::getAllTaskInfo);
@@ -450,7 +476,7 @@ public final class SqlStageExecution
             return Optional.empty();
         }
         checkState(!splitsScheduled.get(), "scheduleTask can not be called once splits have been scheduled");
-        return Optional.of(scheduleTask(node, new TaskId(stateMachine.getStageExecutionId(), partition), ImmutableMultimap.of()));
+        return Optional.of(scheduleTask(node, new TaskId(stateMachine.getStageExecutionId(), partition, DEFAULT_TASK_ATTEMPT_NUMBER), ImmutableMultimap.of()));
     }
 
     public synchronized Set<RemoteTask> scheduleSplits(InternalNode node, Multimap<PlanNodeId, Split> splits, Multimap<PlanNodeId, Lifespan> noMoreSplitsNotification)
@@ -471,7 +497,7 @@ public final class SqlStageExecution
         if (tasks == null) {
             // The output buffer depends on the task id starting from 0 and being sequential, since each
             // task is assigned a private buffer based on task id.
-            TaskId taskId = new TaskId(stateMachine.getStageExecutionId(), nextTaskId.getAndIncrement());
+            TaskId taskId = new TaskId(stateMachine.getStageExecutionId(), nextTaskId.getAndIncrement(), DEFAULT_TASK_ATTEMPT_NUMBER);
             task = scheduleTask(node, taskId, splits);
             newTasks.add(task);
         }
@@ -517,11 +543,14 @@ public final class SqlStageExecution
                 outputBuffers,
                 nodeTaskMap.createTaskStatsTracker(node, taskId),
                 summarizeTaskInfo,
-                tableWriteInfo);
+                tableWriteInfo,
+                stateMachine);
 
         completeSources.forEach(task::noMoreSplits);
 
         allTasks.add(taskId);
+        runningTasks.add(taskId);
+
         tasks.computeIfAbsent(node, key -> newConcurrentHashSet()).add(task);
         nodeTaskMap.addTask(node, task);
 
@@ -535,7 +564,6 @@ public final class SqlStageExecution
             // stage finished while we were scheduling this task
             task.abort();
         }
-
         return task;
     }
 
@@ -549,6 +577,22 @@ public final class SqlStageExecution
         stateMachine.recordGetSplitTime(start);
     }
 
+    public void recordSchedulerRunningTime(long cpuTimeNanos, long wallTimeNanos)
+    {
+        if (planFragment.isLeaf()) {
+            stateMachine.recordLeafStageSchedulerRunningTime(cpuTimeNanos, wallTimeNanos);
+        }
+        stateMachine.recordSchedulerRunningTime(cpuTimeNanos, wallTimeNanos);
+    }
+
+    public void recordSchedulerBlockedTime(ScheduleResult.BlockedReason reason, long nanos)
+    {
+        if (planFragment.isLeaf()) {
+            stateMachine.recordLeafStageSchedulerBlockedTime(reason, nanos);
+        }
+        stateMachine.recordSchedulerBlockedTime(reason, nanos);
+    }
+
     private static Split createRemoteSplitFor(TaskId taskId, URI remoteSourceTaskLocation, TaskId remoteSourceTaskId)
     {
         // Fetch the results from the buffer assigned to the task based on id
@@ -556,63 +600,110 @@ public final class SqlStageExecution
         return new Split(REMOTE_CONNECTOR_ID, new RemoteTransactionHandle(), new RemoteSplit(new Location(splitLocation), remoteSourceTaskId));
     }
 
+    private static String getCteIdFromSource(PlanNode source)
+    {
+        // Traverse the plan node tree to find a TableWriterNode with TemporaryTableInfo
+        return PlanNodeSearcher.searchFrom(source)
+                .where(planNode -> planNode instanceof TableFinishNode)
+                .findFirst()
+                .flatMap(planNode -> ((TableFinishNode) planNode).getCteMaterializationInfo())
+                .map(CteMaterializationInfo::getCteId)
+                .orElseThrow(() -> new IllegalStateException("TemporaryTableInfo has no CTE ID"));
+    }
+
+    public boolean isCTETableFinishStage()
+    {
+        return PlanNodeSearcher.searchFrom(planFragment.getRoot())
+                .where(planNode -> planNode instanceof TableFinishNode &&
+                        ((TableFinishNode) planNode).getCteMaterializationInfo().isPresent())
+                .findSingle()
+                .isPresent();
+    }
+
+    public String getCTEWriterId()
+    {
+        // Validate that this is a CTE TableFinish stage and return the associated CTE ID
+        if (!isCTETableFinishStage()) {
+            throw new IllegalStateException("This stage is not a CTE writer stage");
+        }
+        return getCteIdFromSource(planFragment.getRoot());
+    }
+
+    public boolean requiresMaterializedCTE()
+    {
+        if (!isEnhancedCTESchedulingEnabled(session)) {
+            return false;
+        }
+        // Search for TableScanNodes and check if they reference TemporaryTableInfo
+        return PlanNodeSearcher.searchFrom(planFragment.getRoot())
+                .where(planNode -> planNode instanceof TableScanNode)
+                .findAll().stream()
+                .anyMatch(planNode -> ((TableScanNode) planNode).getCteMaterializationInfo().isPresent());
+    }
+
+    public List<String> getRequiredCTEList()
+    {
+        // Collect all CTE IDs referenced by TableScanNodes with TemporaryTableInfo
+        return PlanNodeSearcher.searchFrom(planFragment.getRoot())
+                .where(planNode -> planNode instanceof TableScanNode)
+                .findAll().stream()
+                .map(planNode -> ((TableScanNode) planNode).getCteMaterializationInfo()
+                        .orElseThrow(() -> new IllegalStateException("TableScanNode has no TemporaryTableInfo")))
+                .map(CteMaterializationInfo::getCteId)
+                .collect(Collectors.toList());
+    }
+
     private void updateTaskStatus(TaskId taskId, TaskStatus taskStatus)
     {
-        try {
-            StageExecutionState stageExecutionState = getState();
-            if (stageExecutionState.isDone()) {
-                return;
-            }
+        StageExecutionState stageExecutionState = getState();
+        if (stageExecutionState.isDone()) {
+            return;
+        }
 
-            TaskState taskState = taskStatus.getState();
-            if (taskState == TaskState.FAILED) {
-                // no matter if it is possible to recover - the task is failed
-                failedTasks.add(taskId);
+        TaskState taskState = taskStatus.getState();
+        if (taskState == TaskState.FAILED) {
+            // no matter if it is possible to recover - the task is failed
+            failedTasks.add(taskId);
 
-                RuntimeException failure = taskStatus.getFailures().stream()
-                        .findFirst()
-                        .map(this::rewriteTransportFailure)
-                        .map(ExecutionFailureInfo::toException)
-                        .orElse(new PrestoException(GENERIC_INTERNAL_ERROR, "A task failed for an unknown reason"));
-                if (isRecoverable(taskStatus.getFailures())) {
-                    try {
-                        stageTaskRecoveryCallback.get().recover(taskId);
-                        finishedTasks.add(taskId);
-                    }
-                    catch (Throwable t) {
-                        // In an ideal world, this exception is not supposed to happen.
-                        // However, it could happen, for example, if connector throws exception.
-                        // We need to handle the exception in order to fail the query properly, otherwise the failed task will hang in RUNNING/SCHEDULING state.
-                        failure.addSuppressed(new PrestoException(GENERIC_RECOVERY_ERROR, format("Encountered error when trying to recover task %s", taskId), t));
-                        stateMachine.transitionToFailed(failure);
-                    }
+            RuntimeException failure = taskStatus.getFailures().stream()
+                    .findFirst()
+                    .map(this::rewriteTransportFailure)
+                    .map(ExecutionFailureInfo::toException)
+                    .orElseGet(() -> new PrestoException(GENERIC_INTERNAL_ERROR, "A task failed for an unknown reason"));
+            if (isRecoverable(taskStatus.getFailures())) {
+                try {
+                    stageTaskRecoveryCallback.get().recover(taskId);
+                    finishedTasks.add(taskId);
                 }
-                else {
+                catch (Throwable t) {
+                    // In an ideal world, this exception is not supposed to happen.
+                    // However, it could happen, for example, if connector throws exception.
+                    // We need to handle the exception in order to fail the query properly, otherwise the failed task will hang in RUNNING/SCHEDULING state.
+                    failure.addSuppressed(new PrestoException(GENERIC_RECOVERY_ERROR, format("Encountered error when trying to recover task %s", taskId), t));
                     stateMachine.transitionToFailed(failure);
                 }
             }
-            else if (taskState == TaskState.ABORTED) {
-                // A task should only be in the aborted state if the STAGE is done (ABORTED or FAILED)
-                stateMachine.transitionToFailed(new PrestoException(GENERIC_INTERNAL_ERROR, "A task is in the ABORTED state but stage is " + stageExecutionState));
-            }
-            else if (taskState == TaskState.FINISHED) {
-                finishedTasks.add(taskId);
-            }
-
-            // The finishedTasks.add(taskStatus.getTaskId()) must happen before the getState() (see schedulingComplete)
-            stageExecutionState = getState();
-            if (stageExecutionState == StageExecutionState.SCHEDULED || stageExecutionState == StageExecutionState.RUNNING) {
-                if (taskState == TaskState.RUNNING) {
-                    stateMachine.transitionToRunning();
-                }
-                if (finishedTasks.size() == allTasks.size()) {
-                    stateMachine.transitionToFinished();
-                }
+            else {
+                stateMachine.transitionToFailed(failure);
             }
         }
-        finally {
-            // after updating state, check if all tasks have final status information
-            checkAllTaskFinal();
+        else if (taskState == TaskState.ABORTED) {
+            // A task should only be in the aborted state if the STAGE is done (ABORTED or FAILED)
+            stateMachine.transitionToFailed(new PrestoException(GENERIC_INTERNAL_ERROR, "A task is in the ABORTED state but stage is " + stageExecutionState));
+        }
+        else if (taskState == TaskState.FINISHED) {
+            finishedTasks.add(taskId);
+        }
+
+        // The finishedTasks.add(taskStatus.getTaskId()) must happen before the getState() (see schedulingComplete)
+        stageExecutionState = getState();
+        if (stageExecutionState == StageExecutionState.SCHEDULED || stageExecutionState == StageExecutionState.RUNNING) {
+            if (taskState == TaskState.RUNNING) {
+                stateMachine.transitionToRunning();
+            }
+            if (finishedTasks.size() == allTasks.size()) {
+                stateMachine.transitionToFinished();
+            }
         }
     }
 
@@ -629,13 +720,13 @@ public final class SqlStageExecution
 
     private synchronized void updateFinalTaskInfo(TaskInfo finalTaskInfo)
     {
-        tasksWithFinalInfo.add(finalTaskInfo.getTaskId());
+        runningTasks.remove(finalTaskInfo.getTaskId());
         checkAllTaskFinal();
     }
 
     private synchronized void checkAllTaskFinal()
     {
-        if (stateMachine.getState().isDone() && tasksWithFinalInfo.containsAll(allTasks)) {
+        if (stateMachine.getState().isDone() && runningTasks.isEmpty()) {
             if (getFragment().getStageExecutionDescriptor().isStageGroupedExecution()) {
                 // in case stage is CANCELLED/ABORTED/FAILED, number of finished lifespans can be less than total lifespans
                 checkState(finishedLifespans.size() <= totalLifespans, format("Number of finished lifespans (%s) exceeds number of total lifespans (%s)", finishedLifespans.size(), totalLifespans));
@@ -666,7 +757,8 @@ public final class SqlStageExecution
                 executionFailureInfo.getStack(),
                 executionFailureInfo.getErrorLocation(),
                 REMOTE_HOST_GONE.toErrorCode(),
-                executionFailureInfo.getRemoteHost());
+                executionFailureInfo.getRemoteHost(),
+                executionFailureInfo.getErrorCause());
     }
 
     @Override

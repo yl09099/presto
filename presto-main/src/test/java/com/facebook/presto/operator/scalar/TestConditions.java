@@ -41,9 +41,9 @@ public class TestConditions
 
         assertFunction("'_monkey_' like '\\_monkey\\_'", BOOLEAN, false);
         assertFunction("'_monkey_' like 'X_monkeyX_' escape 'X'", BOOLEAN, true);
-        assertFunction("'_monkey_' like '_monkey_' escape ''", BOOLEAN, true);
+        assertFunction("'_monkey_' like '_monkey_'", BOOLEAN, true);
 
-        assertFunction("'*?.(){}+|^$,\\' like '*?.(){}+|^$,\\' escape ''", BOOLEAN, true);
+        assertFunction("'*?.(){}+|^$,\\' like '*?.(){}+|^$,\\'", BOOLEAN, true);
 
         assertFunction("null like 'monkey'", BOOLEAN, null);
         assertFunction("'monkey' like null", BOOLEAN, null);
@@ -61,15 +61,22 @@ public class TestConditions
 
         assertFunction("'_monkey_' not like '\\_monkey\\_'", BOOLEAN, true);
         assertFunction("'_monkey_' not like 'X_monkeyX_' escape 'X'", BOOLEAN, false);
-        assertFunction("'_monkey_' not like '_monkey_' escape ''", BOOLEAN, false);
+        assertFunction("'_monkey_' not like '_monkey_'", BOOLEAN, false);
 
-        assertFunction("'*?.(){}+|^$,\\' not like '*?.(){}+|^$,\\' escape ''", BOOLEAN, false);
+        assertFunction("'*?.(){}+|^$,\\' not like '*?.(){}+|^$,\\'", BOOLEAN, false);
 
         assertFunction("null not like 'monkey'", BOOLEAN, null);
         assertFunction("'monkey' not like null", BOOLEAN, null);
         assertFunction("'monkey' not like 'monkey' escape null", BOOLEAN, null);
 
         assertInvalidFunction("'monkey' like 'monkey' escape 'foo'", "Escape string must be a single character");
+
+        assertFunction("'你好a世界' like '你好%'", BOOLEAN, true);
+        assertFunction("'你好a世界' like '你好a%'", BOOLEAN, true);
+        assertFunction("'你好a世界' like '%世界'", BOOLEAN, true);
+        assertFunction("'你好a世界' like '%好a世%'", BOOLEAN, true);
+        assertFunction("'你好a世界' not like '你好b%'", BOOLEAN, true);
+        assertFunction("'你好a世界' not like null", BOOLEAN, null);
     }
 
     @Test

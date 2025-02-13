@@ -17,6 +17,7 @@ import com.facebook.airlift.log.Logger;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.execution.Lifespan;
 import com.facebook.presto.memory.context.LocalMemoryContext;
+import com.facebook.presto.spi.ErrorCause;
 import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.spiller.SingleStreamSpiller;
 import com.facebook.presto.spiller.SingleStreamSpillerFactory;
@@ -56,6 +57,7 @@ public class HashBuilderOperator
         implements Operator
 {
     private static final Logger log = Logger.get(HashBuilderOperator.class);
+    public static final String OPERATOR_TYPE = "HashBuilderOperator";
 
     public static class HashBuilderOperatorFactory
             implements OperatorFactory
@@ -367,15 +369,20 @@ public class HashBuilderOperator
     {
         checkState(spillInProgress.isDone(), "Previous spill still in progress");
         checkSpillSucceeded(spillInProgress);
-        spillInProgress = getSpiller().spill(page);
+        long sizeOfPage = page.getSizeInBytes();
 
         // check that spilled data can still fit into memory limit as otherwise
         // it fails later during unspilling when all spilled pages need to be loaded into memory
         long maxUserMemoryBytes = getQueryMaxMemoryPerNode(operatorContext.getSession()).toBytes();
-        if (getSpiller().getSpilledPagesInMemorySize() > maxUserMemoryBytes) {
-            String additionalInfo = format("Spilled: %s, Operator: %s", succinctBytes(getSpiller().getSpilledPagesInMemorySize()), HashBuilderOperator.class.getSimpleName());
-            throw exceededLocalUserMemoryLimit(succinctBytes(maxUserMemoryBytes), additionalInfo, false, Optional.empty());
+        long totalSpilledBytes = sizeOfPage + getSpiller().getSpilledPagesInMemorySize();
+        if (totalSpilledBytes > maxUserMemoryBytes) {
+            String additionalInfo = format("Spilled: %s, Operator: %s", succinctBytes(totalSpilledBytes), HashBuilderOperator.class.getSimpleName());
+            throw exceededLocalUserMemoryLimit(succinctBytes(maxUserMemoryBytes), additionalInfo, false, Optional.empty(), ErrorCause.UNKNOWN);
         }
+
+        spillInProgress = getSpiller().spill(page);
+        long retainedSizeOfPage = page.getRetainedSizeInBytes();
+        log.debug("Spilling for operator %s, sizeOfPage %s, retainedSizeOfPage %s, totalSpilledBytes %s", operatorContext, sizeOfPage, retainedSizeOfPage, totalSpilledBytes);
     }
 
     @Override
@@ -391,9 +398,12 @@ public class HashBuilderOperator
                 finishMemoryRevoke = Optional.of(() -> {});
                 return immediateFuture(null);
             }
+            log.debug("Memory Revoke started for operator %s, estimatedSizeIndex: %s, spilled bytes: %s ", operatorContext, index.getEstimatedSize().toBytes(), localRevocableMemoryContext.getBytes(), state);
 
             finishMemoryRevoke = Optional.of(() -> {
                 index.clear();
+                long estimatedIndexSize = index.getEstimatedSize().toBytes();
+                log.debug("Done Revoking Memory for operator %s, estimatedIndexSize: %s, spilled bytes: %s, state: %s", operatorContext, estimatedIndexSize, localRevocableMemoryContext.getBytes(), state);
                 localUserMemoryContext.setBytes(index.getEstimatedSize().toBytes(), enforceBroadcastMemoryLimit);
                 localRevocableMemoryContext.setBytes(0);
                 lookupSourceFactory.setPartitionSpilledLookupSourceHandle(partitionIndex, spilledLookupSourceHandle);
@@ -406,6 +416,8 @@ public class HashBuilderOperator
                 lookupSourceFactory.setPartitionSpilledLookupSourceHandle(partitionIndex, spilledLookupSourceHandle);
                 lookupSourceNotNeeded = Optional.empty();
                 index.clear();
+                long estimatedIndexSize = index.getEstimatedSize().toBytes();
+                log.debug("Done Revoking Memory for operator %s, estimatedIndexSize: %s, spilled bytes: %s, state %s", operatorContext, estimatedIndexSize, localRevocableMemoryContext.getBytes(), state);
                 localUserMemoryContext.setBytes(index.getEstimatedSize().toBytes(), enforceBroadcastMemoryLimit);
                 localRevocableMemoryContext.setBytes(0);
                 lookupSourceChecksum = OptionalLong.of(lookupSourceSupplier.checksum());
@@ -430,6 +442,14 @@ public class HashBuilderOperator
                 index.getTypes(),
                 operatorContext.getSpillContext().newLocalSpillContext(),
                 operatorContext.localSystemMemoryContext()));
+        long indexEstimatedSize = index.getEstimatedSize().toBytes();
+        log.debug("Spilling Index for operator: %s, index estimated size: %s", operatorContext, indexEstimatedSize);
+        long maxUserMemoryBytes = getQueryMaxMemoryPerNode(operatorContext.getSession()).toBytes();
+        if (indexEstimatedSize > maxUserMemoryBytes) {
+            log.error("Spill Index Failure due to memory limit %s, spilled Bytes: %s", indexEstimatedSize, getSpiller().getSpilledPagesInMemorySize());
+            String additionalInfo = format("Estimated Spilled: %s, Operator: %s", succinctBytes(indexEstimatedSize), HashBuilderOperator.class.getSimpleName());
+            throw exceededLocalUserMemoryLimit(succinctBytes(maxUserMemoryBytes), additionalInfo, false, Optional.empty(), ErrorCause.UNKNOWN);
+        }
         return getSpiller().spill(index.getPages());
     }
 
@@ -554,7 +574,10 @@ public class HashBuilderOperator
         verify(spiller.isPresent());
         verify(!unspillInProgress.isPresent());
 
-        localUserMemoryContext.setBytes(getSpiller().getSpilledPagesInMemorySize() + index.getEstimatedSize().toBytes(), enforceBroadcastMemoryLimit);
+        long memorySizeOfSpillPages = getSpiller().getSpilledPagesInMemorySize();
+        long estimatedSizeOfIndex = index.getEstimatedSize().toBytes();
+        log.debug("Unspilling lookup source for operator %s: memorySizeOfSpillPages: %s estimatedSizeOfIndex: %s", operatorContext, memorySizeOfSpillPages, estimatedSizeOfIndex);
+        localUserMemoryContext.setBytes(memorySizeOfSpillPages + estimatedSizeOfIndex, enforceBroadcastMemoryLimit);
         unspillInProgress = Optional.of(getSpiller().getAllSpilledPages());
 
         state = State.INPUT_UNSPILLING;
@@ -621,6 +644,8 @@ public class HashBuilderOperator
     {
         LookupSourceSupplier partition = index.createLookupSourceSupplier(operatorContext.getSession(), hashChannels, preComputedHashChannel, filterFunctionFactory, sortChannel, searchFunctionFactories, Optional.of(outputChannels));
         hashCollisionsCounter.recordHashCollision(partition.getHashCollisions(), partition.getExpectedHashCollisions());
+        operatorContext.recordNullJoinBuildKeyCount(partition.getPositionIsNullCount());
+        operatorContext.recordJoinBuildKeyCount(partition.getPositionCount());
         checkState(lookupSourceSupplier == null, "lookupSourceSupplier is already set");
         this.lookupSourceSupplier = partition;
         return partition;

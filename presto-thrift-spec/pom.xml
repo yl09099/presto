@@ -5,7 +5,7 @@
     <parent>
         <groupId>com.facebook.presto</groupId>
         <artifactId>presto-root</artifactId>
-        <version>0.276-SNAPSHOT</version>
+        <version>0.292-SNAPSHOT</version>
     </parent>
 
     <artifactId>presto-thrift-spec</artifactId>
@@ -15,6 +15,10 @@
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>com.facebook.presto</groupId>
+            <artifactId>presto-common</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.facebook.presto</groupId>
             <artifactId>presto-main</artifactId>
@@ -28,6 +32,7 @@
                 <artifactId>maven-dependency-plugin</artifactId>
                 <configuration>
                     <ignoredDependencies>
+                        <ignoredDependency>com.facebook.presto:presto-common</ignoredDependency>
                         <ignoredDependency>com.facebook.presto:presto-main</ignoredDependency>
                     </ignoredDependencies>
                 </configuration>
@@ -47,7 +52,7 @@
                                 <class>com.facebook.presto.execution.TaskStatus</class>
                             </classes>
                             <recursive>true</recursive>
-                            <outputFile>target/presto-internal-${project.version}.thrift</outputFile>
+                            <outputFile>target/thrift/presto-internal-${project.version}.thrift</outputFile>
                         </configuration>
                     </execution>
                 </executions>
@@ -65,7 +70,7 @@
                         <configuration>
                             <artifacts>
                                 <artifact>
-                                    <file>target/presto-internal-${project.version}.thrift</file>
+                                    <file>target/thrift/presto-internal-${project.version}.thrift</file>
                                     <type>thrift</type>
                                 </artifact>
                             </artifacts>

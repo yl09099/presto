@@ -1,17 +1,27 @@
-# Presto [![Build Status](https://travis-ci.com/prestodb/presto.svg?branch=master)](https://travis-ci.com/prestodb/presto)
+# Presto
 
 Presto is a distributed SQL query engine for big data.
 
-See the [User Manual](https://prestodb.github.io/docs/current/) for deployment instructions and end user documentation.
+See the [Presto installation documentation](https://prestodb.io/docs/current/installation.html) for deployment instructions.
+
+See the [Presto documentation](https://prestodb.io/docs/current/) for general documentation.
+
+
+## Mission and Architecture
+
+See [PrestoDB: Mission and Architecture](ARCHITECTURE.md). 
 
 ## Requirements
 
 * Mac OS X or Linux
 * Java 8 Update 151 or higher (8u151+), 64-bit. Both Oracle JDK and OpenJDK are supported.
-* Maven 3.3.9+ (for building)
+* Maven 3.6.3+ (for building)
 * Python 2.4+ (for running with the launcher script)
 
-## Building Presto
+<details> <!-- from: https://github.com/prestodb/presto/blob/master/README.md -->
+  <summary><a id="building-presto"><h2>Building Presto</h2></a></summary>
+
+### Overview (Java)
 
 Presto is a standard Maven project. Simply run the following command from the project root directory:
 
@@ -22,10 +32,6 @@ On the first build, Maven will download all the dependencies from the internet a
 Presto has a comprehensive set of unit tests that can take several minutes to run. You can disable the tests when building:
 
     ./mvnw clean install -DskipTests
-
-## Running Presto in your IDE
-
-### Overview
 
 After building Presto for the first time, you can load the project into your IDE and run the server. We recommend using [IntelliJ IDEA](http://www.jetbrains.com/idea/). Because Presto is a standard Maven project, you can import it into your IDE using the root `pom.xml` file. In IntelliJ, choose Open Project from the Quick Start box or choose Open from the File menu and select the root `pom.xml` file.
 
@@ -72,40 +78,66 @@ In the sample configuration, the Hive connector is mounted in the `hive` catalog
 
     SHOW TABLES FROM hive.default;
 
-## Code Style
+### Building the Documentation
 
-We recommend you use IntelliJ as your IDE. The code style template for the project can be found in the [codestyle](https://github.com/airlift/codestyle) repository along with our general programming and Java guidelines. In addition to those you should also adhere to the following:
+To build the Presto docs, see the [docs README](presto-docs/README.md).
 
-* Alphabetize sections in the documentation source files (both in table of contents files and other regular documentation files). In general, alphabetize methods/variables/sections if such ordering already exists in the surrounding code.
-* When appropriate, use the Java 8 stream API. However, note that the stream implementation does not perform well so avoid using it in inner loops or otherwise performance sensitive sections.
-* Categorize errors when throwing exceptions. For example, PrestoException takes an error code as an argument, `PrestoException(HIVE_TOO_MANY_OPEN_PARTITIONS)`. This categorization lets you generate reports so you can monitor the frequency of various failures.
-* Ensure that all files have the appropriate license header; you can generate the license by running `mvn license:format`.
-* Consider using String formatting (printf style formatting using the Java `Formatter` class): `format("Session property %s is invalid: %s", name, value)` (note that `format()` should always be statically imported). Sometimes, if you only need to append something, consider using the `+` operator.
-* Avoid using the ternary operator except for trivial expressions.
-* Use an assertion from Airlift's `Assertions` class if there is one that covers your case rather than writing the assertion by hand. Over time we may move over to more fluent assertions like AssertJ.
-* When writing a Git commit message, follow these [guidelines](https://chris.beams.io/posts/git-commit/).
+### Building the Presto Console
 
-## Building the Documentation
+The Presto Console is composed of several React components and is written in JSX and ES6. This
+source code is stored in the `presto-ui/` module. The compilation process generates
+browser-compatible javascript which is added as JAR resources during the maven build. When the
+resource JAR is included on the classpath of Presto coordinator, it will be able to serve the
+resources.
 
-To learn how to build the docs, see the [docs README](presto-docs/README.md).
+None of the Java code relies on the Presto UI project being compiled, so it is possible to exclude
+this UI when building Presto. Add the property `-DskipUI` to the maven command to disable building
+the `ui` maven module.
 
-## Building the Web UI
+    ./mvnw clean install -DskipUI
 
-The Presto Web UI is composed of several React components and is written in JSX and ES6. This source code is compiled and packaged into browser-compatible JavaScript, which is then checked in to the Presto source code (in the `dist` folder). You must have [Node.js](https://nodejs.org/en/download/) and [Yarn](https://yarnpkg.com/en/) installed to execute these commands. To update this folder after making changes, simply run:
+You must have [Node.js](https://nodejs.org/en/download/) and [Yarn](https://yarnpkg.com/en/) installed to build the UI. When using  Maven to build
+the project, Node and yarn are installed in the `presto-ui/target` folder. Add the node and yarn
+executables to the `PATH` environment variable.
 
-    yarn --cwd presto-main/src/main/resources/webapp/src install
+To update Presto Console after making changes, run:
+
+    yarn --cwd presto-ui/src install
 
 If no JavaScript dependencies have changed (i.e., no changes to `package.json`), it is faster to run:
 
-    yarn --cwd presto-main/src/main/resources/webapp/src run package
+    yarn --cwd presto-ui/src run package
 
-To simplify iteration, you can also run in `watch` mode, which automatically re-compiles when changes to source files are detected:
+To simplify iteration, you can also run in `watch` mode, which automatically re-compiles when
+changes to source files are detected:
 
-    yarn --cwd presto-main/src/main/resources/webapp/src run watch
+    yarn --cwd presto-ui/src run watch
 
-To iterate quickly, simply re-build the project in IntelliJ after packaging is complete. Project resources will be hot-reloaded and changes are reflected on browser refresh.
+To iterate quickly, simply re-build the project in IntelliJ after packaging is complete. Project
+resources will be hot-reloaded and changes are reflected on browser refresh.
 
-## Release Notes
+## Presto native and Velox
 
-When authoring a pull request, the PR description should include its relevant release notes.
-Follow [Release Notes Guidelines](https://github.com/prestodb/presto/wiki/Release-Notes-Guidelines) when authoring release notes. 
+[Presto native](https://github.com/prestodb/presto/tree/master/presto-native-execution) is a C++ rewrite of Presto worker. [Presto native](https://github.com/prestodb/presto/tree/master/presto-native-execution) uses [Velox](https://github.com/facebookincubator/velox) as its primary engine to run presto workloads.
+
+[Velox](https://github.com/facebookincubator/velox) is a C++ database library which provides reusable, extensible, and high-performance data processing components.
+
+Check out [building instructions](https://github.com/prestodb/presto/tree/master/presto-native-execution#build-from-source) to get started.
+
+
+<hr>
+</details>
+
+
+## Contributing!
+
+Please refer to the [contribution guidelines](https://github.com/prestodb/presto/blob/master/CONTRIBUTING.md) to get started.
+
+## Questions?
+
+[Please join our Slack channel and ask in `#dev`](https://communityinviter.com/apps/prestodb/prestodb).
+
+## License
+
+By contributing to Presto, you agree that your contributions will be licensed under the [Apache License Version 2.0 (APLv2)](LICENSE).
+

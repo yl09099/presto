@@ -19,19 +19,19 @@ import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.Assignments;
 import com.facebook.presto.spi.plan.FilterNode;
+import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.spi.plan.SpatialJoinNode;
+import com.facebook.presto.spi.plan.StatisticAggregations;
+import com.facebook.presto.spi.plan.TableFinishNode;
+import com.facebook.presto.spi.plan.TableWriterNode;
 import com.facebook.presto.spi.plan.ValuesNode;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.plan.ApplyNode;
-import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.sql.planner.plan.SpatialJoinNode;
-import com.facebook.presto.sql.planner.plan.StatisticAggregations;
-import com.facebook.presto.sql.planner.plan.TableFinishNode;
-import com.facebook.presto.sql.planner.plan.TableWriterNode;
-import com.facebook.presto.sql.planner.plan.WindowNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -55,6 +55,7 @@ import static com.facebook.presto.sql.relational.Expressions.call;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableMap.builder;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public class RowExpressionRewriteRuleSet
@@ -141,8 +142,18 @@ public class RowExpressionRewriteRuleSet
         return new AggregationRowExpressionRewrite();
     }
 
+    public abstract class RowExpressionRewriteRule<T>
+            implements Rule<T>
+    {
+        public String getOptimizerNameForLog()
+        {
+            String rewriterName = rewriter.getClass().getName();
+            return format("%s:%s", rewriterName.substring(rewriterName.lastIndexOf('.') + 1), this.getClass().getSimpleName());
+        }
+    }
+
     private final class ProjectRowExpressionRewrite
-            implements Rule<ProjectNode>
+            extends RowExpressionRewriteRule<ProjectNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -177,7 +188,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class SpatialJoinRowExpressionRewrite
-            implements Rule<SpatialJoinNode>
+            extends RowExpressionRewriteRule<SpatialJoinNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -215,7 +226,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class JoinRowExpressionRewrite
-            implements Rule<JoinNode>
+            extends RowExpressionRewriteRule<JoinNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -259,7 +270,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class WindowRowExpressionRewrite
-            implements Rule<WindowNode>
+            extends RowExpressionRewriteRule<WindowNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -316,7 +327,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class ApplyRowExpressionRewrite
-            implements Rule<ApplyNode>
+            extends RowExpressionRewriteRule<ApplyNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -346,7 +357,8 @@ public class RowExpressionRewriteRuleSet
                     applyNode.getSubquery(),
                     rewrittenAssignments.get(),
                     applyNode.getCorrelation(),
-                    applyNode.getOriginSubqueryError()));
+                    applyNode.getOriginSubqueryError(),
+                    applyNode.getMayParticipateInAntiJoin()));
         }
     }
 
@@ -365,7 +377,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class FilterRowExpressionRewrite
-            implements Rule<FilterNode>
+            extends RowExpressionRewriteRule<FilterNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -393,7 +405,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class ValuesRowExpressionRewrite
-            implements Rule<ValuesNode>
+            extends RowExpressionRewriteRule<ValuesNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -431,7 +443,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class AggregationRowExpressionRewrite
-            implements Rule<AggregationNode>
+            extends RowExpressionRewriteRule<AggregationNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -470,7 +482,8 @@ public class RowExpressionRewriteRuleSet
                         node.getPreGroupedVariables(),
                         node.getStep(),
                         node.getHashVariable(),
-                        node.getGroupIdVariable());
+                        node.getGroupIdVariable(),
+                        node.getAggregationId());
                 return Result.ofPlanNode(aggregationNode);
             }
             return Result.empty();
@@ -478,7 +491,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class TableFinishRowExpressionRewrite
-            implements Rule<TableFinishNode>
+            extends RowExpressionRewriteRule<TableFinishNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -511,7 +524,8 @@ public class RowExpressionRewriteRuleSet
                         node.getTarget(),
                         node.getRowCountVariable(),
                         rewrittenStatisticsAggregation,
-                        node.getStatisticsAggregationDescriptor()));
+                        node.getStatisticsAggregationDescriptor(),
+                        node.getCteMaterializationInfo()));
             }
             return Result.empty();
         }
@@ -535,7 +549,7 @@ public class RowExpressionRewriteRuleSet
     }
 
     private final class TableWriterRowExpressionRewrite
-            implements Rule<TableWriterNode>
+            extends RowExpressionRewriteRule<TableWriterNode>
     {
         @Override
         public boolean isEnabled(Session session)
@@ -564,6 +578,7 @@ public class RowExpressionRewriteRuleSet
                 return Result.ofPlanNode(new TableWriterNode(
                         node.getSourceLocation(),
                         node.getId(),
+                        node.getStatsEquivalentPlanNode(),
                         node.getSource(),
                         node.getTarget(),
                         node.getRowCountVariable(),
@@ -573,8 +588,9 @@ public class RowExpressionRewriteRuleSet
                         node.getColumnNames(),
                         node.getNotNullColumnVariables(),
                         node.getTablePartitioningScheme(),
-                        node.getPreferredShufflePartitioningScheme(),
-                        rewrittenStatisticsAggregation));
+                        rewrittenStatisticsAggregation,
+                        node.getTaskCountIfScaledWriter(),
+                        node.getIsTemporaryTableWriter()));
             }
             return Result.empty();
         }

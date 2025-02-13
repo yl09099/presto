@@ -66,11 +66,20 @@ public class TestTimeZoneUtils
                 // http://mm.icann.org/pipermail/tz-announce/2020-October/000059.html
                 continue;
             }
-
-            if (zoneId.equals("Pacific/Kanton")) {
-                // TODO: remove Once Joda version supports this Timezone.
-                // JDK supported this timezone, but not Joda and was resulting in the test failure.
-                // https://www.joda.org/joda-time/timezones.html
+            if (zoneId.equals("Europe/Zaporozhye")) {
+                // TODO: Remove once minimum Java version is increased 17.0.7
+                continue;
+            }
+            if (zoneId.equals("Europe/Uzhgorod")) {
+                // TODO: Remove once minimum Java version is increased 17.0.7
+                continue;
+            }
+            if (zoneId.equals("Europe/Kiev")) {
+                // TODO: Remove once minimum Java version is increased 17.0.7
+                continue;
+            }
+            if (zoneId.equals("Europe/Kyiv")) {
+                // TODO: Remove once minimum Java version is increased 17.0.7
                 continue;
             }
 
@@ -78,6 +87,13 @@ public class TestTimeZoneUtils
             DateTimeZone indexedZone = getDateTimeZone(TimeZoneKey.getTimeZoneKey(zoneId));
 
             assertDateTimeZoneEquals(zoneId, indexedZone);
+            if (dateTimeZone.getID().equals("Pacific/Kanton")) {
+                // Pacific/Enderbury normalizes to Pacific/Kanton,
+                // both introduced in tzdata2021b 2021/09/25
+                // These are not yet available in all supported JDK patch versions.
+                // TODO: Remove once minimum Java version is increased to 17.0.2/11.0.14/8u321
+                continue;
+            }
             assertTimeZone(zoneId, dateTimeZone);
         }
     }

@@ -13,17 +13,19 @@
  */
 package com.facebook.presto.server;
 
+import com.facebook.airlift.log.Logger;
 import com.facebook.presto.Session;
+import com.facebook.presto.common.WarningHandlingLevel;
 import com.facebook.presto.common.type.TimeZoneKey;
 import com.facebook.presto.execution.warnings.WarningCollectorFactory;
-import com.facebook.presto.execution.warnings.WarningHandlingLevel;
 import com.facebook.presto.metadata.SessionPropertyManager;
-import com.facebook.presto.security.AccessControl;
+import com.facebook.presto.server.security.SecurityConfig;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.function.SqlFunctionId;
 import com.facebook.presto.spi.function.SqlInvokedFunction;
-import com.facebook.presto.spi.security.AccessControlContext;
+import com.facebook.presto.spi.security.AccessControl;
+import com.facebook.presto.spi.security.AuthorizedIdentity;
 import com.facebook.presto.spi.security.Identity;
 import com.facebook.presto.sql.SqlEnvironmentConfig;
 import com.facebook.presto.transaction.TransactionManager;
@@ -38,6 +40,8 @@ import java.util.Optional;
 import static com.facebook.presto.Session.SessionBuilder;
 import static com.facebook.presto.SystemSessionProperties.WARNING_HANDLING;
 import static com.facebook.presto.common.type.TimeZoneKey.getTimeZoneKey;
+import static com.facebook.presto.security.AccessControlUtils.checkPermissions;
+import static com.facebook.presto.security.AccessControlUtils.getAuthorizedIdentity;
 import static java.util.Map.Entry;
 import static java.util.Objects.requireNonNull;
 
@@ -45,36 +49,46 @@ import static java.util.Objects.requireNonNull;
 public class QuerySessionSupplier
         implements SessionSupplier
 {
+    private final Logger log = Logger.get(QuerySessionSupplier.class);
+
     private final TransactionManager transactionManager;
     private final AccessControl accessControl;
     private final SessionPropertyManager sessionPropertyManager;
     private final Optional<TimeZoneKey> forcedSessionTimeZone;
+    private final SecurityConfig securityConfig;
 
     @Inject
     public QuerySessionSupplier(
             TransactionManager transactionManager,
             AccessControl accessControl,
             SessionPropertyManager sessionPropertyManager,
-            SqlEnvironmentConfig config)
+            SqlEnvironmentConfig sqlEnvironmentConfig,
+            SecurityConfig securityConfig)
     {
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.accessControl = requireNonNull(accessControl, "accessControl is null");
         this.sessionPropertyManager = requireNonNull(sessionPropertyManager, "sessionPropertyManager is null");
-        requireNonNull(config, "config is null");
-        this.forcedSessionTimeZone = requireNonNull(config.getForcedSessionTimeZone(), "forcedSessionTimeZone is null");
+        requireNonNull(sqlEnvironmentConfig, "sqlEnvironmentConfig is null");
+        this.forcedSessionTimeZone = requireNonNull(sqlEnvironmentConfig.getForcedSessionTimeZone(), "forcedSessionTimeZone is null");
+        this.securityConfig = requireNonNull(securityConfig, "securityConfig is null");
     }
 
     @Override
     public Session createSession(QueryId queryId, SessionContext context, WarningCollectorFactory warningCollectorFactory)
     {
-        Identity identity = context.getIdentity();
-        accessControl.checkCanSetUser(
-                identity,
-                new AccessControlContext(queryId, Optional.ofNullable(context.getClientInfo()), Optional.ofNullable(context.getSource())), identity.getPrincipal(), identity.getUser());
+        Session session = createSessionBuilder(queryId, context, warningCollectorFactory).build();
+        if (context.getTransactionId().isPresent()) {
+            session = session.beginTransactionId(context.getTransactionId().get(), transactionManager, accessControl);
+        }
+        return session;
+    }
 
+    @Override
+    public SessionBuilder createSessionBuilder(QueryId queryId, SessionContext context, WarningCollectorFactory warningCollectorFactory)
+    {
         SessionBuilder sessionBuilder = Session.builder(sessionPropertyManager)
                 .setQueryId(queryId)
-                .setIdentity(identity)
+                .setIdentity(authenticateIdentity(queryId, context))
                 .setSource(context.getSource())
                 .setCatalog(context.getCatalog())
                 .setSchema(context.getSchema())
@@ -84,7 +98,8 @@ public class QuerySessionSupplier
                 .setClientTags(context.getClientTags())
                 .setTraceToken(context.getTraceToken())
                 .setResourceEstimates(context.getResourceEstimates())
-                .setTracer(context.getTracer());
+                .setTracer(context.getTracer())
+                .setRuntimeStats(context.getRuntimeStats());
 
         if (forcedSessionTimeZone.isPresent()) {
             sessionBuilder.setTimeZoneKey(forcedSessionTimeZone.get());
@@ -123,11 +138,22 @@ public class QuerySessionSupplier
         WarningCollector warningCollector = warningCollectorFactory.create(sessionBuilder.getSystemProperty(WARNING_HANDLING, WarningHandlingLevel.class));
         sessionBuilder.setWarningCollector(warningCollector);
 
-        Session session = sessionBuilder.build();
-        if (context.getTransactionId().isPresent()) {
-            session = session.beginTransactionId(context.getTransactionId().get(), transactionManager, accessControl);
-        }
+        return sessionBuilder;
+    }
 
-        return session;
+    private Identity authenticateIdentity(QueryId queryId, SessionContext context)
+    {
+        checkPermissions(accessControl, securityConfig, queryId, context);
+        Optional<AuthorizedIdentity> authorizedIdentity = context.getAuthorizedIdentity();
+        authorizedIdentity = authorizedIdentity.isPresent() ? authorizedIdentity : getAuthorizedIdentity(accessControl, securityConfig, queryId, context);
+
+        return authorizedIdentity.map(identity -> new Identity(
+                context.getIdentity().getUser(),
+                context.getIdentity().getPrincipal(),
+                context.getIdentity().getRoles(),
+                context.getIdentity().getExtraCredentials(),
+                context.getIdentity().getExtraAuthenticators(),
+                Optional.of(identity.getUserName()),
+                identity.getReasonForSelect())).orElseGet(context::getIdentity);
     }
 }

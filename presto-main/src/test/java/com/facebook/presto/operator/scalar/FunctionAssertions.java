@@ -14,14 +14,17 @@
 package com.facebook.presto.operator.scalar;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.common.InvalidTypeDefinitionException;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.PageBuilder;
+import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.Utils;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.function.SqlFunctionProperties;
 import com.facebook.presto.common.type.RowType;
 import com.facebook.presto.common.type.TimeZoneKey;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.execution.ScheduledSplit;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.FunctionListBuilder;
 import com.facebook.presto.metadata.Metadata;
@@ -62,6 +65,7 @@ import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
 import com.facebook.presto.split.PageSourceProvider;
 import com.facebook.presto.sql.analyzer.ExpressionAnalysis;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
+import com.facebook.presto.sql.analyzer.FunctionsConfig;
 import com.facebook.presto.sql.analyzer.SemanticErrorCode;
 import com.facebook.presto.sql.analyzer.SemanticException;
 import com.facebook.presto.sql.gen.ExpressionCompiler;
@@ -126,22 +130,24 @@ import static com.facebook.presto.common.type.DateTimeEncoding.packDateTimeWithZ
 import static com.facebook.presto.common.type.DoubleType.DOUBLE;
 import static com.facebook.presto.common.type.IntegerType.INTEGER;
 import static com.facebook.presto.common.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
-import static com.facebook.presto.common.type.UnknownType.UNKNOWN;
 import static com.facebook.presto.common.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
+import static com.facebook.presto.geospatial.type.GeometryType.GEOMETRY;
 import static com.facebook.presto.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static com.facebook.presto.spi.StandardErrorCode.INVALID_TYPE_DEFINITION;
 import static com.facebook.presto.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
 import static com.facebook.presto.spi.schedule.NodeSelectionStrategy.HARD_AFFINITY;
 import static com.facebook.presto.sql.ExpressionUtils.rewriteIdentifiersToSymbolReferences;
-import static com.facebook.presto.sql.ParsingUtil.createParsingOptions;
 import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.analyzeExpressions;
 import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.getExpressionTypes;
 import static com.facebook.presto.sql.planner.iterative.rule.CanonicalizeExpressionRewriter.canonicalizeExpression;
 import static com.facebook.presto.sql.relational.Expressions.constant;
 import static com.facebook.presto.sql.relational.SqlToRowExpressionTranslator.translate;
 import static com.facebook.presto.testing.TestingTaskContext.createTaskContext;
+import static com.facebook.presto.util.AnalyzerUtil.createParsingOptions;
+import static com.facebook.presto.util.Failures.toFailure;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.airlift.units.DataSize.Unit.BYTE;
 import static java.lang.String.format;
@@ -215,17 +221,32 @@ public final class FunctionAssertions
 
     public FunctionAssertions(Session session)
     {
-        this(session, new FeaturesConfig());
+        this(session, new FeaturesConfig(), new FunctionsConfig(), false);
     }
 
     public FunctionAssertions(Session session, FeaturesConfig featuresConfig)
     {
-        this.session = requireNonNull(session, "session is null");
-        runner = new LocalQueryRunner(session, featuresConfig);
+        this(session, featuresConfig, new FunctionsConfig(), false);
+    }
+
+    public FunctionAssertions(Session session, FunctionsConfig functionsConfig)
+    {
+        this(session, new FeaturesConfig(), functionsConfig, false);
+    }
+
+    public FunctionAssertions(Session session, FeaturesConfig featuresConfig, FunctionsConfig functionsConfig, boolean refreshSession)
+    {
+        requireNonNull(session, "session is null");
+        runner = new LocalQueryRunner(session, featuresConfig, functionsConfig);
+        if (refreshSession) {
+            this.session = runner.getDefaultSession();
+        }
+        else {
+            this.session = session;
+        }
         metadata = runner.getMetadata();
         compiler = runner.getExpressionCompiler();
     }
-
     public FunctionAndTypeManager getFunctionAndTypeManager()
     {
         return runner.getFunctionAndTypeManager();
@@ -264,6 +285,28 @@ public final class FunctionAssertions
         assertEquals(actual.doubleValue(), expected, delta);
     }
 
+    public void assertFunctionDoubleArrayWithError(String projection, Type expectedType, List<Double> expected, double delta)
+    {
+        Object actual = selectSingleValue(projection, expectedType, compiler);
+        assertTrue(actual instanceof ArrayList);
+        ArrayList<Object> arrayList = (ArrayList) actual;
+        assertEquals(arrayList.size(), expected.size());
+        for (int i = 0; i < arrayList.size(); ++i) {
+            assertEquals((double) arrayList.get(i), expected.get(i), delta);
+        }
+    }
+
+    public void assertFunctionFloatArrayWithError(String projection, Type expectedType, List<Float> expected, float delta)
+    {
+        Object actual = selectSingleValue(projection, expectedType, compiler);
+        assertTrue(actual instanceof ArrayList);
+        ArrayList<Object> arrayList = (ArrayList) actual;
+        assertEquals(arrayList.size(), expected.size());
+        for (int i = 0; i < arrayList.size(); ++i) {
+            assertEquals((float) arrayList.get(i), expected.get(i), delta);
+        }
+    }
+
     public void assertFunctionString(String projection, Type expectedType, String expected)
     {
         Object actual = selectSingleValue(projection, expectedType, compiler);
@@ -295,7 +338,7 @@ public final class FunctionAssertions
         MaterializedResult result = runner.execute("SELECT " + projection);
     }
 
-    protected <T> T selectSingleValue(String projection, Type expectedType, Class<T> clazz)
+    public <T> T selectSingleValue(String projection, Type expectedType, Class<T> clazz)
     {
         Object object = selectSingleValue(projection, expectedType, compiler);
         assertEquals(object.getClass(), clazz);
@@ -313,29 +356,16 @@ public final class FunctionAssertions
         HashSet<Object> resultSet = new HashSet<>(results);
 
         // we should only have a single result
-        assertTrue(resultSet.size() == 1, "Expected only one result unique result, but got " + resultSet);
+        assertEquals(resultSet.size(), 1, "Expected only one result unique result, but got " + resultSet);
 
         return Iterables.getOnlyElement(resultSet);
-    }
-
-    // this is not safe as it catches all RuntimeExceptions
-    @Deprecated
-    public void assertInvalidFunction(String projection)
-    {
-        try {
-            evaluateInvalid(projection);
-            fail("Expected to fail");
-        }
-        catch (RuntimeException e) {
-            // Expected
-        }
     }
 
     public void assertInvalidFunction(String projection, StandardErrorCode errorCode, String messagePattern)
     {
         try {
-            evaluateInvalid(projection);
-            fail("Expected to throw a PrestoException with message matching " + messagePattern);
+            Object value = evaluateInvalid(projection);
+            fail("Expected to throw a PrestoException with message matching " + messagePattern + " but got " + value);
         }
         catch (PrestoException e) {
             try {
@@ -357,8 +387,8 @@ public final class FunctionAssertions
     public void assertInvalidFunction(String projection, SemanticErrorCode expectedErrorCode)
     {
         try {
-            evaluateInvalid(projection);
-            fail(format("Expected to throw %s exception", expectedErrorCode));
+            Object value = evaluateInvalid(projection);
+            fail(format("Expected to throw %s exception but got %s", expectedErrorCode, value));
         }
         catch (SemanticException e) {
             try {
@@ -374,8 +404,8 @@ public final class FunctionAssertions
     public void assertInvalidFunction(String projection, SemanticErrorCode expectedErrorCode, String message)
     {
         try {
-            evaluateInvalid(projection);
-            fail(format("Expected to throw %s exception", expectedErrorCode));
+            Object value = evaluateInvalid(projection);
+            fail(format("Expected to throw %s exception but got %s", expectedErrorCode, value));
         }
         catch (SemanticException e) {
             try {
@@ -389,11 +419,29 @@ public final class FunctionAssertions
         }
     }
 
+    public void assertInvalidTypeDefinition(String projection, String message)
+    {
+        try {
+            Object value = evaluateInvalid(projection);
+            fail("Expected to throw an INVALID_CAST_ARGUMENT exception, but got " + value);
+        }
+        catch (InvalidTypeDefinitionException e) {
+            try {
+                assertEquals(toFailure(e).getErrorCode(), INVALID_TYPE_DEFINITION.toErrorCode());
+                assertEquals(e.getMessage(), message);
+            }
+            catch (Throwable failure) {
+                failure.addSuppressed(e);
+                throw failure;
+            }
+        }
+    }
+
     public void assertInvalidFunction(String projection, ErrorCodeSupplier expectedErrorCode)
     {
         try {
-            evaluateInvalid(projection);
-            fail(format("Expected to throw %s exception", expectedErrorCode.toErrorCode()));
+            Object value = evaluateInvalid(projection);
+            fail(format("Expected to throw %s exception but got %s", expectedErrorCode, value));
         }
         catch (PrestoException e) {
             try {
@@ -416,8 +464,8 @@ public final class FunctionAssertions
     public void assertNumericOverflow(String projection, String message)
     {
         try {
-            evaluateInvalid(projection);
-            fail("Expected to throw an NUMERIC_VALUE_OUT_OF_RANGE exception with message " + message);
+            Object value = evaluateInvalid(projection);
+            fail("Expected to throw an NUMERIC_VALUE_OUT_OF_RANGE exception with message " + message + " but got " + value);
         }
         catch (PrestoException e) {
             try {
@@ -434,8 +482,8 @@ public final class FunctionAssertions
     public void assertInvalidCast(String projection)
     {
         try {
-            evaluateInvalid(projection);
-            fail("Expected to throw an INVALID_CAST_ARGUMENT exception");
+            Object value = evaluateInvalid(projection);
+            fail("Expected to throw an INVALID_CAST_ARGUMENT exception but got " + value);
         }
         catch (PrestoException e) {
             try {
@@ -451,8 +499,8 @@ public final class FunctionAssertions
     public void assertInvalidCast(String projection, String message)
     {
         try {
-            evaluateInvalid(projection);
-            fail("Expected to throw an INVALID_CAST_ARGUMENT exception");
+            Object value = evaluateInvalid(projection);
+            fail("Expected to throw an INVALID_CAST_ARGUMENT exception, but got " + value);
         }
         catch (PrestoException e) {
             try {
@@ -466,10 +514,9 @@ public final class FunctionAssertions
         }
     }
 
-    private void evaluateInvalid(String projection)
+    private Object evaluateInvalid(String projection)
     {
-        // type isn't necessary as the function is not valid
-        selectSingleValue(projection, UNKNOWN, compiler);
+        return selectSingleValue(projection, GEOMETRY, compiler);
     }
 
     public void assertCachedInstanceHasBoundedRetainedSize(String projection)
@@ -662,7 +709,7 @@ public final class FunctionAssertions
     private Object selectSingleValue(SourceOperatorFactory operatorFactory, Type type, Split split, Session session)
     {
         SourceOperator operator = operatorFactory.createOperator(createDriverContext(session));
-        operator.addSplit(split);
+        operator.addSplit(new ScheduledSplit(0, operator.getSourceId(), split));
         operator.noMoreSplits();
         return selectSingleValue(operator, type);
     }
@@ -692,7 +739,7 @@ public final class FunctionAssertions
         HashSet<Boolean> resultSet = new HashSet<>(results);
 
         // we should only have a single result
-        assertTrue(resultSet.size() == 1, "Expected only [" + expected + "] result unique result, but got " + resultSet);
+        assertEquals(resultSet.size(), 1, "Expected only [" + expected + "] result unique result, but got " + resultSet);
 
         assertEquals((boolean) Iterables.getOnlyElement(resultSet), expected);
     }
@@ -828,7 +875,7 @@ public final class FunctionAssertions
     private static boolean executeFilter(SourceOperatorFactory operatorFactory, Split split, Session session)
     {
         SourceOperator operator = operatorFactory.createOperator(createDriverContext(session));
-        operator.addSplit(split);
+        operator.addSplit(new ScheduledSplit(0, operator.getSourceId(), split));
         operator.noMoreSplits();
         return executeFilter(operator);
     }
@@ -1058,7 +1105,7 @@ public final class FunctionAssertions
             implements PageSourceProvider
     {
         @Override
-        public ConnectorPageSource createPageSource(Session session, Split split, TableHandle table, List<ColumnHandle> columns)
+        public ConnectorPageSource createPageSource(Session session, Split split, TableHandle table, List<ColumnHandle> columns, RuntimeStats runtimeStats)
         {
             assertInstanceOf(split.getConnectorSplit(), FunctionAssertions.TestSplit.class);
             FunctionAssertions.TestSplit testSplit = (FunctionAssertions.TestSplit) split.getConnectorSplit();

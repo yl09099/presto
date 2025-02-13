@@ -13,28 +13,26 @@
  */
 package com.facebook.presto.sql.planner.optimizations;
 
+import com.facebook.presto.spi.plan.WindowNode;
+import com.facebook.presto.spi.plan.WindowNode.Frame.BoundType;
+import com.facebook.presto.spi.plan.WindowNode.Frame.WindowType;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.VariablesExtractor;
-import com.facebook.presto.sql.planner.plan.WindowNode;
-import com.facebook.presto.sql.planner.plan.WindowNode.Frame.BoundType;
-import com.facebook.presto.sql.planner.plan.WindowNode.Frame.WindowType;
 import com.facebook.presto.sql.tree.FrameBound;
 import com.facebook.presto.sql.tree.WindowFrame;
 import com.google.common.collect.ImmutableSet;
 
 import java.util.Set;
 
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.BoundType.CURRENT_ROW;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.BoundType.FOLLOWING;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.BoundType.PRECEDING;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.BoundType.UNBOUNDED_FOLLOWING;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.BoundType.UNBOUNDED_PRECEDING;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.WindowType.RANGE;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.WindowType.ROWS;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.isExpression;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.BoundType.CURRENT_ROW;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.BoundType.FOLLOWING;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.BoundType.PRECEDING;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.BoundType.UNBOUNDED_FOLLOWING;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.BoundType.UNBOUNDED_PRECEDING;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.WindowType.GROUPS;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.WindowType.RANGE;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.WindowType.ROWS;
 import static java.lang.String.format;
 
 public final class WindowNodeUtil
@@ -48,6 +46,8 @@ public final class WindowNodeUtil
                 return RANGE;
             case ROWS:
                 return ROWS;
+            case GROUPS:
+                return GROUPS;
             default:
                 throw new UnsupportedOperationException(format("unrecognized window frame type %s", type));
         }
@@ -73,16 +73,11 @@ public final class WindowNodeUtil
 
     // Explicitly limit the following functions for WindowNode.
     // TODO: Once the arguments in CallExpression are pure RowExpressions, move the method to VariablesExtractor
-    public static Set<VariableReferenceExpression> extractWindowFunctionUniqueVariables(WindowNode.Function function, TypeProvider types)
+    public static Set<VariableReferenceExpression> extractWindowFunctionUniqueVariables(WindowNode.Function function)
     {
         ImmutableSet.Builder<VariableReferenceExpression> builder = ImmutableSet.builder();
         for (RowExpression argument : function.getFunctionCall().getArguments()) {
-            if (isExpression(argument)) {
-                builder.addAll(VariablesExtractor.extractAll(castToExpression(argument), types));
-            }
-            else {
-                builder.addAll(VariablesExtractor.extractAll(argument));
-            }
+            builder.addAll(VariablesExtractor.extractAll(argument));
         }
         return builder.build();
     }

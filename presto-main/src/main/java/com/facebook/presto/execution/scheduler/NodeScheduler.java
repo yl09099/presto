@@ -29,6 +29,8 @@ import com.facebook.presto.metadata.InternalNodeManager;
 import com.facebook.presto.metadata.Split;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.HostAddress;
+import com.facebook.presto.spi.Node;
+import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.SplitContext;
 import com.facebook.presto.spi.SplitWeight;
 import com.facebook.presto.ttl.nodettlfetchermanagers.NodeTtlFetcherManager;
@@ -55,6 +57,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import static com.facebook.airlift.concurrent.MoreFutures.whenAnyCompleteCancelOthers;
 import static com.facebook.presto.SystemSessionProperties.getMaxUnacknowledgedSplitsPerTask;
@@ -65,6 +68,7 @@ import static com.facebook.presto.execution.scheduler.NodeSchedulerConfig.Resour
 import static com.facebook.presto.execution.scheduler.NodeSelectionHashStrategy.CONSISTENT_HASHING;
 import static com.facebook.presto.metadata.InternalNode.NodeStatus.ALIVE;
 import static com.facebook.presto.spi.NodeState.ACTIVE;
+import static com.facebook.presto.spi.StandardErrorCode.NO_NODES_AVAILABLE;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Suppliers.memoizeWithExpiration;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -73,6 +77,7 @@ import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.lang.Math.addExact;
 import static java.lang.Math.ceil;
 import static java.lang.Math.min;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -96,6 +101,7 @@ public class NodeScheduler
     private final SimpleTtlNodeSelectorConfig simpleTtlNodeSelectorConfig;
     private final NodeSelectionHashStrategy nodeSelectionHashStrategy;
     private final int minVirtualNodeCount;
+    private final int maxPreferredNodes;
 
     @Inject
     public NodeScheduler(
@@ -162,6 +168,7 @@ public class NodeScheduler
         this.simpleTtlNodeSelectorConfig = requireNonNull(simpleTtlNodeSelectorConfig, "simpleTtlNodeSelectorConfig is null");
         this.nodeSelectionHashStrategy = config.getNodeSelectionHashStrategy();
         this.minVirtualNodeCount = config.getMinVirtualNodeCount();
+        this.maxPreferredNodes = config.getMaxPreferredNodes();
     }
 
     @PreDestroy
@@ -181,15 +188,25 @@ public class NodeScheduler
 
     public NodeSelector createNodeSelector(Session session, ConnectorId connectorId)
     {
-        return createNodeSelector(session, connectorId, Integer.MAX_VALUE);
+        return createNodeSelector(session, connectorId, Integer.MAX_VALUE, Optional.empty());
+    }
+
+    public NodeSelector createNodeSelector(Session session, ConnectorId connectorId, Optional<Predicate<Node>> filterNodePredicate)
+    {
+        return createNodeSelector(session, connectorId, Integer.MAX_VALUE, filterNodePredicate);
     }
 
     public NodeSelector createNodeSelector(Session session, ConnectorId connectorId, int maxTasksPerStage)
     {
+        return createNodeSelector(session, connectorId, maxTasksPerStage, Optional.empty());
+    }
+
+    public NodeSelector createNodeSelector(Session session, ConnectorId connectorId, int maxTasksPerStage, Optional<Predicate<Node>> filterNodePredicate)
+    {
         // this supplier is thread-safe. TODO: this logic should probably move to the scheduler since the choice of which node to run in should be
         // done as close to when the split is about to be scheduled
         Supplier<NodeMap> nodeMap = nodeMapRefreshInterval.toMillis() > 0 ?
-                memoizeWithExpiration(createNodeMapSupplier(connectorId), nodeMapRefreshInterval.toMillis(), MILLISECONDS) : createNodeMapSupplier(connectorId);
+                memoizeWithExpiration(createNodeMapSupplier(connectorId, filterNodePredicate), nodeMapRefreshInterval.toMillis(), MILLISECONDS) : createNodeMapSupplier(connectorId, filterNodePredicate);
 
         int maxUnacknowledgedSplitsPerTask = getMaxUnacknowledgedSplitsPerTask(requireNonNull(session, "session is null"));
         ResourceAwareSchedulingStrategy resourceAwareSchedulingStrategy = getResourceAwareSchedulingStrategy(session);
@@ -207,7 +224,7 @@ public class NodeScheduler
                     topologicalSplitCounters,
                     networkLocationSegmentNames,
                     networkLocationCache,
-                    nodeSelectionHashStrategy);
+                    maxPreferredNodes);
         }
 
         SimpleNodeSelector simpleNodeSelector = new SimpleNodeSelector(
@@ -221,7 +238,7 @@ public class NodeScheduler
                 maxPendingSplitsWeightPerTask,
                 maxUnacknowledgedSplitsPerTask,
                 maxTasksPerStage,
-                nodeSelectionHashStrategy);
+                maxPreferredNodes);
 
         if (resourceAwareSchedulingStrategy == TTL) {
             return new SimpleTtlNodeSelector(
@@ -242,22 +259,23 @@ public class NodeScheduler
         return simpleNodeSelector;
     }
 
-    private Supplier<NodeMap> createNodeMapSupplier(ConnectorId connectorId)
+    private Supplier<NodeMap> createNodeMapSupplier(ConnectorId connectorId, Optional<Predicate<Node>> nodeFilterPredicate)
     {
         return () -> {
             ImmutableMap.Builder<String, InternalNode> activeNodesByNodeId = ImmutableMap.builder();
             ImmutableSetMultimap.Builder<NetworkLocation, InternalNode> activeWorkersByNetworkPath = ImmutableSetMultimap.builder();
             ImmutableSetMultimap.Builder<HostAddress, InternalNode> allNodesByHostAndPort = ImmutableSetMultimap.builder();
             ImmutableSetMultimap.Builder<InetAddress, InternalNode> allNodesByHost = ImmutableSetMultimap.builder();
-
+            Predicate<Node> resourceManagerFilterPredicate = node -> !node.isResourceManager();
+            Predicate<Node> finalNodeFilterPredicate = resourceManagerFilterPredicate.and(nodeFilterPredicate.orElse(node -> true));
             List<InternalNode> activeNodes;
             List<InternalNode> allNodes;
             if (connectorId != null) {
-                activeNodes = nodeManager.getActiveConnectorNodes(connectorId).stream().filter(node -> !node.isResourceManager()).collect(toImmutableList());
-                allNodes = nodeManager.getAllConnectorNodes(connectorId).stream().filter(node -> !node.isResourceManager()).collect(toImmutableList());
+                activeNodes = nodeManager.getActiveConnectorNodes(connectorId).stream().filter(finalNodeFilterPredicate).collect(toImmutableList());
+                allNodes = nodeManager.getAllConnectorNodes(connectorId).stream().filter(finalNodeFilterPredicate).collect(toImmutableList());
             }
             else {
-                activeNodes = nodeManager.getNodes(ACTIVE).stream().filter(node -> !node.isResourceManager()).collect(toImmutableList());
+                activeNodes = nodeManager.getNodes(ACTIVE).stream().filter(finalNodeFilterPredicate).collect(toImmutableList());
                 allNodes = activeNodes;
             }
 
@@ -336,17 +354,17 @@ public class NodeScheduler
                     .filter(node -> includeCoordinator || !coordinatorIds.contains(node.getNodeIdentifier()))
                     .forEach(chosen::add);
 
-            InetAddress address;
-            try {
-                address = host.toInetAddress();
-            }
-            catch (UnknownHostException e) {
-                // skip hosts that don't resolve
-                continue;
-            }
-
             // consider a split with a host without a port as being accessible by all nodes in that host
             if (!host.hasPort()) {
+                InetAddress address;
+                try {
+                    address = host.toInetAddress();
+                }
+                catch (UnknownHostException e) {
+                    // skip hosts that don't resolve
+                    continue;
+                }
+
                 nodeMap.getAllNodesByHost().get(address).stream()
                         .filter(node -> includeCoordinator || !coordinatorIds.contains(node.getNodeIdentifier()))
                         .forEach(chosen::add);
@@ -360,22 +378,20 @@ public class NodeScheduler
                 // `coordinatorIds.contains(node.getNodeIdentifier())`. But checking the condition isn't necessary
                 // because every node satisfies it. Otherwise, `chosen` wouldn't have been empty.
 
-                nodeMap.getAllNodesByHostAndPort().get(host).stream()
-                        .forEach(chosen::add);
-
-                InetAddress address;
-                try {
-                    address = host.toInetAddress();
-                }
-                catch (UnknownHostException e) {
-                    // skip hosts that don't resolve
-                    continue;
-                }
+                chosen.addAll(nodeMap.getAllNodesByHostAndPort().get(host));
 
                 // consider a split with a host without a port as being accessible by all nodes in that host
                 if (!host.hasPort()) {
-                    nodeMap.getAllNodesByHost().get(address).stream()
-                            .forEach(chosen::add);
+                    InetAddress address;
+                    try {
+                        address = host.toInetAddress();
+                    }
+                    catch (UnknownHostException e) {
+                        // skip hosts that don't resolve
+                        continue;
+                    }
+
+                    chosen.addAll(nodeMap.getAllNodesByHost().get(address));
                 }
             }
         }
@@ -400,7 +416,11 @@ public class NodeScheduler
         Set<InternalNode> blockedNodes = new HashSet<>();
         for (Split split : splits) {
             // node placement is forced by the bucket to node map
-            InternalNode node = bucketNodeMap.getAssignedNode(split).get();
+            Optional<InternalNode> optionalNode = bucketNodeMap.getAssignedNode(split);
+            if (!optionalNode.isPresent()) {
+                throw new PrestoException(NO_NODES_AVAILABLE, format("No assignment for split in bucketNodeMap. Split Info: %s", split.getConnectorSplit().getInfoMap()));
+            }
+            InternalNode node = optionalNode.get();
             boolean isCacheable = bucketNodeMap.isSplitCacheable(split);
             SplitWeight splitWeight = split.getSplitWeight();
 

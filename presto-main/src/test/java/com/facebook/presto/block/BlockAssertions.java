@@ -236,8 +236,8 @@ public final class BlockAssertions
         BlockBuilder blockBuilder = type.createBlockBuilder(null, map.size());
         for (Map.Entry<K, V> entry : map.entrySet()) {
             BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-            appendToBlockBuilder(BIGINT, entry.getKey(), entryBuilder);
-            appendToBlockBuilder(BIGINT, entry.getValue(), entryBuilder);
+            appendToBlockBuilder(type.getKeyType(), entry.getKey(), entryBuilder);
+            appendToBlockBuilder(type.getValueType(), entry.getValue(), entryBuilder);
             blockBuilder.closeEntry();
         }
         return blockBuilder.build();
@@ -781,7 +781,7 @@ public final class BlockAssertions
         else if (type == BIGINT) {
             block = createRandomLongsBlock(positionCount, primitiveNullRate);
         }
-        else if (type == INTEGER || type == REAL) {
+        else if (type == INTEGER || type.equals(REAL)) {
             block = createRandomIntsBlock(positionCount, primitiveNullRate);
         }
         else if (type == SMALLINT) {

@@ -18,6 +18,7 @@ import com.facebook.presto.router.scheduler.RoundRobinScheduler;
 import com.facebook.presto.router.scheduler.Scheduler;
 import com.facebook.presto.router.scheduler.UserHashScheduler;
 import com.facebook.presto.router.scheduler.WeightedRandomChoiceScheduler;
+import com.facebook.presto.router.scheduler.WeightedRoundRobinScheduler;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -32,7 +33,6 @@ public class TestScheduler
 {
     private final ArrayList<URI> servers = new ArrayList<>();
     private final HashMap<URI, Integer> weights = new HashMap<>();
-    private Scheduler scheduler;
 
     @BeforeClass
     public void setup()
@@ -55,7 +55,7 @@ public class TestScheduler
     public void testRandomChoiceScheduler()
             throws Exception
     {
-        scheduler = new RandomChoiceScheduler();
+        Scheduler scheduler = new RandomChoiceScheduler();
         scheduler.setCandidates(servers);
 
         URI target = scheduler.getDestination("test").orElse(new URI("invalid"));
@@ -66,7 +66,7 @@ public class TestScheduler
     public void testUserHashScheduler()
             throws Exception
     {
-        scheduler = new UserHashScheduler();
+        Scheduler scheduler = new UserHashScheduler();
         scheduler.setCandidates(servers);
 
         URI target1 = scheduler.getDestination("test").orElse(new URI("invalid"));
@@ -82,7 +82,7 @@ public class TestScheduler
     public void testWeightedRandomChoiceScheduler()
             throws Exception
     {
-        scheduler = new WeightedRandomChoiceScheduler();
+        Scheduler scheduler = new WeightedRandomChoiceScheduler();
         scheduler.setCandidates(servers);
         scheduler.setWeights(weights);
 
@@ -102,7 +102,7 @@ public class TestScheduler
     public void testRoundRobinScheduler()
             throws Exception
     {
-        scheduler = new RoundRobinScheduler();
+        Scheduler scheduler = new RoundRobinScheduler();
         scheduler.setCandidates(servers);
 
         URI target1 = scheduler.getDestination("test").orElse(new URI("invalid"));
@@ -120,5 +120,28 @@ public class TestScheduler
         URI target4 = scheduler.getDestination("test").orElse(new URI("invalid"));
         assertTrue(servers.contains(target4));
         assertEquals(target4.getPath(), "192.168.0.1");
+    }
+
+    @Test
+    public void testWeightedRoundRobinScheduler()
+            throws Exception
+    {
+        Scheduler scheduler = new WeightedRoundRobinScheduler();
+        scheduler.setCandidates(servers);
+        scheduler.setWeights(weights);
+
+        int serverDiffCount = 0;
+        URI priorURI = null;
+        for (int i = 0; i < 111; i++) {
+            URI target = scheduler.getDestination("test").orElse(new URI("invalid"));
+            assertTrue(servers.contains(target));
+            assertTrue(weights.containsKey(target));
+            if (!target.equals(priorURI)) {
+                serverDiffCount++;
+                priorURI = target;
+            }
+        }
+
+        assertEquals(serverDiffCount, servers.size());
     }
 }

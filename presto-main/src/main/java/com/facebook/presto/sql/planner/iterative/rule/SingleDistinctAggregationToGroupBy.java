@@ -20,7 +20,6 @@ import com.facebook.presto.spi.plan.AggregationNode.Aggregation;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.iterative.Rule;
-import com.facebook.presto.sql.relational.OriginalExpressionUtils;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
@@ -120,8 +119,7 @@ public class SingleDistinctAggregationToGroupBy
                 .collect(Collectors.toList());
 
         Set<VariableReferenceExpression> variables = Iterables.getOnlyElement(argumentSets).stream()
-                .map(OriginalExpressionUtils::castToExpression)
-                .map(context.getVariableAllocator()::toVariableReference)
+                .map(VariableReferenceExpression.class::cast)
                 .collect(Collectors.toSet());
 
         return Result.ofPlanNode(
@@ -140,6 +138,7 @@ public class SingleDistinctAggregationToGroupBy
                                 ImmutableList.of(),
                                 SINGLE,
                                 Optional.empty(),
+                                Optional.empty(),
                                 Optional.empty()),
                         // remove DISTINCT flag from function calls
                         aggregation.getAggregations()
@@ -151,6 +150,7 @@ public class SingleDistinctAggregationToGroupBy
                         emptyList(),
                         aggregation.getStep(),
                         aggregation.getHashVariable(),
-                        aggregation.getGroupIdVariable()));
+                        aggregation.getGroupIdVariable(),
+                        aggregation.getAggregationId()));
     }
 }

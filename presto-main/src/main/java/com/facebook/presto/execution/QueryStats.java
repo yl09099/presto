@@ -381,18 +381,18 @@ public class QueryStats
                     else if (operatorType.equals(TableScanOperator.class.getSimpleName()) || operatorType.equals(ScanFilterAndProjectOperator.class.getSimpleName())) {
                         rawInputDataSize += operatorStats.getRawInputDataSize().toBytes();
                         rawInputPositions += operatorStats.getRawInputPositions();
-                        processedInputDataSize += stageExecutionStats.getProcessedInputDataSize().toBytes();
-                        processedInputPositions += stageExecutionStats.getProcessedInputPositions();
                     }
                 }
+                processedInputDataSize += stageExecutionStats.getProcessedInputDataSize().toBytes();
+                processedInputPositions += stageExecutionStats.getProcessedInputPositions();
 
                 if (plan.isOutputTableWriterFragment()) {
                     writtenOutputPositions += stageExecutionStats.getOperatorSummaries().stream()
-                            .filter(stats -> stats.getOperatorType().equals(TableWriterOperator.class.getSimpleName()))
+                            .filter(stats -> stats.getOperatorType().equals(TableWriterOperator.OPERATOR_TYPE))
                             .mapToLong(OperatorStats::getInputPositions)
                             .sum();
                     writtenOutputLogicalDataSize += stageExecutionStats.getOperatorSummaries().stream()
-                            .filter(stats -> stats.getOperatorType().equals(TableWriterOperator.class.getSimpleName()))
+                            .filter(stats -> stats.getOperatorType().equals(TableWriterOperator.OPERATOR_TYPE))
                             .mapToLong(stats -> stats.getInputDataSize().toBytes())
                             .sum();
                     writtenOutputPhysicalDataSize += stageExecutionStats.getPhysicalWrittenDataSize().toBytes();

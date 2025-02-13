@@ -95,7 +95,7 @@ public class TaskExecutor
     // Interrupt a split if it is running longer than this AND it's blocked on something known
     private static final Predicate<List<StackTraceElement>> DEFAULT_INTERRUPTIBLE_SPLIT_PREDICATE = elements ->
                     elements.stream()
-                            .anyMatch(element -> element.getClassName().equals(JoniRegexpFunctions.class.getName()));
+                            .anyMatch(element -> element.getClassName().equals(JoniRegexpFunctions.CLASS_NAME));
     private static final Duration DEFAULT_INTERRUPT_SPLIT_INTERVAL = new Duration(60, SECONDS);
 
     private static final AtomicLong NEXT_RUNNER_ID = new AtomicLong();
@@ -174,11 +174,14 @@ public class TaskExecutor
     // shared between SplitRunners
     private final CounterStat globalCpuTimeMicros = new CounterStat();
     private final CounterStat globalScheduledTimeMicros = new CounterStat();
+    private final CounterStat splitSkippedDueToMemoryPressure = new CounterStat();
 
     private final TimeStat blockedQuantaWallTime = new TimeStat(MICROSECONDS);
     private final TimeStat unblockedQuantaWallTime = new TimeStat(MICROSECONDS);
 
     private volatile boolean closed;
+
+    private volatile boolean lowMemory;
 
     @Inject
     public TaskExecutor(TaskManagerConfig config, EmbedVersion embedVersion, MultilevelSplitQueue splitQueue)
@@ -351,7 +354,7 @@ public class TaskExecutor
         checkArgument(!maxDriversPerTask.isPresent() || maxDriversPerTask.getAsInt() <= maximumNumberOfDriversPerTask,
                 "maxDriversPerTask cannot be greater than the configured value");
 
-        log.debug("Task scheduled " + taskId);
+        log.debug("Task scheduled %s", taskId);
 
         TaskHandle taskHandle = new TaskHandle(
                 taskId,
@@ -398,7 +401,7 @@ public class TaskExecutor
         long threadUsageNanos = taskHandle.getScheduledNanos();
         completedTasksPerLevel.incrementAndGet(computeLevel(threadUsageNanos));
 
-        log.debug("Task finished or failed " + taskHandle.getTaskId());
+        log.debug("Task finished or failed %s", taskHandle.getTaskId());
     }
 
     public List<ListenableFuture<?>> enqueueSplits(TaskHandle taskHandle, boolean intermediate, List<? extends SplitRunner> taskSplits)
@@ -416,23 +419,27 @@ public class TaskExecutor
                         blockedQuantaWallTime,
                         unblockedQuantaWallTime);
 
-                if (taskHandle.isDestroyed()) {
-                    // If the handle is destroyed, we destroy the task splits to complete the future
-                    splitsToDestroy.add(prioritizedSplitRunner);
-                }
-                else if (intermediate) {
-                    // Note: we do not record queued time for intermediate splits
-                    startIntermediateSplit(prioritizedSplitRunner);
+                if (intermediate) {
                     // add the runner to the handle so it can be destroyed if the task is canceled
-                    taskHandle.recordIntermediateSplit(prioritizedSplitRunner);
+                    if (taskHandle.recordIntermediateSplit(prioritizedSplitRunner)) {
+                        // Note: we do not record queued time for intermediate splits
+                        startIntermediateSplit(prioritizedSplitRunner);
+                    }
+                    else {
+                        splitsToDestroy.add(prioritizedSplitRunner);
+                    }
                 }
                 else {
                     // add this to the work queue for the task
-                    taskHandle.enqueueSplit(prioritizedSplitRunner);
-                    // if task is under the limit for guaranteed splits, start one
-                    scheduleTaskIfNecessary(taskHandle);
-                    // if globally we have more resources, start more
-                    addNewEntrants();
+                    if (taskHandle.enqueueSplit(prioritizedSplitRunner)) {
+                        // if task is under the limit for guaranteed splits, start one
+                        scheduleTaskIfNecessary(taskHandle);
+                        // if globally we have more resources, start more
+                        addNewEntrants();
+                    }
+                    else {
+                        splitsToDestroy.add(prioritizedSplitRunner);
+                    }
                 }
 
                 finishedFutures.add(prioritizedSplitRunner.getFinishedFuture());
@@ -479,6 +486,13 @@ public class TaskExecutor
 
     private synchronized void scheduleTaskIfNecessary(TaskHandle taskHandle)
     {
+        // Worker skip processing split if jvm heap usage crosses configured threshold
+        // Helps reduce memory pressure on the worker and avoid OOMs
+        if (isLowMemory()) {
+            log.debug("Skip task scheduling due to low memory");
+            splitSkippedDueToMemoryPressure.update(1);
+            return;
+        }
         // if task has less than the minimum guaranteed splits running,
         // immediately schedule a new split for this task.  This assures
         // that a task gets its fair amount of consideration (you have to
@@ -494,6 +508,14 @@ public class TaskExecutor
 
     private synchronized void addNewEntrants()
     {
+        // Worker skip processing split if jvm heap usage crosses configured threshold
+        // Helps reduce memory pressure on the worker and avoid OOMs
+        if (isLowMemory()) {
+            log.debug("Skip polling next split worker due to low memory");
+            splitSkippedDueToMemoryPressure.update(1);
+            return;
+        }
+
         // Ignore intermediate splits when checking minimumNumberOfDrivers.
         // Otherwise with (for example) minimumNumberOfDrivers = 100, 200 intermediate splits
         // and 100 leaf splits, depending on order of appearing splits, number of
@@ -604,7 +626,10 @@ public class TaskExecutor
                         }
 
                         if (split.isFinished()) {
-                            log.debug("%s is finished", split.getInfo());
+                            // Avoid calling split.getInfo() when debug logging is not enabled
+                            if (log.isDebugEnabled()) {
+                                log.debug("%s is finished", split.getInfo());
+                            }
                             splitFinished(split);
                         }
                         else {
@@ -634,6 +659,17 @@ public class TaskExecutor
                             }
                         }
                         splitFinished(split);
+                    }
+                    finally {
+                        // Clear the interrupted flag on the current thread, driver cancellation may have triggered an interrupt
+                        // without TaskExecutor being shut down
+                        if (Thread.interrupted()) {
+                            if (closed) {
+                                // reset interrupted flag if TaskExecutor was closed, since that interrupt may have been the
+                                // shutdown signal to this TaskRunner thread
+                                Thread.currentThread().interrupt();
+                            }
+                        }
                     }
                 }
             }
@@ -886,6 +922,13 @@ public class TaskExecutor
         return globalCpuTimeMicros;
     }
 
+    @Managed
+    @Nested
+    public CounterStat getSplitSkippedDueToMemoryPressure()
+    {
+        return splitSkippedDueToMemoryPressure;
+    }
+
     private synchronized int getRunningTasksForLevel(int level)
     {
         int count = 0;
@@ -1013,5 +1056,15 @@ public class TaskExecutor
     public ThreadPoolExecutorMBean getProcessorExecutor()
     {
         return executorMBean;
+    }
+
+    public void setLowMemory(boolean lowMemory)
+    {
+        this.lowMemory = lowMemory;
+    }
+
+    public boolean isLowMemory()
+    {
+        return this.lowMemory;
     }
 }

@@ -59,6 +59,8 @@ import java.util.function.Supplier;
 import static com.facebook.airlift.concurrent.MoreFutures.getFutureValue;
 import static com.facebook.airlift.concurrent.MoreFutures.toListenableFuture;
 import static com.facebook.presto.SystemSessionProperties.isStatisticsCpuTimerEnabled;
+import static com.facebook.presto.common.RuntimeMetricName.WRITTEN_FILES_COUNT;
+import static com.facebook.presto.common.RuntimeUnit.NONE;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.operator.TableWriterUtils.STATS_START_CHANNEL;
@@ -76,6 +78,7 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 public class TableWriterOperator
         implements Operator
 {
+    public static final String OPERATOR_TYPE = "TableWriterOperator";
     public static class TableWriterOperatorFactory
             implements OperatorFactory
     {
@@ -392,6 +395,7 @@ public class TableWriterOperator
             }
         }
 
+        updateWrittenFilesCount();
         state = State.FINISHED;
         return new Page(positionCount, outputBlocks);
     }
@@ -461,6 +465,11 @@ public class TableWriterOperator
         long current = pageSink.getCompletedBytes();
         operatorContext.recordPhysicalWrittenData(current - writtenBytes);
         writtenBytes = current;
+    }
+
+    private void updateWrittenFilesCount()
+    {
+        operatorContext.getRuntimeStats().addMetricValue(WRITTEN_FILES_COUNT, NONE, pageSink.getWrittenFilesCount());
     }
 
     private void updateMemoryUsage()

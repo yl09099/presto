@@ -156,7 +156,8 @@ public class TestOrcRecordReaderDwrfStripeCaching
                     false,
                     NO_ENCRYPTION,
                     DwrfKeyProvider.EMPTY,
-                    new RuntimeStats());
+                    new RuntimeStats(),
+                    orcFile.lastModified());
 
             assertRecordValues(orcDataSource, orcReader);
 
@@ -181,7 +182,8 @@ public class TestOrcRecordReaderDwrfStripeCaching
                     false,
                     NO_ENCRYPTION,
                     DwrfKeyProvider.EMPTY,
-                    new RuntimeStats());
+                    new RuntimeStats(),
+                    orcFile.lastModified());
 
             assertRecordValues(orcDataSource, orcReader);
         }
@@ -207,7 +209,6 @@ public class TestOrcRecordReaderDwrfStripeCaching
                 0,
                 orcDataSource.getSize(),
                 HIVE_STORAGE_TIME_ZONE,
-                false,
                 new TestingHiveOrcAggregatedMemoryContext(),
                 Optional.empty(),
                 MAX_BATCH_SIZE);

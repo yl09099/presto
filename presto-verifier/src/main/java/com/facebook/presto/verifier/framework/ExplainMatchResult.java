@@ -23,6 +23,7 @@ public class ExplainMatchResult
         MATCH,
         STRUCTURE_MISMATCH,
         DETAILS_MISMATCH,
+        SNAPSHOT_DOES_NOT_EXIST,
     }
 
     private final MatchType matchType;
@@ -39,6 +40,12 @@ public class ExplainMatchResult
     }
 
     @Override
+    public String getDataType()
+    {
+        return "EXPLAIN";
+    }
+
+    @Override
     public String getMatchTypeName()
     {
         return matchType.name();
@@ -46,6 +53,12 @@ public class ExplainMatchResult
 
     @Override
     public boolean isMismatchPossiblyCausedByNonDeterminism()
+    {
+        return false;
+    }
+
+    @Override
+    public boolean isMismatchPossiblyCausedByReuseOutdatedTable()
     {
         return false;
     }

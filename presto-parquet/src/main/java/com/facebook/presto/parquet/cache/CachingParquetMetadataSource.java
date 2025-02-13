@@ -45,22 +45,23 @@ public class CachingParquetMetadataSource
             long fileSize,
             boolean cacheable,
             long modificationTime,
-            Optional<InternalFileDecryptor> fileDecryptor)
+            Optional<InternalFileDecryptor> fileDecryptor,
+            boolean readMaskedValue)
             throws IOException
     {
         try {
             if (cacheable) {
                 ParquetFileMetadata fileMetadataCache = cache.get(
                         parquetDataSource.getId(),
-                        () -> delegate.getParquetMetadata(parquetDataSource, fileSize, cacheable, modificationTime, fileDecryptor));
-                if (fileMetadataCache.getModificationTime() == modificationTime) {
-                    return fileMetadataCache;
-                }
-                else {
+                        () -> delegate.getParquetMetadata(parquetDataSource, fileSize, cacheable, modificationTime, fileDecryptor, readMaskedValue));
+                if (fileMetadataCache.getModificationTime() != modificationTime) {
                     cache.invalidate(parquetDataSource.getId());
+                    fileMetadataCache = delegate.getParquetMetadata(parquetDataSource, fileSize, cacheable, modificationTime, fileDecryptor, readMaskedValue);
+                    cache.put(parquetDataSource.getId(), fileMetadataCache);
                 }
+                return fileMetadataCache;
             }
-            return delegate.getParquetMetadata(parquetDataSource, fileSize, cacheable, modificationTime, fileDecryptor);
+            return delegate.getParquetMetadata(parquetDataSource, fileSize, cacheable, modificationTime, fileDecryptor, readMaskedValue);
         }
         catch (ExecutionException | UncheckedExecutionException e) {
             throwIfInstanceOf(e.getCause(), IOException.class);

@@ -13,11 +13,11 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.plan.MarkDistinctNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.google.common.collect.Streams;
 
 import java.util.Optional;
@@ -37,7 +37,7 @@ public class PruneMarkDistinctColumns
     }
 
     @Override
-    protected Optional<PlanNode> pushDownProjectOff(PlanNodeIdAllocator idAllocator, PlanVariableAllocator variableAllocator, MarkDistinctNode markDistinctNode, Set<VariableReferenceExpression> referencedOutputs)
+    protected Optional<PlanNode> pushDownProjectOff(PlanNodeIdAllocator idAllocator, VariableAllocator variableAllocator, MarkDistinctNode markDistinctNode, Set<VariableReferenceExpression> referencedOutputs)
     {
         if (!referencedOutputs.contains(markDistinctNode.getMarkerVariable())) {
             return Optional.of(markDistinctNode.getSource());
@@ -47,7 +47,7 @@ public class PruneMarkDistinctColumns
                 referencedOutputs.stream()
                         .filter(variable -> !variable.equals(markDistinctNode.getMarkerVariable())),
                 markDistinctNode.getDistinctVariables().stream(),
-                markDistinctNode.getHashVariable().map(Stream::of).orElse(Stream.empty()))
+                markDistinctNode.getHashVariable().map(Stream::of).orElseGet(Stream::empty))
                 .collect(toImmutableSet());
 
         return restrictChildOutputs(idAllocator, markDistinctNode, requiredInputs);

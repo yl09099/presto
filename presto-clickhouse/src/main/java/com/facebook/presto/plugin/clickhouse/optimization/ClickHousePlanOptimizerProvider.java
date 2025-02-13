@@ -20,7 +20,7 @@ import com.facebook.presto.spi.connector.ConnectorPlanOptimizerProvider;
 import com.facebook.presto.spi.function.FunctionMetadataManager;
 import com.facebook.presto.spi.function.StandardFunctionResolution;
 import com.facebook.presto.spi.relation.DeterminismEvaluator;
-import com.facebook.presto.spi.relation.ExpressionOptimizer;
+import com.facebook.presto.spi.relation.RowExpressionService;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 
@@ -33,23 +33,25 @@ public class ClickHousePlanOptimizerProvider
 {
     private final FunctionMetadataManager functionManager;
     private final StandardFunctionResolution functionResolution;
+    private final RowExpressionService rowExpressionService;
     private final DeterminismEvaluator determinismEvaluator;
-    private final ExpressionOptimizer expressionOptimizer;
     private final String identifierQuote;
+    private final ClickHouseQueryGenerator clickhouseQueryGenerator;
 
     @Inject
     public ClickHousePlanOptimizerProvider(
             ClickHouseClient clickHouseClient,
             FunctionMetadataManager functionManager,
             StandardFunctionResolution functionResolution,
-            DeterminismEvaluator determinismEvaluator,
-            ExpressionOptimizer expressionOptimizer)
+            RowExpressionService rowExpressionService,
+            ClickHouseQueryGenerator clickhouseQueryGenerator)
     {
         this.functionManager = requireNonNull(functionManager, "functionManager is null");
         this.functionResolution = requireNonNull(functionResolution, "functionResolution is null");
-        this.determinismEvaluator = requireNonNull(determinismEvaluator, "determinismEvaluator is null");
-        this.expressionOptimizer = requireNonNull(expressionOptimizer, "expressionOptimizer is null");
+        this.rowExpressionService = requireNonNull(rowExpressionService, "rowExpressionService is null");
         this.identifierQuote = clickHouseClient.getIdentifierQuote();
+        this.clickhouseQueryGenerator = clickhouseQueryGenerator;
+        this.determinismEvaluator = rowExpressionService.getDeterminismEvaluator();
     }
 
     @Override
@@ -65,9 +67,10 @@ public class ClickHousePlanOptimizerProvider
                 functionManager,
                 functionResolution,
                 determinismEvaluator,
-                expressionOptimizer,
+                rowExpressionService,
                 identifierQuote,
-                getFunctionTranslators()));
+                getFunctionTranslators(),
+                clickhouseQueryGenerator));
     }
 
     private Set<Class<?>> getFunctionTranslators()

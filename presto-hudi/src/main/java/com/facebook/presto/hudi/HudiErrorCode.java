@@ -14,12 +14,12 @@
 
 package com.facebook.presto.hudi;
 
-import com.facebook.presto.spi.ErrorCode;
+import com.facebook.presto.common.ErrorCode;
+import com.facebook.presto.common.ErrorType;
 import com.facebook.presto.spi.ErrorCodeSupplier;
-import com.facebook.presto.spi.ErrorType;
 
-import static com.facebook.presto.spi.ErrorType.EXTERNAL;
-import static com.facebook.presto.spi.ErrorType.INTERNAL_ERROR;
+import static com.facebook.presto.common.ErrorType.EXTERNAL;
+import static com.facebook.presto.common.ErrorType.INTERNAL_ERROR;
 
 public enum HudiErrorCode
         implements ErrorCodeSupplier
@@ -30,6 +30,7 @@ public enum HudiErrorCode
     HUDI_FILESYSTEM_ERROR(0x40, EXTERNAL),
     HUDI_CANNOT_OPEN_SPLIT(0x41, EXTERNAL),
     HUDI_CURSOR_ERROR(0x42, EXTERNAL),
+    HUDI_CANNOT_GENERATE_SPLIT(0x43, EXTERNAL),
     /**/;
 
     private final ErrorCode errorCode;

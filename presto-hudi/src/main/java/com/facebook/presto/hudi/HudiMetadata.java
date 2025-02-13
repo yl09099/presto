@@ -255,9 +255,9 @@ public class HudiMetadata
         return builder.build();
     }
 
-    static MetastoreContext toMetastoreContext(ConnectorSession session)
+    public static MetastoreContext toMetastoreContext(ConnectorSession session)
     {
-        return new MetastoreContext(session.getIdentity(), session.getQueryId(), session.getClientInfo(), session.getSource(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER);
+        return new MetastoreContext(session.getIdentity(), session.getQueryId(), session.getClientInfo(), session.getClientTags(), session.getSource(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER, session.getWarningCollector(), session.getRuntimeStats());
     }
 
     private static HudiColumnHandle fromDataColumn(int index, Column column)

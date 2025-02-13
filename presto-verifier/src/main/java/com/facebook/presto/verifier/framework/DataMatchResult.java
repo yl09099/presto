@@ -25,6 +25,7 @@ import static com.facebook.presto.verifier.framework.DataMatchResult.MatchType.C
 import static com.facebook.presto.verifier.framework.DataMatchResult.MatchType.MATCH;
 import static com.facebook.presto.verifier.framework.DataMatchResult.MatchType.ROW_COUNT_MISMATCH;
 import static com.facebook.presto.verifier.framework.DataMatchResult.MatchType.SCHEMA_MISMATCH;
+import static com.facebook.presto.verifier.framework.DataMatchResult.MatchType.SNAPSHOT_DOES_NOT_EXIST;
 import static com.google.common.base.Preconditions.checkState;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -32,14 +33,24 @@ import static java.util.Objects.requireNonNull;
 public class DataMatchResult
         implements MatchResult
 {
+    public enum DataType
+    {
+        DATA,
+        PARTITION_DATA,
+        BUCKET_DATA,
+    }
     public enum MatchType
     {
         MATCH,
         SCHEMA_MISMATCH,
         ROW_COUNT_MISMATCH,
         COLUMN_MISMATCH,
+        PARTITION_COUNT_MISMATCH,
+        BUCKET_COUNT_MISMATCH,
+        SNAPSHOT_DOES_NOT_EXIST,
     }
 
+    private final DataType dataType;
     private final MatchType matchType;
     private final Optional<ChecksumResult> controlChecksum;
     private final OptionalLong controlRowCount;
@@ -47,13 +58,15 @@ public class DataMatchResult
     private final List<ColumnMatchResult<?>> mismatchedColumns;
 
     public DataMatchResult(
+            DataType dataType,
             MatchType matchType,
             Optional<ChecksumResult> controlChecksum,
             OptionalLong controlRowCount,
             OptionalLong testRowCount,
             List<ColumnMatchResult<?>> mismatchedColumns)
     {
-        this.matchType = requireNonNull(matchType, "type is null");
+        this.dataType = requireNonNull(dataType, "data type is null");
+        this.matchType = requireNonNull(matchType, "match type is null");
         this.controlChecksum = requireNonNull(controlChecksum, "controlChecksum is null");
         this.controlRowCount = requireNonNull(controlRowCount, "controlRowCount is null");
         this.testRowCount = requireNonNull(testRowCount, "testRowCount is null");
@@ -67,6 +80,12 @@ public class DataMatchResult
     }
 
     @Override
+    public String getDataType()
+    {
+        return dataType.name();
+    }
+
+    @Override
     public String getMatchTypeName()
     {
         return matchType.name();
@@ -76,6 +95,12 @@ public class DataMatchResult
     public boolean isMismatchPossiblyCausedByNonDeterminism()
     {
         return matchType == ROW_COUNT_MISMATCH || matchType == COLUMN_MISMATCH;
+    }
+
+    @Override
+    public boolean isMismatchPossiblyCausedByReuseOutdatedTable()
+    {
+        return matchType == SCHEMA_MISMATCH || matchType == ROW_COUNT_MISMATCH || matchType == COLUMN_MISMATCH;
     }
 
     public MatchType getMatchType()
@@ -99,13 +124,13 @@ public class DataMatchResult
         StringBuilder message = new StringBuilder()
                 .append(matchType.name().replace("_", " "))
                 .append('\n');
-        if (matchType == SCHEMA_MISMATCH) {
+        if (matchType == SCHEMA_MISMATCH || matchType == SNAPSHOT_DOES_NOT_EXIST) {
             return message.toString();
         }
 
         checkState(controlRowCount.isPresent(), "controlRowCount is missing");
         checkState(testRowCount.isPresent(), "testRowCount is missing");
-        message.append(format("Control %s rows, Test %s rows\n", controlRowCount.getAsLong(), testRowCount.getAsLong()));
+        message.append(format("Control %s rows, Test %s rows%n", controlRowCount.getAsLong(), testRowCount.getAsLong()));
         if (matchType == ROW_COUNT_MISMATCH) {
             return message.toString();
         }

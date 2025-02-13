@@ -55,7 +55,7 @@ public class SimplifyCountOverConstant
     public SimplifyCountOverConstant(FunctionAndTypeManager functionAndTypeManager)
     {
         requireNonNull(functionAndTypeManager, "functionManager is null");
-        this.functionResolution = new FunctionResolution(functionAndTypeManager);
+        this.functionResolution = new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver());
     }
 
     @Override
@@ -105,7 +105,8 @@ public class SimplifyCountOverConstant
                 ImmutableList.of(),
                 parent.getStep(),
                 parent.getHashVariable(),
-                parent.getGroupIdVariable()));
+                parent.getGroupIdVariable(),
+                parent.getAggregationId()));
     }
 
     private boolean isCountOverConstant(AggregationNode.Aggregation aggregation, Assignments inputs)

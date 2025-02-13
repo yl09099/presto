@@ -14,14 +14,13 @@
 package com.facebook.presto.cost;
 
 import com.facebook.presto.Session;
-import com.facebook.presto.expressions.LogicalRowExpressions;
 import com.facebook.presto.matching.Pattern;
+import com.facebook.presto.spi.plan.EquiJoinClause;
+import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.iterative.Lookup;
-import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.sql.planner.plan.JoinNode.EquiJoinClause;
 import com.facebook.presto.sql.tree.ComparisonExpression;
 import com.facebook.presto.sql.tree.SymbolReference;
 import com.facebook.presto.util.MoreMath;
@@ -33,13 +32,14 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
 
+import static com.facebook.presto.SystemSessionProperties.getDefaultJoinSelectivityCoefficient;
+import static com.facebook.presto.SystemSessionProperties.shouldOptimizerUseHistograms;
 import static com.facebook.presto.cost.FilterStatsCalculator.UNKNOWN_FILTER_COEFFICIENT;
 import static com.facebook.presto.cost.VariableStatsEstimate.buildFrom;
-import static com.facebook.presto.sql.ExpressionUtils.extractConjuncts;
+import static com.facebook.presto.expressions.LogicalRowExpressions.extractConjuncts;
+import static com.facebook.presto.spi.statistics.DisjointRangeDomainHistogram.addConjunction;
 import static com.facebook.presto.sql.analyzer.ExpressionTreeUtils.getNodeLocation;
 import static com.facebook.presto.sql.planner.plan.Patterns.join;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.isExpression;
 import static com.facebook.presto.sql.tree.ComparisonExpression.Operator.EQUAL;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -55,6 +55,8 @@ public class JoinStatsRule
 {
     private static final Pattern<JoinNode> PATTERN = join();
     private static final double DEFAULT_UNMATCHED_JOIN_COMPLEMENT_NDVS_COEFFICIENT = 0.5;
+
+    private static final double DEFAULT_JOIN_SELECTIVITY_DISABLED = 0.0;
 
     private final FilterStatsCalculator filterStatsCalculator;
     private final StatsNormalizer normalizer;
@@ -157,31 +159,25 @@ public class JoinStatsRule
                 return crossJoinStats;
             }
             // TODO: this might explode stats
-            if (isExpression(node.getFilter().get())) {
-                return filterStatsCalculator.filterStats(crossJoinStats, castToExpression(node.getFilter().get()), session, types);
-            }
-            else {
-                return filterStatsCalculator.filterStats(crossJoinStats, node.getFilter().get(), session);
-            }
+            return filterStatsCalculator.filterStats(crossJoinStats, node.getFilter().get(), session);
         }
 
         PlanNodeStatsEstimate equiJoinEstimate = filterByEquiJoinClauses(crossJoinStats, node.getCriteria(), session, types);
-
         if (equiJoinEstimate.isOutputRowCountUnknown()) {
-            return PlanNodeStatsEstimate.unknown();
+            double defaultJoinSelectivityFactor = getDefaultJoinSelectivityCoefficient(session);
+            if (Double.compare(defaultJoinSelectivityFactor, DEFAULT_JOIN_SELECTIVITY_DISABLED) != 0) {
+                equiJoinEstimate = crossJoinStats.mapOutputRowCount(joinSourceRowCount -> crossJoinStats.getOutputRowCount() * defaultJoinSelectivityFactor);
+            }
+            else {
+                return PlanNodeStatsEstimate.unknown();
+            }
         }
 
         if (!node.getFilter().isPresent()) {
             return equiJoinEstimate;
         }
 
-        PlanNodeStatsEstimate filteredEquiJoinEstimate;
-        if (isExpression(node.getFilter().get())) {
-            filteredEquiJoinEstimate = filterStatsCalculator.filterStats(equiJoinEstimate, castToExpression(node.getFilter().get()), session, types);
-        }
-        else {
-            filteredEquiJoinEstimate = filterStatsCalculator.filterStats(equiJoinEstimate, node.getFilter().get(), session);
-        }
+        PlanNodeStatsEstimate filteredEquiJoinEstimate = filterStatsCalculator.filterStats(equiJoinEstimate, node.getFilter().get(), session);
 
         if (filteredEquiJoinEstimate.isOutputRowCountUnknown()) {
             return normalizer.normalize(equiJoinEstimate.mapOutputRowCount(rowCount -> rowCount * UNKNOWN_FILTER_COEFFICIENT));
@@ -225,13 +221,14 @@ public class JoinStatsRule
     {
         ComparisonExpression drivingPredicate = new ComparisonExpression(EQUAL, new SymbolReference(getNodeLocation(drivingClause.getLeft().getSourceLocation()), drivingClause.getLeft().getName()), new SymbolReference(getNodeLocation(drivingClause.getRight().getSourceLocation()), drivingClause.getRight().getName()));
         PlanNodeStatsEstimate filteredStats = filterStatsCalculator.filterStats(stats, drivingPredicate, session, types);
+        boolean useHistograms = shouldOptimizerUseHistograms(session);
         for (EquiJoinClause clause : remainingClauses) {
-            filteredStats = filterByAuxiliaryClause(filteredStats, clause);
+            filteredStats = filterByAuxiliaryClause(filteredStats, clause, useHistograms);
         }
         return filteredStats;
     }
 
-    private PlanNodeStatsEstimate filterByAuxiliaryClause(PlanNodeStatsEstimate stats, EquiJoinClause clause)
+    private PlanNodeStatsEstimate filterByAuxiliaryClause(PlanNodeStatsEstimate stats, EquiJoinClause clause, boolean useHistograms)
     {
         // we just clear null fraction and adjust ranges here
         // selectivity is mostly handled by driving clause. We just scale heuristically by UNKNOWN_FILTER_COEFFICIENT here.
@@ -248,22 +245,26 @@ public class JoinStatsRule
         double rightNdvInRange = rightFilterValue * rightRange.getDistinctValuesCount();
         double retainedNdv = MoreMath.min(leftNdvInRange, rightNdvInRange);
 
-        VariableStatsEstimate newLeftStats = buildFrom(leftStats)
+        VariableStatsEstimate.Builder newLeftStats = buildFrom(leftStats)
                 .setNullsFraction(0)
                 .setStatisticsRange(intersect)
-                .setDistinctValuesCount(retainedNdv)
-                .build();
+                .setDistinctValuesCount(retainedNdv);
+        if (useHistograms) {
+            newLeftStats.setHistogram(leftStats.getHistogram().map(leftHistogram -> addConjunction(leftHistogram, intersect.toPrestoRange())));
+        }
 
-        VariableStatsEstimate newRightStats = buildFrom(rightStats)
+        VariableStatsEstimate.Builder newRightStats = buildFrom(rightStats)
                 .setNullsFraction(0)
                 .setStatisticsRange(intersect)
-                .setDistinctValuesCount(retainedNdv)
-                .build();
+                .setDistinctValuesCount(retainedNdv);
+        if (useHistograms) {
+            newRightStats.setHistogram(rightStats.getHistogram().map(rightHistogram -> addConjunction(rightHistogram, intersect.toPrestoRange())));
+        }
 
         PlanNodeStatsEstimate.Builder result = PlanNodeStatsEstimate.buildFrom(stats)
                 .setOutputRowCount(stats.getOutputRowCount() * UNKNOWN_FILTER_COEFFICIENT)
-                .addVariableStatistics(clause.getLeft(), newLeftStats)
-                .addVariableStatistics(clause.getRight(), newRightStats);
+                .addVariableStatistics(clause.getLeft(), newLeftStats.build())
+                .addVariableStatistics(clause.getRight(), newRightStats.build());
         return normalizer.normalize(result.build());
     }
 
@@ -302,18 +303,7 @@ public class JoinStatsRule
         }
 
         // TODO: add support for non-equality conditions (e.g: <=, !=, >)
-        int numberOfFilterClauses;
-        if (filter.isPresent()) {
-            if (isExpression(filter.get())) {
-                numberOfFilterClauses = extractConjuncts(castToExpression(filter.get())).size();
-            }
-            else {
-                numberOfFilterClauses = LogicalRowExpressions.extractConjuncts(filter.get()).size();
-            }
-        }
-        else {
-            numberOfFilterClauses = 0;
-        }
+        int numberOfFilterClauses = filter.map(expression -> extractConjuncts(expression).size()).orElse(0);
 
         // Heuristics: select the most selective criteria for join complement clause.
         // Principals behind this heuristics is the same as in computeInnerJoinStats:
@@ -385,7 +375,7 @@ public class JoinStatsRule
     {
         double innerJoinRowCount = innerJoinStats.getOutputRowCount();
         double joinComplementRowCount = joinComplementStats.getOutputRowCount();
-        if (joinComplementRowCount == 0) {
+        if (joinComplementRowCount == 0 || joinComplementStats.equals(PlanNodeStatsEstimate.unknown())) {
             return innerJoinStats;
         }
 
@@ -431,7 +421,7 @@ public class JoinStatsRule
         return normalizer.normalize(builder.build());
     }
 
-    private List<JoinNode.EquiJoinClause> flippedCriteria(JoinNode node)
+    private List<EquiJoinClause> flippedCriteria(JoinNode node)
     {
         return node.getCriteria().stream()
                 .map(EquiJoinClause::flip)

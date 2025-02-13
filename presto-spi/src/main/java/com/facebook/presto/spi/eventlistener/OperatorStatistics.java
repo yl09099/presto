@@ -75,6 +75,9 @@ public class OperatorStatistics
 
     private final RuntimeStats runtimeStats;
 
+    private final double estimateOutputDataSize;
+    private final double estimateOutputPositions;
+
     public OperatorStatistics(
             int stageId,
             int stageExecutionId,
@@ -121,7 +124,9 @@ public class OperatorStatistics
             DataSize spilledDataSize,
 
             Optional<String> info,
-            RuntimeStats runtimeStats)
+            RuntimeStats runtimeStats,
+            double estimateOutputDataSize,
+            double estimateOutputPositions)
     {
         this.stageId = stageId;
         this.stageExecutionId = stageExecutionId;
@@ -138,7 +143,7 @@ public class OperatorStatistics
         this.addInputCpu = requireNonNull(addInputCpu, "addInputCpu is null");
         this.addInputAllocation = requireNonNull(addInputAllocation, "addInputAllocation is null");
         this.rawInputDataSize = requireNonNull(rawInputDataSize, "rawInputDataSize is null");
-        this.rawInputPositions = requireNonNull(rawInputPositions, "rawInputPositions is null");
+        this.rawInputPositions = rawInputPositions;
         this.inputDataSize = requireNonNull(inputDataSize, "inputDataSize is null");
         this.inputPositions = inputPositions;
         this.sumSquaredInputPositions = sumSquaredInputPositions;
@@ -171,6 +176,9 @@ public class OperatorStatistics
 
         this.info = requireNonNull(info, "info is null");
         this.runtimeStats = runtimeStats;
+
+        this.estimateOutputDataSize = estimateOutputDataSize;
+        this.estimateOutputPositions = estimateOutputPositions;
     }
 
     public int getStageId()
@@ -356,5 +364,15 @@ public class OperatorStatistics
     public RuntimeStats getRuntimeStats()
     {
         return runtimeStats;
+    }
+
+    public double getEstimateOutputDataSize()
+    {
+        return estimateOutputDataSize;
+    }
+
+    public double getEstimateOutputPositions()
+    {
+        return estimateOutputPositions;
     }
 }

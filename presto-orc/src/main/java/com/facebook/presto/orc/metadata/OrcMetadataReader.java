@@ -253,22 +253,24 @@ public class OrcMetadataReader
     private static RowGroupIndex toRowGroupIndex(HiveWriterVersion hiveWriterVersion, RowIndexEntry rowIndexEntry, HiveBloomFilter bloomFilter)
     {
         List<Long> positionsList = rowIndexEntry.getPositionsList();
-        ImmutableList.Builder<Integer> positions = ImmutableList.builder();
+        int[] positions = new int[positionsList.size()];
         for (int index = 0; index < positionsList.size(); index++) {
             long longPosition = positionsList.get(index);
             int intPosition = (int) longPosition;
 
             checkState(intPosition == longPosition, "Expected checkpoint position %s, to be an integer", index);
 
-            positions.add(intPosition);
+            positions[index] = intPosition;
         }
-        return new RowGroupIndex(positions.build(), toColumnStatistics(hiveWriterVersion, rowIndexEntry.getStatistics(), true, bloomFilter));
+        return new RowGroupIndex(positions, toColumnStatistics(hiveWriterVersion, rowIndexEntry.getStatistics(), true, bloomFilter));
     }
 
     private static ColumnStatistics toColumnStatistics(HiveWriterVersion hiveWriterVersion, OrcProto.ColumnStatistics statistics, boolean isRowGroup, HiveBloomFilter bloomFilter)
     {
         return createColumnStatistics(
                 statistics.getNumberOfValues(),
+                null,
+                null,
                 statistics.hasBucketStatistics() ? toBooleanStatistics(statistics.getBucketStatistics()) : null,
                 statistics.hasIntStatistics() ? toIntegerStatistics(statistics.getIntStatistics()) : null,
                 statistics.hasDoubleStatistics() ? toDoubleStatistics(statistics.getDoubleStatistics()) : null,

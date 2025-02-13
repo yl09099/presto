@@ -21,14 +21,20 @@ import com.facebook.presto.operator.aggregation.SetOfValues;
 import com.facebook.presto.operator.aggregation.state.SetAggregationState;
 import com.facebook.presto.spi.function.AccumulatorStateSerializer;
 
+import java.lang.invoke.MethodHandle;
+
+import static java.util.Objects.requireNonNull;
+
 public class SetAggregationStateSerializer
         implements AccumulatorStateSerializer<SetAggregationState>
 {
     private final ArrayType arrayType;
+    private final MethodHandle elementIsDistinctFrom;
 
-    public SetAggregationStateSerializer(ArrayType arrayType)
+    public SetAggregationStateSerializer(Type elementType, MethodHandle elementIsDistinctFrom)
     {
-        this.arrayType = arrayType;
+        this.arrayType = new ArrayType(requireNonNull(elementType, "elementType is null"));
+        this.elementIsDistinctFrom = requireNonNull(elementIsDistinctFrom, "element is distinct from is null");
     }
 
     @Override
@@ -51,6 +57,6 @@ public class SetAggregationStateSerializer
     @Override
     public void deserialize(Block block, int index, SetAggregationState state)
     {
-        state.set(new SetOfValues(arrayType.getObject(block, index), state.getElementType()));
+        state.set(new SetOfValues(arrayType.getObject(block, index), state.getElementType(), elementIsDistinctFrom));
     }
 }

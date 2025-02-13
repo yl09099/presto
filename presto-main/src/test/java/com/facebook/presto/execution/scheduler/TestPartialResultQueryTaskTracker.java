@@ -34,7 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static com.facebook.airlift.concurrent.Threads.daemonThreadsNamed;
-import static com.facebook.presto.execution.warnings.WarningHandlingLevel.NORMAL;
+import static com.facebook.presto.common.WarningHandlingLevel.NORMAL;
 import static com.facebook.presto.spi.StandardWarningCode.PARTIAL_RESULT_WARNING;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
@@ -72,6 +72,7 @@ public class TestPartialResultQueryTaskTracker
                 new NodeVersion("1"),
                 false,
                 false,
+                false,
                 false);
         InternalNode node2 = new InternalNode(
                 UUID.randomUUID().toString(),
@@ -79,9 +80,10 @@ public class TestPartialResultQueryTaskTracker
                 new NodeVersion("1"),
                 false,
                 false,
+                false,
                 false);
-        TaskId taskId1 = new TaskId("test1", 1, 0, 1);
-        TaskId taskId2 = new TaskId("test2", 2, 0, 1);
+        TaskId taskId1 = new TaskId("test1", 1, 0, 1, 0);
+        TaskId taskId2 = new TaskId("test2", 2, 0, 1, 0);
         RemoteTask task1 = taskFactory.createTableScanTask(taskId1, node1, ImmutableList.of(), new NodeTaskMap.NodeStatsTracker(delta -> {}, delta -> {}, (age, delta) -> {}));
         RemoteTask task2 = taskFactory.createTableScanTask(taskId2, node2, ImmutableList.of(), new NodeTaskMap.NodeStatsTracker(delta -> {}, delta -> {}, (age, delta) -> {}));
 
@@ -100,8 +102,8 @@ public class TestPartialResultQueryTaskTracker
         // Assert that the query is added to query manager, queue size = 1 since the query reached minCompletion ratio of 0.5 and is eligible for partial results
         assertEquals(1, partialResultQueryManager.getQueueSize());
 
-        // Sleep for 2 seconds so that we give enough time for query manager to cancel tasks and complete the query with partial results
-        Thread.sleep(2000);
+        // Sleep for 6 seconds so that we give enough time for query manager to cancel tasks and complete the query with partial results
+        Thread.sleep(6000);
         assertEquals(0, partialResultQueryManager.getQueueSize());
 
         // Assert that partial result warning is set correctly

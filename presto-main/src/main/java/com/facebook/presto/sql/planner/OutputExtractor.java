@@ -17,8 +17,9 @@ import com.facebook.presto.execution.Output;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.plan.TableWriterNode;
 import com.facebook.presto.sql.planner.plan.InternalPlanVisitor;
-import com.facebook.presto.sql.planner.plan.TableWriterNode;
+import com.facebook.presto.sql.planner.plan.SequenceNode;
 import com.google.common.base.VerifyException;
 
 import java.util.Optional;
@@ -58,6 +59,14 @@ public class OutputExtractor
             checkState(schemaTableName == null || schemaTableName.equals(writerTarget.getSchemaTableName()),
                     "cannot have more than a single create, insert or delete in a query");
             schemaTableName = writerTarget.getSchemaTableName();
+            return null;
+        }
+
+        public Void visitSequence(SequenceNode node, Void context)
+        {
+            // Left children of sequence are ignored since they don't output anything
+            node.getPrimarySource().accept(this, context);
+
             return null;
         }
 

@@ -14,6 +14,8 @@
 package com.facebook.presto.util;
 
 import com.facebook.presto.execution.AddColumnTask;
+import com.facebook.presto.execution.AddConstraintTask;
+import com.facebook.presto.execution.AlterColumnNotNullTask;
 import com.facebook.presto.execution.AlterFunctionTask;
 import com.facebook.presto.execution.CallTask;
 import com.facebook.presto.execution.CommitTask;
@@ -27,6 +29,7 @@ import com.facebook.presto.execution.CreateViewTask;
 import com.facebook.presto.execution.DataDefinitionTask;
 import com.facebook.presto.execution.DeallocateTask;
 import com.facebook.presto.execution.DropColumnTask;
+import com.facebook.presto.execution.DropConstraintTask;
 import com.facebook.presto.execution.DropFunctionTask;
 import com.facebook.presto.execution.DropMaterializedViewTask;
 import com.facebook.presto.execution.DropRoleTask;
@@ -39,15 +42,20 @@ import com.facebook.presto.execution.PrepareTask;
 import com.facebook.presto.execution.RenameColumnTask;
 import com.facebook.presto.execution.RenameSchemaTask;
 import com.facebook.presto.execution.RenameTableTask;
+import com.facebook.presto.execution.RenameViewTask;
 import com.facebook.presto.execution.ResetSessionTask;
 import com.facebook.presto.execution.RevokeRolesTask;
 import com.facebook.presto.execution.RevokeTask;
 import com.facebook.presto.execution.RollbackTask;
+import com.facebook.presto.execution.SetPropertiesTask;
 import com.facebook.presto.execution.SetRoleTask;
 import com.facebook.presto.execution.SetSessionTask;
 import com.facebook.presto.execution.StartTransactionTask;
+import com.facebook.presto.execution.TruncateTableTask;
 import com.facebook.presto.execution.UseTask;
 import com.facebook.presto.sql.tree.AddColumn;
+import com.facebook.presto.sql.tree.AddConstraint;
+import com.facebook.presto.sql.tree.AlterColumnNotNull;
 import com.facebook.presto.sql.tree.AlterFunction;
 import com.facebook.presto.sql.tree.Call;
 import com.facebook.presto.sql.tree.Commit;
@@ -60,6 +68,7 @@ import com.facebook.presto.sql.tree.CreateType;
 import com.facebook.presto.sql.tree.CreateView;
 import com.facebook.presto.sql.tree.Deallocate;
 import com.facebook.presto.sql.tree.DropColumn;
+import com.facebook.presto.sql.tree.DropConstraint;
 import com.facebook.presto.sql.tree.DropFunction;
 import com.facebook.presto.sql.tree.DropMaterializedView;
 import com.facebook.presto.sql.tree.DropRole;
@@ -72,14 +81,17 @@ import com.facebook.presto.sql.tree.Prepare;
 import com.facebook.presto.sql.tree.RenameColumn;
 import com.facebook.presto.sql.tree.RenameSchema;
 import com.facebook.presto.sql.tree.RenameTable;
+import com.facebook.presto.sql.tree.RenameView;
 import com.facebook.presto.sql.tree.ResetSession;
 import com.facebook.presto.sql.tree.Revoke;
 import com.facebook.presto.sql.tree.RevokeRoles;
 import com.facebook.presto.sql.tree.Rollback;
+import com.facebook.presto.sql.tree.SetProperties;
 import com.facebook.presto.sql.tree.SetRole;
 import com.facebook.presto.sql.tree.SetSession;
 import com.facebook.presto.sql.tree.StartTransaction;
 import com.facebook.presto.sql.tree.Statement;
+import com.facebook.presto.sql.tree.TruncateTable;
 import com.facebook.presto.sql.tree.Use;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Binder;
@@ -96,7 +108,7 @@ import static com.google.inject.multibindings.MapBinder.newMapBinder;
  */
 public class PrestoDataDefBindingHelper
 {
-    private PrestoDataDefBindingHelper(){}
+    private PrestoDataDefBindingHelper() {}
 
     private static final Map<Class<? extends Statement>, Class<? extends DataDefinitionTask<?>>> STATEMENT_TASK_TYPES;
     private static final Map<Class<? extends Statement>, Class<? extends DataDefinitionTask<?>>> TRANSACTION_CONTROL_TYPES;
@@ -113,14 +125,17 @@ public class PrestoDataDefBindingHelper
         dataDefBuilder.put(RenameTable.class, RenameTableTask.class);
         dataDefBuilder.put(RenameColumn.class, RenameColumnTask.class);
         dataDefBuilder.put(DropColumn.class, DropColumnTask.class);
+        dataDefBuilder.put(DropConstraint.class, DropConstraintTask.class);
+        dataDefBuilder.put(AddConstraint.class, AddConstraintTask.class);
+        dataDefBuilder.put(AlterColumnNotNull.class, AlterColumnNotNullTask.class);
         dataDefBuilder.put(DropTable.class, DropTableTask.class);
+        dataDefBuilder.put(TruncateTable.class, TruncateTableTask.class);
         dataDefBuilder.put(CreateView.class, CreateViewTask.class);
+        dataDefBuilder.put(RenameView.class, RenameViewTask.class);
         dataDefBuilder.put(DropView.class, DropViewTask.class);
         dataDefBuilder.put(CreateMaterializedView.class, CreateMaterializedViewTask.class);
         dataDefBuilder.put(DropMaterializedView.class, DropMaterializedViewTask.class);
-        dataDefBuilder.put(CreateFunction.class, CreateFunctionTask.class);
         dataDefBuilder.put(AlterFunction.class, AlterFunctionTask.class);
-        dataDefBuilder.put(DropFunction.class, DropFunctionTask.class);
         dataDefBuilder.put(Call.class, CallTask.class);
         dataDefBuilder.put(CreateRole.class, CreateRoleTask.class);
         dataDefBuilder.put(DropRole.class, DropRoleTask.class);
@@ -136,8 +151,11 @@ public class PrestoDataDefBindingHelper
         transactionDefBuilder.put(Commit.class, CommitTask.class);
         transactionDefBuilder.put(Rollback.class, RollbackTask.class);
         transactionDefBuilder.put(SetRole.class, SetRoleTask.class);
+        transactionDefBuilder.put(SetProperties.class, SetPropertiesTask.class);
         transactionDefBuilder.put(Prepare.class, PrepareTask.class);
         transactionDefBuilder.put(Deallocate.class, DeallocateTask.class);
+        transactionDefBuilder.put(CreateFunction.class, CreateFunctionTask.class);
+        transactionDefBuilder.put(DropFunction.class, DropFunctionTask.class);
 
         STATEMENT_TASK_TYPES = dataDefBuilder.build();
         TRANSACTION_CONTROL_TYPES = transactionDefBuilder.build();
@@ -154,10 +172,10 @@ public class PrestoDataDefBindingHelper
 
     public static void bindTransactionControlDefinitionTasks(Binder binder)
     {
-        MapBinder<Class<? extends Statement>, DataDefinitionTask<?>> taskBinder = newMapBinder(binder,
-                new TypeLiteral<Class<? extends Statement>>() {
-                }, new TypeLiteral<DataDefinitionTask<?>>() {
-                });
+        MapBinder<Class<? extends Statement>, DataDefinitionTask<?>> taskBinder = newMapBinder(
+                binder,
+                new TypeLiteral<Class<? extends Statement>>() {},
+                new TypeLiteral<DataDefinitionTask<?>>() {});
 
         TRANSACTION_CONTROL_TYPES.entrySet().stream()
                 .forEach(entry -> taskBinder.addBinding(entry.getKey()).to(entry.getValue()).in(Scopes.SINGLETON));

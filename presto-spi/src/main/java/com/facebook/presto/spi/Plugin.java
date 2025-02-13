@@ -16,16 +16,21 @@ package com.facebook.presto.spi;
 import com.facebook.presto.common.block.BlockEncoding;
 import com.facebook.presto.common.type.ParametricType;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.spi.analyzer.AnalyzerProvider;
+import com.facebook.presto.spi.analyzer.QueryPreparerProvider;
 import com.facebook.presto.spi.connector.ConnectorFactory;
 import com.facebook.presto.spi.eventlistener.EventListenerFactory;
 import com.facebook.presto.spi.function.FunctionNamespaceManagerFactory;
+import com.facebook.presto.spi.nodestatus.NodeStatusNotificationProviderFactory;
 import com.facebook.presto.spi.prerequisites.QueryPrerequisitesFactory;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupConfigurationManagerFactory;
 import com.facebook.presto.spi.security.PasswordAuthenticatorFactory;
+import com.facebook.presto.spi.security.PrestoAuthenticatorFactory;
 import com.facebook.presto.spi.security.SystemAccessControlFactory;
 import com.facebook.presto.spi.session.SessionPropertyConfigurationManagerFactory;
-import com.facebook.presto.spi.statistics.ExternalPlanStatisticsProvider;
+import com.facebook.presto.spi.statistics.HistoryBasedPlanStatisticsProvider;
 import com.facebook.presto.spi.storage.TempStorageFactory;
+import com.facebook.presto.spi.tracing.TracerProvider;
 import com.facebook.presto.spi.ttl.ClusterTtlProviderFactory;
 import com.facebook.presto.spi.ttl.NodeTtlFetcherFactory;
 
@@ -71,6 +76,11 @@ public interface Plugin
         return emptyList();
     }
 
+    default Iterable<PrestoAuthenticatorFactory> getPrestoAuthenticatorFactories()
+    {
+        return emptyList();
+    }
+
     default Iterable<EventListenerFactory> getEventListenerFactories()
     {
         return emptyList();
@@ -111,7 +121,35 @@ public interface Plugin
         return emptyList();
     }
 
-    default Iterable<ExternalPlanStatisticsProvider> getExternalPlanStatisticsProviders()
+    default Iterable<HistoryBasedPlanStatisticsProvider> getHistoryBasedPlanStatisticsProviders()
+    {
+        return emptyList();
+    }
+
+    /**
+     * Return list of tracer providers specified by tracer plugin
+     */
+    default Iterable<TracerProvider> getTracerProviders()
+    {
+        return emptyList();
+    }
+
+    default Iterable<AnalyzerProvider> getAnalyzerProviders()
+    {
+        return emptyList();
+    }
+
+    default Iterable<QueryPreparerProvider> getQueryPreparerProviders()
+    {
+        return emptyList();
+    }
+
+    default Iterable<NodeStatusNotificationProviderFactory> getNodeStatusNotificationProviderFactory()
+    {
+        return emptyList();
+    }
+
+    default Iterable<ClientRequestFilterFactory> getClientRequestFilterFactories()
     {
         return emptyList();
     }

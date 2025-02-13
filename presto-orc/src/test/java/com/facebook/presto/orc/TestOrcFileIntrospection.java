@@ -140,7 +140,8 @@ public class TestOrcFileIntrospection
                 DwrfEncryptionProvider.NO_ENCRYPTION,
                 DwrfKeyProvider.EMPTY,
                 new RuntimeStats(),
-                Optional.of(introspector));
+                Optional.of(introspector),
+                tempFile.getFile().lastModified());
 
         OrcSelectiveRecordReader recordReader = reader.createSelectiveRecordReader(
                 ImmutableMap.of(0, type),
@@ -155,7 +156,6 @@ public class TestOrcFileIntrospection
                 0,
                 dataSource.getSize(),
                 DateTimeZone.UTC,
-                false,
                 NOOP_ORC_AGGREGATED_MEMORY_CONTEXT,
                 Optional.empty(),
                 1000);

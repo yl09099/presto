@@ -27,6 +27,7 @@ import static com.facebook.presto.verifier.framework.DdlMatchResult.MatchType.CO
 import static com.facebook.presto.verifier.framework.DdlMatchResult.MatchType.MATCH;
 import static com.facebook.presto.verifier.framework.DdlMatchResult.MatchType.MISMATCH;
 import static com.facebook.presto.verifier.framework.DdlMatchResult.MatchType.TEST_NOT_PARSABLE;
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
 @Test(singleThreaded = true)
@@ -135,5 +136,30 @@ public class TestCreateViewVerification
         assertEvent(event.get(), FAILED, Optional.empty(), true);
 
         getQueryRunner().execute("DROP VIEW failed");
+    }
+
+    @Test
+    public void testRunningInQueryBankMode()
+    {
+        String snapshotModeQuery = "CREATE VIEW succeeded_not_exists_snapshot AS SELECT * FROM tpch.tiny.nation";
+
+        Optional<VerifierQueryEvent> event = runVerification(snapshotModeQuery, snapshotModeQuery, saveSnapshotSettings);
+        assertTrue(event.isPresent());
+        assertEvent(event.get(), SUCCEEDED);
+
+        String queryBankModeQuery = "CREATE VIEW succeeded_not_exists_querybank AS SELECT * FROM tpch.tiny.nation";
+        event = runVerification(queryBankModeQuery, queryBankModeQuery, queryBankModeSettings);
+        assertTrue(event.isPresent());
+        assertEvent(event.get(), SUCCEEDED);
+    }
+
+    private void assertEvent(
+            VerifierQueryEvent event,
+            VerifierQueryEvent.EventStatus expectedStatus)
+    {
+        assertEquals(event.getSuite(), SUITE);
+        assertEquals(event.getTestId(), TEST_ID);
+        assertEquals(event.getName(), NAME);
+        assertEquals(event.getStatus(), expectedStatus.name());
     }
 }

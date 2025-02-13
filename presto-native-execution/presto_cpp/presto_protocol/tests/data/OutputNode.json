@@ -1,5 +1,5 @@
 {
-  "@type": "com.facebook.presto.sql.planner.plan.OutputNode",
+  "@type": ".OutputNode",
   "id": "9",
   "source": {
     "@type": "com.facebook.presto.sql.planner.plan.ExchangeNode",
@@ -29,7 +29,9 @@
           "type": "varchar(1)"
         }
       ],
-      "replicateNullsAndAny": false
+      "replicateNullsAndAny": false,
+      "scaleWriters": false,
+      "encoding":"COLUMNAR"
     },
     "sources": [],
     "inputs": [

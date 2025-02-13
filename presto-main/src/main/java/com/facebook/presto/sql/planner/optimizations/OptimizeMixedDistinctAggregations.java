@@ -16,6 +16,7 @@ package com.facebook.presto.sql.planner.optimizations;
 import com.facebook.presto.Session;
 import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.metadata.Metadata;
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.function.StandardFunctionResolution;
 import com.facebook.presto.spi.plan.AggregationNode;
@@ -29,7 +30,6 @@ import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.SpecialFormExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.plan.GroupIdNode;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
@@ -51,7 +51,7 @@ import static com.facebook.presto.SystemSessionProperties.isOptimizeDistinctAggr
 import static com.facebook.presto.common.function.OperatorType.EQUAL;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.BooleanType.BOOLEAN;
-import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.DEFAULT_NAMESPACE;
+import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.JAVA_BUILTIN_NAMESPACE;
 import static com.facebook.presto.spi.plan.AggregationNode.Step.SINGLE;
 import static com.facebook.presto.spi.plan.AggregationNode.singleGroupingSet;
 import static com.facebook.presto.spi.plan.ProjectNode.Locality.LOCAL;
@@ -83,37 +83,58 @@ public class OptimizeMixedDistinctAggregations
 {
     private final Metadata metadata;
     private final StandardFunctionResolution functionResolution;
+    private boolean isEnabledForTesting;
 
     public OptimizeMixedDistinctAggregations(Metadata metadata)
     {
         this.metadata = metadata;
-        this.functionResolution = new FunctionResolution(metadata.getFunctionAndTypeManager());
+        this.functionResolution = new FunctionResolution(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver());
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, PlanVariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public void setEnabledForTesting(boolean isSet)
     {
-        if (isOptimizeDistinctAggregationEnabled(session)) {
-            return SimplePlanRewriter.rewriteWith(new Optimizer(idAllocator, variableAllocator, metadata, functionResolution), plan, Optional.empty());
+        isEnabledForTesting = isSet;
+    }
+
+    @Override
+    public boolean isEnabled(Session session)
+    {
+        return isEnabledForTesting || isOptimizeDistinctAggregationEnabled(session);
+    }
+
+    @Override
+    public PlanOptimizerResult optimize(PlanNode plan, Session session, TypeProvider types, VariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    {
+        if (isEnabled(session)) {
+            Optimizer optimizer = new Optimizer(idAllocator, variableAllocator, metadata, functionResolution);
+            PlanNode rewrittenPlan = SimplePlanRewriter.rewriteWith(optimizer, plan, Optional.empty());
+            return PlanOptimizerResult.optimizerResult(rewrittenPlan, optimizer.isPlanChanged());
         }
 
-        return plan;
+        return PlanOptimizerResult.optimizerResult(plan, false);
     }
 
     private static class Optimizer
             extends SimplePlanRewriter<Optional<AggregateInfo>>
     {
         private final PlanNodeIdAllocator idAllocator;
-        private final PlanVariableAllocator variableAllocator;
+        private final VariableAllocator variableAllocator;
         private final Metadata metadata;
         private final StandardFunctionResolution functionResolution;
+        private boolean planChanged;
 
-        private Optimizer(PlanNodeIdAllocator idAllocator, PlanVariableAllocator variableAllocator, Metadata metadata, StandardFunctionResolution functionResolution)
+        private Optimizer(PlanNodeIdAllocator idAllocator, VariableAllocator variableAllocator, Metadata metadata, StandardFunctionResolution functionResolution)
         {
             this.idAllocator = requireNonNull(idAllocator, "idAllocator is null");
             this.variableAllocator = requireNonNull(variableAllocator, "variableAllocator is null");
             this.metadata = requireNonNull(metadata, "metadata is null");
             this.functionResolution = requireNonNull(functionResolution, "functionResolution is null");
+        }
+
+        public boolean isPlanChanged()
+        {
+            return planChanged;
         }
 
         @Override
@@ -194,9 +215,9 @@ public class OptimizeMixedDistinctAggregations
                             false,
                             Optional.empty());
                     QualifiedObjectName functionName = metadata.getFunctionAndTypeManager().getFunctionMetadata(entry.getValue().getFunctionHandle()).getName();
-                    if (functionName.equals(QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "count")) ||
-                            functionName.equals(QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "count_if")) ||
-                            functionName.equals(QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "approx_distinct"))) {
+                    if (functionName.equals(QualifiedObjectName.valueOf(JAVA_BUILTIN_NAMESPACE, "count")) ||
+                            functionName.equals(QualifiedObjectName.valueOf(JAVA_BUILTIN_NAMESPACE, "count_if")) ||
+                            functionName.equals(QualifiedObjectName.valueOf(JAVA_BUILTIN_NAMESPACE, "approx_distinct"))) {
                         VariableReferenceExpression newVariable = variableAllocator.newVariable(entry.getValue().getCall().getSourceLocation(), "expr", entry.getKey().getType());
                         aggregations.put(newVariable, aggregation);
                         coalesceVariablesBuilder.put(newVariable, entry.getKey());
@@ -217,7 +238,10 @@ public class OptimizeMixedDistinctAggregations
                     ImmutableList.of(),
                     node.getStep(),
                     Optional.empty(),
-                    node.getGroupIdVariable());
+                    node.getGroupIdVariable(),
+                    node.getAggregationId());
+
+            planChanged = true;
 
             if (coalesceVariables.isEmpty()) {
                 return aggregationNode;
@@ -463,7 +487,7 @@ public class OptimizeMixedDistinctAggregations
                     // Now the aggregation should happen over the duplicate symbol added before
                     List<RowExpression> arguments;
                     if (!duplicatedDistinctVariable.equals(distinctVariable) &&
-                            extractVariables(entry.getValue().getArguments(), variableAllocator.getTypes()).contains(distinctVariable)) {
+                            extractVariables(entry.getValue().getArguments(), TypeProvider.viewOf(variableAllocator.getVariables())).contains(distinctVariable)) {
                         ImmutableList.Builder<RowExpression> argumentsBuilder = ImmutableList.builder();
                         for (RowExpression argument : aggregation.getArguments()) {
                             if (argument instanceof VariableReferenceExpression && argument.equals(distinctVariable)) {
@@ -501,6 +525,7 @@ public class OptimizeMixedDistinctAggregations
                     ImmutableList.of(),
                     SINGLE,
                     originalNode.getHashVariable(),
+                    Optional.empty(),
                     Optional.empty());
         }
 

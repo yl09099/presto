@@ -20,6 +20,11 @@ public abstract class PlanVisitor<R, C>
      */
     public abstract R visitPlan(PlanNode node, C context);
 
+    public R visitOutput(OutputNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
     public R visitAggregation(AggregationNode node, C context)
     {
         return visitPlan(node, context);
@@ -36,6 +41,11 @@ public abstract class PlanVisitor<R, C>
     }
 
     public R visitTableScan(TableScanNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitSort(SortNode node, C context)
     {
         return visitPlan(node, context);
     }
@@ -76,6 +86,61 @@ public abstract class PlanVisitor<R, C>
     }
 
     public R visitDistinctLimit(DistinctLimitNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitCteReference(CteReferenceNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitCteProducer(CteProducerNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitCteConsumer(CteConsumerNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitWindow(WindowNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitJoin(JoinNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitSemiJoin(SemiJoinNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitSpatialJoin(SpatialJoinNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitMergeJoin(MergeJoinNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitDelete(DeleteNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitTableWriter(TableWriterNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitTableFinish(TableFinishNode node, C context)
     {
         return visitPlan(node, context);
     }

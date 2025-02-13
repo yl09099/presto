@@ -15,9 +15,9 @@ package com.facebook.presto.sql.planner.assertions;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.metadata.TableMetadata;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.TableMetadata;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
@@ -81,9 +81,12 @@ public class ColumnReference
     {
         Optional<VariableReferenceExpression> result = Optional.empty();
         for (Map.Entry<VariableReferenceExpression, ColumnHandle> entry : assignments.entrySet()) {
-            if (entry.getValue().equals(columnHandle)) {
+            ColumnHandle targetColumnHandle = entry.getValue();
+            if (targetColumnHandle.equals(columnHandle) ||
+                    targetColumnHandle.equals(columnHandle.withRequiredSubfields(targetColumnHandle.getRequiredSubfields()))) {
                 checkState(!result.isPresent(), "Multiple ColumnHandles found for %s:%s in table scan assignments", tableName, columnName);
                 result = Optional.of(entry.getKey());
+                break;
             }
         }
         return result;

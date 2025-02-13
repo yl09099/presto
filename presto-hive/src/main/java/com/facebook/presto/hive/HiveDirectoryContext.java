@@ -13,6 +13,8 @@
  */
 package com.facebook.presto.hive;
 
+import com.facebook.presto.common.RuntimeStats;
+import com.facebook.presto.spi.security.ConnectorIdentity;
 import com.google.common.collect.ImmutableMap;
 
 import java.util.Map;
@@ -22,14 +24,28 @@ import static java.util.Objects.requireNonNull;
 public class HiveDirectoryContext
 {
     private final NestedDirectoryPolicy nestedDirectoryPolicy;
-    private final boolean cacheable;
+    private final ConnectorIdentity connectorIdentity;
     private final Map<String, String> additionalProperties;
+    private final RuntimeStats runtimeStats;
+    private boolean cacheable;
+    private boolean skipEmptyFiles;
 
-    public HiveDirectoryContext(NestedDirectoryPolicy nestedDirectoryPolicy, boolean cacheable, Map<String, String> additionalProperties)
+    public HiveDirectoryContext(
+            NestedDirectoryPolicy nestedDirectoryPolicy,
+            boolean cacheable,
+            boolean skipEmptyFiles,
+            ConnectorIdentity connectorIdentity,
+            Map<String, String> additionalProperties,
+            RuntimeStats runtimeStats)
     {
         this.nestedDirectoryPolicy = requireNonNull(nestedDirectoryPolicy, "nestedDirectoryPolicy is null");
-        this.cacheable = cacheable;
+        this.connectorIdentity = requireNonNull(connectorIdentity, "connectorIdentity is null");
         this.additionalProperties = ImmutableMap.copyOf(requireNonNull(additionalProperties, "additionalProperties is null"));
+        this.runtimeStats = requireNonNull(runtimeStats, "runtimeStats is null");
+
+        // this can be disabled
+        this.cacheable = cacheable;
+        this.skipEmptyFiles = skipEmptyFiles;
     }
 
     public NestedDirectoryPolicy getNestedDirectoryPolicy()
@@ -42,8 +58,28 @@ public class HiveDirectoryContext
         return cacheable;
     }
 
+    public void disableCaching()
+    {
+        cacheable = false;
+    }
+
+    public ConnectorIdentity getConnectorIdentity()
+    {
+        return connectorIdentity;
+    }
+
     public Map<String, String> getAdditionalProperties()
     {
         return additionalProperties;
+    }
+
+    public boolean isSkipEmptyFilesEnabled()
+    {
+        return skipEmptyFiles;
+    }
+
+    public RuntimeStats getRuntimeStats()
+    {
+        return runtimeStats;
     }
 }

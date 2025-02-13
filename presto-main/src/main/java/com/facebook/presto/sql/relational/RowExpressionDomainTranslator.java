@@ -104,8 +104,8 @@ public final class RowExpressionDomainTranslator
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.functionAndTypeManager = metadata.getFunctionAndTypeManager();
-        this.logicalRowExpressions = new LogicalRowExpressions(new RowExpressionDeterminismEvaluator(functionAndTypeManager), new FunctionResolution(functionAndTypeManager), functionAndTypeManager);
-        this.functionResolution = new FunctionResolution(functionAndTypeManager);
+        this.logicalRowExpressions = new LogicalRowExpressions(new RowExpressionDeterminismEvaluator(functionAndTypeManager), new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver()), functionAndTypeManager);
+        this.functionResolution = new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver());
     }
 
     @Override
@@ -132,7 +132,7 @@ public final class RowExpressionDomainTranslator
         return predicate.accept(new Visitor<>(metadata, session, columnExtractor), false);
     }
 
-    private RowExpression toPredicate(Domain domain, RowExpression reference)
+    public RowExpression toPredicate(Domain domain, RowExpression reference)
     {
         if (domain.getValues().isNone()) {
             return domain.isNullAllowed() ? isNull(reference) : FALSE_CONSTANT;
@@ -302,9 +302,9 @@ public final class RowExpressionDomainTranslator
             this.metadata = metadata;
             this.session = session;
             this.functionAndTypeManager = metadata.getFunctionAndTypeManager();
-            this.logicalRowExpressions = new LogicalRowExpressions(new RowExpressionDeterminismEvaluator(functionAndTypeManager), new FunctionResolution(functionAndTypeManager), functionAndTypeManager);
+            this.logicalRowExpressions = new LogicalRowExpressions(new RowExpressionDeterminismEvaluator(functionAndTypeManager), new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver()), functionAndTypeManager);
             this.determinismEvaluator = new RowExpressionDeterminismEvaluator(functionAndTypeManager);
-            this.resolution = new FunctionResolution(functionAndTypeManager);
+            this.resolution = new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver());
             this.columnExtractor = requireNonNull(columnExtractor, "columnExtractor is null");
         }
 
@@ -637,13 +637,13 @@ public final class RowExpressionDomainTranslator
                 left = leftExpression;
             }
             else {
-                left = new RowExpressionInterpreter(leftExpression, metadata, session, OPTIMIZED).optimize();
+                left = new RowExpressionInterpreter(leftExpression, metadata.getFunctionAndTypeManager(), session, OPTIMIZED).optimize();
             }
             if (rightExpression instanceof VariableReferenceExpression) {
                 right = rightExpression;
             }
             else {
-                right = new RowExpressionInterpreter(rightExpression, metadata, session, OPTIMIZED).optimize();
+                right = new RowExpressionInterpreter(rightExpression, metadata.getFunctionAndTypeManager(), session, OPTIMIZED).optimize();
             }
 
             if (left instanceof RowExpression == right instanceof RowExpression) {

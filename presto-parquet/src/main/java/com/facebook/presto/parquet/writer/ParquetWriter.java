@@ -17,17 +17,22 @@ import com.facebook.presto.common.Page;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.parquet.writer.ColumnWriter.BufferData;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.OutputStreamSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
 import org.apache.parquet.column.ParquetProperties;
+import org.apache.parquet.column.ParquetProperties.Builder;
 import org.apache.parquet.format.ColumnMetaData;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
+import org.apache.parquet.format.SchemaElement;
 import org.apache.parquet.format.Util;
+import org.apache.parquet.format.converter.ParquetMetadataConverter;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.schema.MessageType;
 import org.openjdk.jol.info.ClassLayout;
 
@@ -35,8 +40,10 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.List;
+import java.util.Map;
 
 import static com.facebook.presto.parquet.writer.ParquetDataOutput.createDataOutput;
+import static com.facebook.presto.parquet.writer.ParquetWriterOptions.DEFAULT_MAX_PAGE_SIZE;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -47,7 +54,6 @@ import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.util.Objects.requireNonNull;
-import static org.apache.parquet.column.ParquetProperties.WriterVersion.PARQUET_2_0;
 import static org.apache.parquet.hadoop.metadata.CompressionCodecName.BROTLI;
 import static org.apache.parquet.hadoop.metadata.CompressionCodecName.GZIP;
 import static org.apache.parquet.hadoop.metadata.CompressionCodecName.LZ4;
@@ -60,6 +66,7 @@ public class ParquetWriter
         implements Closeable
 {
     private static final int INSTANCE_SIZE = ClassLayout.parseClass(ParquetWriter.class).instanceSize();
+    private static final ParquetMetadataConverter METADATA_CONVERTER = new ParquetMetadataConverter();
 
     private static final int CHUNK_MAX_BYTES = toIntExact(DataSize.valueOf("128MB").toBytes());
     private static final int DEFAULT_ROW_GROUP_MAX_ROW_COUNT = 10_000;
@@ -81,7 +88,13 @@ public class ParquetWriter
 
     public static final Slice MAGIC = wrappedBuffer("PAR1".getBytes(US_ASCII));
 
-    public ParquetWriter(OutputStream outputStream, List<String> columnNames, List<Type> types, ParquetWriterOptions writerOption, String compressionCodecClass)
+    public ParquetWriter(OutputStream outputStream,
+                         MessageType messageType,
+                         Map<List<String>, Type> primitiveTypes,
+                         List<String> columnNames,
+                         List<Type> types,
+                         ParquetWriterOptions writerOption,
+                         String compressionCodecClass)
     {
         this.outputStream = new OutputStreamSliceOutput(requireNonNull(outputStream, "outputstream is null"));
         this.names = ImmutableList.copyOf(requireNonNull(columnNames, "columnNames is null"));
@@ -90,22 +103,30 @@ public class ParquetWriter
 
         checkArgument(types.size() == columnNames.size(), "type size %s is not equal to name size %s", types.size(), columnNames.size());
 
-        ParquetSchemaConverter parquetSchemaConverter = new ParquetSchemaConverter(types, columnNames);
-        this.messageType = parquetSchemaConverter.getMessageType();
+        this.messageType = requireNonNull(messageType, "messageType is null");
 
-        ParquetProperties parquetProperties = ParquetProperties.builder()
-                .withWriterVersion(PARQUET_2_0)
+        Builder parquetPropertiesBuilder = ParquetProperties.builder()
+                .withWriterVersion(writerOption.getWriterVersion())
                 .withPageSize(writerOption.getMaxPageSize())
-                .build();
+                .withDictionaryPageSize(writerOption.getMaxDictionaryPageSize());
+
+        // It's not thread-safe to share a single `ValuesWriterFactory` between all `ParquetProperties` instances with different page options.
+        // So set a separate `ValuesWriterFactory` instance to `ParquetProperties` with non-default page options on its creation,
+        //  and share a single `ValuesWriterFactory` instance between all `ParquetProperties` instances with default page options.
+        if (!DEFAULT_MAX_PAGE_SIZE.equals(DataSize.succinctBytes(writerOption.getMaxPageSize())) ||
+                !DEFAULT_MAX_PAGE_SIZE.equals(DataSize.succinctBytes(writerOption.getMaxDictionaryPageSize()))) {
+            parquetPropertiesBuilder.withValuesWriterFactory(ParquetWriters.getValuesWriterFactory(writerOption.getWriterVersion()));
+        }
+        ParquetProperties parquetProperties = parquetPropertiesBuilder.build();
         CompressionCodecName compressionCodecName = getCompressionCodecName(compressionCodecClass);
-        this.columnWriters = ParquetWriters.getColumnWriters(messageType, parquetSchemaConverter.getPrimitiveTypes(), parquetProperties, compressionCodecName);
+        this.columnWriters = ParquetWriters.getColumnWriters(messageType, primitiveTypes, parquetProperties, compressionCodecName);
 
         this.chunkMaxLogicalBytes = max(1, CHUNK_MAX_BYTES / 2);
     }
 
     public long getWrittenBytes()
     {
-        return outputStream.size();
+        return outputStream.longSize();
     }
 
     public long getBufferedBytes()
@@ -243,14 +264,26 @@ public class ParquetWriter
     {
         FileMetaData fileMetaData = new FileMetaData();
         fileMetaData.setVersion(1);
-        fileMetaData.setSchema(MessageTypeConverter.toParquetSchema(messageType));
         long totalRows = rowGroups.stream().mapToLong(RowGroup::getNum_rows).sum();
         fileMetaData.setNum_rows(totalRows);
         fileMetaData.setRow_groups(ImmutableList.copyOf(rowGroups));
 
+        fileMetaData.setSchema(getParquetSchema(fileMetaData.getCreated_by(), messageType));
+
         DynamicSliceOutput dynamicSliceOutput = new DynamicSliceOutput(40);
         Util.writeFileMetaData(fileMetaData, dynamicSliceOutput);
         return dynamicSliceOutput.slice();
+    }
+
+    private static List<SchemaElement> getParquetSchema(String createdBy, MessageType messageType)
+    {
+        org.apache.parquet.hadoop.metadata.FileMetaData parquetMetaDataInput = new org.apache.parquet.hadoop.metadata.FileMetaData(
+                messageType,
+                ImmutableMap.of(),
+                createdBy);
+
+        FileMetaData parquetMetaData = METADATA_CONVERTER.toParquetMetadata(1, new ParquetMetadata(parquetMetaDataInput, ImmutableList.of()));
+        return parquetMetaData.getSchema();
     }
 
     private void updateRowGroups(List<ColumnMetaData> columnMetaData)

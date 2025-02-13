@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.airlift.units.DataSize.Unit.PETABYTE;
+import static io.airlift.units.DataSize.Unit.TERABYTE;
 import static java.util.concurrent.TimeUnit.HOURS;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
@@ -53,6 +54,7 @@ public class TestQueryManagerConfig
                 .setMaxQueuedQueries(5000)
                 .setHashPartitionCount(100)
                 .setPartitioningProviderCatalog("system")
+                .setCtePartitioningProviderCatalog("system")
                 .setExchangeMaterializationStrategy(ExchangeMaterializationStrategy.NONE)
                 .setQueryManagerExecutorPoolSize(5)
                 .setRemoteTaskMinErrorDuration(new Duration(5, TimeUnit.MINUTES))
@@ -63,12 +65,14 @@ public class TestQueryManagerConfig
                 .setQueryMaxExecutionTime(new Duration(100, TimeUnit.DAYS))
                 .setQueryMaxCpuTime(new Duration(1_000_000_000, TimeUnit.DAYS))
                 .setQueryMaxScanRawInputBytes(new DataSize(1000, PETABYTE))
+                .setQueryMaxWrittenIntermediateBytes(new DataSize(2, TERABYTE))
                 .setQueryMaxOutputPositions(Long.MAX_VALUE)
                 .setQueryMaxOutputSize(new DataSize(1000, PETABYTE))
                 .setRequiredWorkers(1)
                 .setRequiredWorkersMaxWait(new Duration(5, TimeUnit.MINUTES))
                 .setRequiredCoordinators(1)
                 .setRequiredCoordinatorsMaxWait(new Duration(5, TimeUnit.MINUTES))
+                .setRequiredCoordinatorSidecarsMaxWait(new Duration(5, TimeUnit.MINUTES))
                 .setRequiredResourceManagers(1)
                 .setQuerySubmissionMaxThreads(Runtime.getRuntime().availableProcessors() * 2)
                 .setUseStreamingExchangeForMarkDistinct(false)
@@ -78,7 +82,9 @@ public class TestQueryManagerConfig
                 .setGlobalQueryRetryFailureWindow(new Duration(5, MINUTES))
                 .setRateLimiterBucketMaxSize(100)
                 .setRateLimiterCacheLimit(1000)
-                .setRateLimiterCacheWindowMinutes(5));
+                .setRateLimiterCacheWindowMinutes(5)
+                .setEnableWorkerIsolation(false)
+                .setMinColumnarEncodingChannelsToPreferRowWiseEncoding(1000));
     }
 
     @Test
@@ -112,6 +118,7 @@ public class TestQueryManagerConfig
                 .put("query.max-execution-time", "3h")
                 .put("query.max-cpu-time", "2d")
                 .put("query.max-scan-raw-input-bytes", "1MB")
+                .put("query.max-written-intermediate-bytes", "100MB")
                 .put("query.max-output-positions", "259")
                 .put("query.max-output-size", "100MB")
                 .put("query.use-streaming-exchange-for-mark-distinct", "true")
@@ -119,6 +126,7 @@ public class TestQueryManagerConfig
                 .put("query-manager.required-workers-max-wait", "33m")
                 .put("query-manager.experimental.required-coordinators", "999")
                 .put("query-manager.experimental.required-coordinators-max-wait", "99m")
+                .put("query-manager.experimental.required-coordinator-sidecars-max-wait", "99m")
                 .put("query-manager.experimental.required-resource-managers", "9")
                 .put("query-manager.experimental.query-submission-max-threads", "5")
                 .put("per-query-retry-limit", "10")
@@ -128,6 +136,9 @@ public class TestQueryManagerConfig
                 .put("query-manager.rate-limiter-bucket-max-size", "200")
                 .put("query-manager.rate-limiter-cache-limit", "10000")
                 .put("query-manager.rate-limiter-cache-window-minutes", "60")
+                .put("query.cte-partitioning-provider-catalog", "hive")
+                .put("query-manager.enable-worker-isolation", "true")
+                .put("min-columnar-encoding-channels-to-prefer-row-wise-encoding", "123")
                 .build();
 
         QueryManagerConfig expected = new QueryManagerConfig()
@@ -148,6 +159,7 @@ public class TestQueryManagerConfig
                 .setMaxQueuedQueries(15)
                 .setHashPartitionCount(16)
                 .setPartitioningProviderCatalog("hive")
+                .setCtePartitioningProviderCatalog("hive")
                 .setExchangeMaterializationStrategy(ExchangeMaterializationStrategy.ALL)
                 .setQueryManagerExecutorPoolSize(11)
                 .setRemoteTaskMinErrorDuration(new Duration(60, SECONDS))
@@ -160,10 +172,12 @@ public class TestQueryManagerConfig
                 .setQueryMaxScanRawInputBytes(new DataSize(1, MEGABYTE))
                 .setQueryMaxOutputPositions(259)
                 .setQueryMaxOutputSize(new DataSize(100, MEGABYTE))
+                .setQueryMaxWrittenIntermediateBytes(new DataSize(100, MEGABYTE))
                 .setRequiredWorkers(333)
                 .setRequiredWorkersMaxWait(new Duration(33, TimeUnit.MINUTES))
                 .setRequiredCoordinators(999)
                 .setRequiredCoordinatorsMaxWait(new Duration(99, TimeUnit.MINUTES))
+                .setRequiredCoordinatorSidecarsMaxWait(new Duration(99, TimeUnit.MINUTES))
                 .setRequiredResourceManagers(9)
                 .setQuerySubmissionMaxThreads(5)
                 .setUseStreamingExchangeForMarkDistinct(true)
@@ -173,7 +187,10 @@ public class TestQueryManagerConfig
                 .setGlobalQueryRetryFailureWindow(new Duration(1, HOURS))
                 .setRateLimiterBucketMaxSize(200)
                 .setRateLimiterCacheLimit(10000)
-                .setRateLimiterCacheWindowMinutes(60);
+                .setRateLimiterCacheWindowMinutes(60)
+                .setCtePartitioningProviderCatalog("hive")
+                .setEnableWorkerIsolation(true)
+                .setMinColumnarEncodingChannelsToPreferRowWiseEncoding(123);
         ConfigAssertions.assertFullMapping(properties, expected);
     }
 }

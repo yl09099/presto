@@ -85,7 +85,7 @@ public final class QueryAssertions
 
         if (results.getUpdateCount().isPresent()) {
             if (!count.isPresent()) {
-                fail("update count should be present");
+                fail("update count must be specified. Expected updated count : " + results.getUpdateCount().getAsLong());
             }
             assertEquals(results.getUpdateCount().getAsLong(), count.getAsLong(), "update count");
         }
@@ -224,11 +224,15 @@ public final class QueryAssertions
 
         if (ensureOrdering) {
             if (!actualRows.equals(expectedRows)) {
-                assertEquals(actualRows, expectedRows, "For query: \n " + actual + "\n:");
+                assertEquals(actualRows,
+                        expectedRows,
+                        "For query: \n " + actual + "\n actual column types:\n " + actualResults.getTypes() + "\nexpected column types:\n" + expectedResults.getTypes() + "\n");
             }
         }
         else {
-            assertEqualsIgnoreOrder(actualRows, expectedRows, "For query: \n " + actual);
+            assertEqualsIgnoreOrder(actualRows,
+                    expectedRows,
+                    "For query: \n " + actual + "\n actual column types:\n " + actualResults.getTypes() + "\nexpected column types:\n" + expectedResults.getTypes() + "\n");
         }
     }
 
@@ -248,19 +252,32 @@ public final class QueryAssertions
             Multiset<?> unexpectedRows = Multisets.difference(actualSet, expectedSet);
             Multiset<?> missingRows = Multisets.difference(expectedSet, actualSet);
             int limit = 100;
-            fail(format(
-                    "%snot equal\n" +
-                            "Actual rows (up to %s of %s extra rows shown, %s rows in total):\n    %s\n" +
-                            "Expected rows (up to %s of %s missing rows shown, %s rows in total):\n    %s\n",
+            String extraRowsMessage = "";
+            if (!unexpectedRows.isEmpty()) {
+                int numShown = Math.min(limit, unexpectedRows.size());
+                extraRowsMessage = format(
+                        "Actual rows (%s of %s extra rows shown, %s rows in total):\n    %s\n",
+                        numShown,
+                        unexpectedRows.size(),
+                        actualSet.size(),
+                        Joiner.on("\n    ").join(Iterables.limit(unexpectedRows, limit)));
+            }
+            String missingRowsMessage = "";
+            if (!missingRows.isEmpty()) {
+                int numShown = Math.min(limit, missingRows.size());
+                missingRowsMessage = format(
+                        "Expected rows (%s of %s missing rows shown, %s rows in total):\n    %s\n",
+                        numShown,
+                        missingRows.size(),
+                        expectedSet.size(),
+                        Joiner.on("\n    ").join(Iterables.limit(missingRows, limit)));
+            }
+            String rowsDiff = format(
+                    "%snot equal\n%s%s",
                     message == null ? "" : (message + "\n"),
-                    limit,
-                    unexpectedRows.size(),
-                    actualSet.size(),
-                    Joiner.on("\n    ").join(Iterables.limit(unexpectedRows, limit)),
-                    limit,
-                    missingRows.size(),
-                    expectedSet.size(),
-                    Joiner.on("\n    ").join(Iterables.limit(missingRows, limit))));
+                    extraRowsMessage,
+                    missingRowsMessage);
+            fail(rowsDiff);
         }
     }
 
@@ -285,7 +302,7 @@ public final class QueryAssertions
     {
         for (MaterializedRow row : expectedSubset.getMaterializedRows()) {
             if (!all.getMaterializedRows().contains(row)) {
-                fail(format("expected row missing: %s\nAll %s rows:\n    %s\nExpected subset %s rows:\n    %s\n",
+                fail(format("expected row missing: %s%nAll %s rows:%n    %s%nExpected subset %s rows:%n    %s%n",
                         row,
                         all.getMaterializedRows().size(),
                         Joiner.on("\n    ").join(Iterables.limit(all, 100)),
@@ -366,6 +383,24 @@ public final class QueryAssertions
                 session,
                 Iterables.transform(tables, table -> table.getTableName()),
                 false,
+                false);
+    }
+
+    public static void copyTpchTables(
+            QueryRunner queryRunner,
+            String sourceCatalog,
+            String sourceSchema,
+            Session session,
+            Iterable<TpchTable<?>> tables,
+            boolean ifNotExists)
+    {
+        copyTables(
+                queryRunner,
+                sourceCatalog,
+                sourceSchema,
+                session,
+                Iterables.transform(tables, table -> table.getTableName()),
+                ifNotExists,
                 false);
     }
 

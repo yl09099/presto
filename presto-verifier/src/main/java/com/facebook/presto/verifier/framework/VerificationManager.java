@@ -40,6 +40,8 @@ import com.facebook.presto.verifier.annotation.ForControl;
 import com.facebook.presto.verifier.annotation.ForTest;
 import com.facebook.presto.verifier.event.VerifierQueryEvent;
 import com.facebook.presto.verifier.event.VerifierQueryEvent.EventStatus;
+import com.facebook.presto.verifier.source.SnapshotQueryConsumer;
+import com.facebook.presto.verifier.source.SnapshotQuerySupplier;
 import com.facebook.presto.verifier.source.SourceQuerySupplier;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -52,6 +54,7 @@ import javax.inject.Inject;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Iterator;
 import java.util.List;
@@ -67,6 +70,7 @@ import java.util.function.Predicate;
 
 import static com.facebook.presto.verifier.event.VerifierQueryEvent.EventStatus.FAILED;
 import static com.facebook.presto.verifier.event.VerifierQueryEvent.EventStatus.FAILED_RESOLVED;
+import static com.facebook.presto.verifier.event.VerifierQueryEvent.EventStatus.RESUBMITTED;
 import static com.facebook.presto.verifier.event.VerifierQueryEvent.EventStatus.SKIPPED;
 import static com.facebook.presto.verifier.event.VerifierQueryEvent.EventStatus.SUCCEEDED;
 import static com.facebook.presto.verifier.framework.ClusterType.CONTROL;
@@ -77,6 +81,7 @@ import static com.facebook.presto.verifier.framework.SkippedReason.MISMATCHED_QU
 import static com.facebook.presto.verifier.framework.SkippedReason.NON_DETERMINISTIC;
 import static com.facebook.presto.verifier.framework.SkippedReason.SYNTAX_ERROR;
 import static com.facebook.presto.verifier.framework.SkippedReason.UNSUPPORTED_QUERY_TYPE;
+import static com.facebook.presto.verifier.framework.VerifierConfig.QUERY_BANK_MODE;
 import static com.facebook.presto.verifier.framework.VerifierUtil.PARSING_OPTIONS;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.Thread.currentThread;
@@ -88,6 +93,8 @@ public class VerificationManager
     private static final Logger log = Logger.get(VerificationManager.class);
 
     private final SourceQuerySupplier sourceQuerySupplier;
+    private final SnapshotQueryConsumer snapshotQueryConsumer;
+    private final Map<String, SnapshotQuery> snapshotQueries;
     private final VerificationFactory verificationFactory;
     private final SqlParser sqlParser;
     private final Set<EventClient> eventClients;
@@ -106,6 +113,8 @@ public class VerificationManager
     private final int verificationResubmissionLimit;
     private final boolean explain;
     private final boolean skipControl;
+    private final boolean skipChecksum;
+    private final String runningMode;
 
     private final ExecutorService executor;
     private final CompletionService<VerificationResult> completionService;
@@ -114,6 +123,8 @@ public class VerificationManager
     @Inject
     public VerificationManager(
             SourceQuerySupplier sourceQuerySupplier,
+            SnapshotQueryConsumer snapshotQueryConsumer,
+            SnapshotQuerySupplier snapshotQuerySupplier,
             VerificationFactory verificationFactory,
             SqlParser sqlParser,
             Set<EventClient> eventClients,
@@ -123,6 +134,8 @@ public class VerificationManager
             VerifierConfig config)
     {
         this.sourceQuerySupplier = requireNonNull(sourceQuerySupplier, "sourceQuerySupplier is null");
+        this.snapshotQueryConsumer = requireNonNull(snapshotQueryConsumer, "snapshotQueryConsumer is null");
+        requireNonNull(snapshotQuerySupplier, "snapshotQuerySupplier is null");
         this.verificationFactory = requireNonNull(verificationFactory, "verificationFactory is null");
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
         this.eventClients = ImmutableSet.copyOf(eventClients);
@@ -140,10 +153,18 @@ public class VerificationManager
         this.queryRepetitions = config.getQueryRepetitions();
         this.verificationResubmissionLimit = config.getVerificationResubmissionLimit();
         this.skipControl = config.isSkipControl();
+        this.skipChecksum = config.isSkipChecksum();
         this.explain = config.isExplain();
 
         this.executor = newFixedThreadPool(maxConcurrency);
         this.completionService = new ExecutorCompletionService<>(executor);
+        this.runningMode = config.getRunningMode();
+        if (runningMode.equals(QUERY_BANK_MODE)) {
+            snapshotQueries = snapshotQuerySupplier.get();
+        }
+        else {
+            snapshotQueries = Collections.emptyMap();
+        }
     }
 
     @PostConstruct
@@ -181,10 +202,10 @@ public class VerificationManager
     {
         SourceQuery sourceQuery = verification.getSourceQuery();
         VerificationContext newContext = verification.getVerificationContext();
-        Verification newVerification = verificationFactory.get(sourceQuery, Optional.of(newContext));
+        Verification newVerification = verificationFactory.get(sourceQuery, Optional.of(newContext), snapshotQueryConsumer, snapshotQueries);
         completionService.submit(newVerification::run);
         queriesSubmitted.addAndGet(1);
-        log.info("Verification %s failed, resubmitted for verification (%s/%s)", sourceQuery.getName(), newContext.getResubmissionCount(), verificationResubmissionLimit);
+        log.info("Resubmitted %s for verification (%s/%s)", sourceQuery.getName(), newContext.getResubmissionCount(), verificationResubmissionLimit);
     }
 
     @VisibleForTesting
@@ -201,6 +222,8 @@ public class VerificationManager
                         sourceQuery.getName(),
                         sourceQuery.getQuery(CONTROL),
                         sourceQuery.getQuery(TEST),
+                        sourceQuery.getQueryId(CONTROL),
+                        sourceQuery.getQueryId(TEST),
                         sourceQuery.getControlConfiguration().applyOverrides(controlOverrides),
                         sourceQuery.getTestConfiguration().applyOverrides(testOverrides)))
                 .collect(toImmutableList());
@@ -249,7 +272,7 @@ public class VerificationManager
                 else if (controlQueryType != testQueryType) {
                     postEvent(VerifierQueryEvent.skipped(sourceQuery.getSuite(), testId, sourceQuery, MISMATCHED_QUERY_TYPE, skipControl));
                 }
-                else if (isLimitWithoutOrderBy(controlStatement, sourceQuery.getName())) {
+                else if (!skipControl && !skipChecksum && isLimitWithoutOrderBy(controlStatement, sourceQuery.getName())) {
                     log.debug("LimitWithoutOrderByChecker Skipped %s", sourceQuery.getName());
                     postEvent(VerifierQueryEvent.skipped(sourceQuery.getSuite(), testId, sourceQuery, NON_DETERMINISTIC, skipControl));
                 }
@@ -313,7 +336,7 @@ public class VerificationManager
         for (int i = 0; i < suiteRepetitions; i++) {
             for (SourceQuery sourceQuery : sourceQueries) {
                 for (int j = 0; j < queryRepetitions; j++) {
-                    Verification verification = verificationFactory.get(sourceQuery, Optional.empty());
+                    Verification verification = verificationFactory.get(sourceQuery, Optional.empty(), snapshotQueryConsumer, snapshotQueries);
                     completionService.submit(verification::run);
                 }
             }
@@ -334,26 +357,25 @@ public class VerificationManager
                 VerificationResult result = completionService.take().get();
                 Optional<VerifierQueryEvent> event = result.getEvent();
                 completed++;
-                if (!event.isPresent()) {
-                    statusCount.compute(SKIPPED, (status, count) -> count == null ? 1 : count + 1);
-                }
-                else {
+                if (event.isPresent()) {
                     statusCount.compute(EventStatus.valueOf(event.get().getStatus()), (status, count) -> count == null ? 1 : count + 1);
                     postEvent(event.get());
                 }
 
                 if (result.shouldResubmit()) {
+                    statusCount.compute(RESUBMITTED, (status, count) -> count == null ? 1 : count + 1);
                     resubmit(result.getVerification());
                 }
 
                 double progress = ((double) completed) / queriesSubmitted.get() * 100;
-                if (progress - lastProgress > 0.5 || completed == queriesSubmitted.get()) {
+                if (progress - lastProgress > 0.2 || completed == queriesSubmitted.get()) {
                     log.info(
-                            "Progress: %s succeeded, %s skipped, %s resolved, %s failed, %.2f%% done",
+                            "Progress: %s succeeded, %s skipped, %s resolved, %s failed, %s resubmitted, %.2f%% done",
                             statusCount.getOrDefault(SUCCEEDED, 0),
                             statusCount.getOrDefault(SKIPPED, 0),
                             statusCount.getOrDefault(FAILED_RESOLVED, 0),
                             statusCount.getOrDefault(FAILED, 0),
+                            statusCount.getOrDefault(RESUBMITTED, 0),
                             progress);
                     lastProgress = progress;
                 }

@@ -67,7 +67,7 @@ public final class JsonResponse<T>
             value = jsonCodec.fromJson(responseBody);
         }
         catch (IllegalArgumentException e) {
-            exception = new IllegalArgumentException(format("Unable to create %s from JSON response:\n[%s]", jsonCodec.getType(), responseBody), e);
+            exception = new IllegalArgumentException(format("Unable to create %s from JSON response:%n[%s]", jsonCodec.getType(), responseBody), e);
         }
         this.hasValue = (exception == null);
         this.value = value;
@@ -130,7 +130,7 @@ public final class JsonResponse<T>
     {
         try (Response response = client.newCall(request).execute()) {
             // TODO: fix in OkHttp: https://github.com/square/okhttp/issues/3111
-            if ((response.code() == 307) || (response.code() == 308)) {
+            if (((response.code() == 307) || (response.code() == 308)) && client.followRedirects()) {
                 String location = response.header(LOCATION);
                 if (location != null) {
                     request = request.newBuilder().url(location).build();

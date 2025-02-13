@@ -15,6 +15,7 @@ package com.facebook.presto.sql.planner.optimizations;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.SystemSessionProperties;
+import com.facebook.presto.common.CatalogSchemaName;
 import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.common.predicate.NullableValue;
 import com.facebook.presto.common.predicate.TupleDomain;
@@ -27,29 +28,27 @@ import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.Constraint;
 import com.facebook.presto.spi.DiscretePredicates;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.function.FunctionMetadata;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.AggregationNode.Aggregation;
 import com.facebook.presto.spi.plan.Assignments;
 import com.facebook.presto.spi.plan.FilterNode;
-import com.facebook.presto.spi.plan.LimitNode;
 import com.facebook.presto.spi.plan.MarkDistinctNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.spi.plan.SortNode;
 import com.facebook.presto.spi.plan.TableScanNode;
-import com.facebook.presto.spi.plan.TopNNode;
 import com.facebook.presto.spi.plan.ValuesNode;
 import com.facebook.presto.spi.relation.ConstantExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.spi.statistics.TableStatistics;
-import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.VariablesExtractor;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
-import com.facebook.presto.sql.planner.plan.SortNode;
 import com.facebook.presto.sql.relational.RowExpressionDeterminismEvaluator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -64,7 +63,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.DEFAULT_NAMESPACE;
 import static com.facebook.presto.spi.plan.ProjectNode.Locality.LOCAL;
 import static com.facebook.presto.sql.planner.RowExpressionInterpreter.evaluateConstantRowExpression;
 import static com.facebook.presto.sql.relational.Expressions.call;
@@ -80,16 +78,8 @@ import static java.util.Objects.requireNonNull;
 public class MetadataQueryOptimizer
         implements PlanOptimizer
 {
-    private static final Set<QualifiedObjectName> ALLOWED_FUNCTIONS = ImmutableSet.of(
-            QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "max"),
-            QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "min"),
-            QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "approx_distinct"));
-
-    // Min/Max could be folded into LEAST/GREATEST
-    private static final Map<QualifiedObjectName, QualifiedObjectName> AGGREGATION_SCALAR_MAPPING = ImmutableMap.of(
-            QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "max"), QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "greatest"),
-            QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "min"), QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "least"));
-
+    private final Set<QualifiedObjectName> allowedFunctions;
+    private final Map<QualifiedObjectName, QualifiedObjectName> aggregationScalarMapping;
     private final Metadata metadata;
 
     public MetadataQueryOptimizer(Metadata metadata)
@@ -97,15 +87,36 @@ public class MetadataQueryOptimizer
         requireNonNull(metadata, "metadata is null");
 
         this.metadata = metadata;
+        CatalogSchemaName defaultNamespace = metadata.getFunctionAndTypeManager().getDefaultNamespace();
+        this.allowedFunctions = ImmutableSet.of(
+                QualifiedObjectName.valueOf(defaultNamespace, "max"),
+                QualifiedObjectName.valueOf(defaultNamespace, "min"),
+                QualifiedObjectName.valueOf(defaultNamespace, "approx_distinct"));
+        // Min/Max could be folded into LEAST/GREATEST
+        this.aggregationScalarMapping = ImmutableMap.of(
+                QualifiedObjectName.valueOf(defaultNamespace, "max"), QualifiedObjectName.valueOf(defaultNamespace, "greatest"),
+                QualifiedObjectName.valueOf(defaultNamespace, "min"), QualifiedObjectName.valueOf(defaultNamespace, "least"));
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, PlanVariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public PlanOptimizerResult optimize(PlanNode plan, Session session, TypeProvider types, VariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
         if (!SystemSessionProperties.isOptimizeMetadataQueries(session) && !SystemSessionProperties.isOptimizeMetadataQueriesIgnoreStats(session)) {
-            return plan;
+            return PlanOptimizerResult.optimizerResult(plan, false);
         }
-        return SimplePlanRewriter.rewriteWith(new Optimizer(session, metadata, idAllocator), plan, null);
+        Optimizer optimizer = new Optimizer(session, metadata, idAllocator);
+        PlanNode rewrittenPlan = SimplePlanRewriter.rewriteWith(optimizer, plan, null);
+        return PlanOptimizerResult.optimizerResult(rewrittenPlan, optimizer.isPlanChanged());
+    }
+
+    public Set<QualifiedObjectName> getAllowedFunctions()
+    {
+        return allowedFunctions;
+    }
+
+    public Map<QualifiedObjectName, QualifiedObjectName> getAggregationScalarMapping()
+    {
+        return aggregationScalarMapping;
     }
 
     private static class Optimizer
@@ -117,6 +128,8 @@ public class MetadataQueryOptimizer
         private final RowExpressionDeterminismEvaluator determinismEvaluator;
         private final boolean ignoreMetadataStats;
         private final int metastoreCallNumThreshold;
+        private boolean planChanged;
+        private final MetadataQueryOptimizer metadataQueryOptimizer;
 
         private Optimizer(Session session, Metadata metadata, PlanNodeIdAllocator idAllocator)
         {
@@ -126,6 +139,12 @@ public class MetadataQueryOptimizer
             this.determinismEvaluator = new RowExpressionDeterminismEvaluator(metadata);
             this.ignoreMetadataStats = SystemSessionProperties.isOptimizeMetadataQueriesIgnoreStats(session);
             this.metastoreCallNumThreshold = SystemSessionProperties.getOptimizeMetadataQueriesCallThreshold(session);
+            this.metadataQueryOptimizer = new MetadataQueryOptimizer(metadata);
+        }
+
+        public boolean isPlanChanged()
+        {
+            return planChanged;
         }
 
         @Override
@@ -134,7 +153,7 @@ public class MetadataQueryOptimizer
             // supported functions are only MIN/MAX/APPROX_DISTINCT or distinct aggregates
             for (Aggregation aggregation : node.getAggregations().values()) {
                 QualifiedObjectName functionName = metadata.getFunctionAndTypeManager().getFunctionMetadata(aggregation.getFunctionHandle()).getName();
-                if (!ALLOWED_FUNCTIONS.contains(functionName) && !aggregation.isDistinct()) {
+                if (!metadataQueryOptimizer.getAllowedFunctions().contains(functionName) && !aggregation.isDistinct()) {
                     return context.defaultRewrite(node);
                 }
             }
@@ -243,6 +262,7 @@ public class MetadataQueryOptimizer
             }
 
             // replace the tablescan node with a values node
+            planChanged = true;
             return SimplePlanRewriter.rewriteWith(new Replacer(new ValuesNode(node.getSourceLocation(), idAllocator.getNextId(), inputs, rowsBuilder.build(), Optional.empty())), node);
         }
 
@@ -254,7 +274,7 @@ public class MetadataQueryOptimizer
             }
             for (Aggregation aggregation : node.getAggregations().values()) {
                 FunctionMetadata functionMetadata = metadata.getFunctionAndTypeManager().getFunctionMetadata(aggregation.getFunctionHandle());
-                if (!AGGREGATION_SCALAR_MAPPING.containsKey(functionMetadata.getName()) ||
+                if (!metadataQueryOptimizer.getAggregationScalarMapping().containsKey(functionMetadata.getName()) ||
                         functionMetadata.getArgumentTypes().size() > 1 ||
                         !inputs.containsAll(aggregation.getCall().getArguments())) {
                     return false;
@@ -322,6 +342,7 @@ public class MetadataQueryOptimizer
                     return context.defaultRewrite(node);
                 }
             }
+            planChanged = true;
             Assignments assignments = assignmentsBuilder.build();
             ValuesNode valuesNode = new ValuesNode(node.getSourceLocation(), idAllocator.getNextId(), node.getOutputVariables(), ImmutableList.of(new ArrayList<>(assignments.getExpressions())), Optional.empty());
             return new ProjectNode(node.getSourceLocation(), idAllocator.getNextId(), valuesNode, assignments, LOCAL);
@@ -347,7 +368,7 @@ public class MetadataQueryOptimizer
                 return constant(null, returnType);
             }
 
-            String scalarFunctionName = AGGREGATION_SCALAR_MAPPING.get(aggregationFunctionMetadata.getName()).getObjectName();
+            String scalarFunctionName = metadataQueryOptimizer.getAggregationScalarMapping().get(aggregationFunctionMetadata.getName()).getObjectName();
             ConnectorSession connectorSession = session.toConnectorSession();
             while (arguments.size() > 1) {
                 List<RowExpression> reducedArguments = new ArrayList<>();
@@ -359,7 +380,7 @@ public class MetadataQueryOptimizer
                                     scalarFunctionName,
                                     returnType,
                                     partitionedArguments),
-                            metadata,
+                            metadata.getFunctionAndTypeManager(),
                             connectorSession);
                     reducedArguments.add(constant(reducedValue, returnType));
                 }
@@ -374,8 +395,6 @@ public class MetadataQueryOptimizer
                 // allow any chain of linear transformations
                 if (source instanceof MarkDistinctNode ||
                         source instanceof FilterNode ||
-                        source instanceof LimitNode ||
-                        source instanceof TopNNode ||
                         source instanceof SortNode) {
                     source = source.getSources().get(0);
                 }

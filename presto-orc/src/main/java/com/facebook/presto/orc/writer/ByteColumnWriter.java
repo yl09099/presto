@@ -25,6 +25,7 @@ import com.facebook.presto.orc.metadata.RowGroupIndex;
 import com.facebook.presto.orc.metadata.Stream;
 import com.facebook.presto.orc.metadata.Stream.StreamKind;
 import com.facebook.presto.orc.metadata.statistics.ColumnStatistics;
+import com.facebook.presto.orc.metadata.statistics.IntegerStatisticsBuilder;
 import com.facebook.presto.orc.stream.ByteOutputStream;
 import com.facebook.presto.orc.stream.PresentOutputStream;
 import com.facebook.presto.orc.stream.StreamDataOutput;
@@ -58,12 +59,11 @@ public class ByteColumnWriter
     private final boolean compressed;
     private final ByteOutputStream dataStream;
     private final PresentOutputStream presentStream;
-    private CompressedMetadataWriter metadataWriter;
+    private final CompressedMetadataWriter metadataWriter;
 
     private final List<ColumnStatistics> rowGroupColumnStatistics = new ArrayList<>();
     private long columnStatisticsRetainedSizeInBytes;
-
-    private int nonNullValueCount;
+    private IntegerStatisticsBuilder statisticsBuilder;
 
     private boolean closed;
 
@@ -81,6 +81,7 @@ public class ByteColumnWriter
         this.dataStream = new ByteOutputStream(columnWriterOptions, dwrfEncryptor);
         this.presentStream = new PresentOutputStream(columnWriterOptions, dwrfEncryptor);
         this.metadataWriter = new CompressedMetadataWriter(metadataWriter, columnWriterOptions, dwrfEncryptor);
+        this.statisticsBuilder = new IntegerStatisticsBuilder();
     }
 
     @Override
@@ -110,22 +111,25 @@ public class ByteColumnWriter
         // record values
         for (int position = 0; position < block.getPositionCount(); position++) {
             if (!block.isNull(position)) {
-                dataStream.writeByte((byte) type.getLong(block, position));
-                nonNullValueCount++;
+                byte value = (byte) type.getLong(block, position);
+                dataStream.writeByte(value);
+                statisticsBuilder.addValue(value);
             }
         }
         // For byte columns, null and values has the same size (1 byte)
-        return block.getPositionCount() * NULL_SIZE;
+        long rawSize = block.getPositionCount() * NULL_SIZE;
+        statisticsBuilder.incrementRawSize(rawSize);
+        return rawSize;
     }
 
     @Override
     public Map<Integer, ColumnStatistics> finishRowGroup()
     {
         checkState(!closed);
-        ColumnStatistics statistics = new ColumnStatistics((long) nonNullValueCount, null);
+        ColumnStatistics statistics = statisticsBuilder.buildColumnStatistics();
         rowGroupColumnStatistics.add(statistics);
         columnStatisticsRetainedSizeInBytes += statistics.getRetainedSizeInBytes();
-        nonNullValueCount = 0;
+        statisticsBuilder = new IntegerStatisticsBuilder();
         return ImmutableMap.of(column, statistics);
     }
 
@@ -187,6 +191,6 @@ public class ByteColumnWriter
         presentStream.reset();
         rowGroupColumnStatistics.clear();
         columnStatisticsRetainedSizeInBytes = 0;
-        nonNullValueCount = 0;
+        statisticsBuilder = new IntegerStatisticsBuilder();
     }
 }

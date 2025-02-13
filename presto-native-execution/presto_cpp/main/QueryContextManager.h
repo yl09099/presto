@@ -15,17 +15,15 @@
 
 #include <folly/Synchronized.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
-#include <list>
+#include <folly/executors/IOThreadPoolExecutor.h>
 #include <memory>
 #include <unordered_map>
 
-#include "presto_cpp/presto_protocol/presto_protocol.h"
+#include "presto_cpp/main/SessionProperties.h"
+#include "presto_cpp/presto_protocol/core/presto_protocol_core.h"
 #include "velox/core/QueryCtx.h"
 
 namespace facebook::presto {
-
-folly::CPUThreadPoolExecutor* driverCPUExecutor();
-
 class QueryContextCache {
  public:
   using QueryCtxWeakPtr = std::weak_ptr<velox::core::QueryCtx>;
@@ -90,6 +88,8 @@ class QueryContextCache {
     return queryCtxs_;
   }
 
+  void testingClear();
+
  private:
   size_t capacity_;
 
@@ -102,10 +102,26 @@ class QueryContextCache {
 class QueryContextManager {
  public:
   QueryContextManager(
-      std::unordered_map<std::string, std::string>& properties,
-      std::unordered_map<std::string, std::string>& nodeProperties)
-      : properties_(properties), nodeProperties_(nodeProperties) {}
+      folly::Executor* driverExecutor,
+      folly::Executor* spillerExecutor);
 
+  std::shared_ptr<velox::core::QueryCtx> findOrCreateQueryCtx(
+      const protocol::TaskId& taskId,
+      const protocol::SessionRepresentation& session);
+
+  /// Calls the given functor for every present query context.
+  void visitAllContexts(std::function<void(
+                            const protocol::QueryId&,
+                            const velox::core::QueryCtx*)> visitor) const;
+
+  /// Test method to clear the query context cache.
+  void testingClearCache();
+
+  const SessionProperties& getSessionProperties() const {
+    return sessionProperties_;
+  }
+
+ private:
   std::shared_ptr<velox::core::QueryCtx> findOrCreateQueryCtx(
       const protocol::TaskId& taskId,
       std::unordered_map<std::string, std::string>&& configStrings,
@@ -114,41 +130,14 @@ class QueryContextManager {
           std::unordered_map<std::string, std::string>>&&
           connectorConfigStrings);
 
-  void overrideProperties(
-      const std::string& property,
-      const std::string& value) {
-    properties_[property] = value;
-  }
+  std::unordered_map<std::string, std::string> toVeloxConfigs(
+      const protocol::SessionRepresentation& session);
 
-  // Calls the given functor for every present query context.
-  void visitAllContexts(std::function<void(
-                            const protocol::QueryId&,
-                            const velox::core::QueryCtx*)> visitor) const;
-
-  static constexpr const char* kQueryMaxMemoryPerNode =
-      "query.max-memory-per-node";
-  static constexpr const char* kQueryMaxTotalMemoryPerNode =
-      "query.max-total-memory-per-node";
-  static constexpr int64_t kDefaultMaxMemoryPerNode =
-      std::numeric_limits<int64_t>::max();
-
- private:
-  int64_t getMaxMemoryPerNode(
-      const std::string& property,
-      int64_t defaultMaxMemoryPerNode) {
-    int64_t maxMemoryInBytes = defaultMaxMemoryPerNode;
-    auto it = properties_.find(property);
-    if (it != properties_.end()) {
-      // This can overflow if the properties exceeds 8EB.
-      maxMemoryInBytes =
-          protocol::DataSize(it->second).getValue(protocol::DataUnit::BYTE);
-    }
-    // Return sane value if it is indeed overflow.
-    return (maxMemoryInBytes <= 0) ? defaultMaxMemoryPerNode : maxMemoryInBytes;
-  }
+  folly::Executor* const driverExecutor_{nullptr};
+  folly::Executor* const spillerExecutor_{nullptr};
 
   folly::Synchronized<QueryContextCache> queryContextCache_;
-  std::unordered_map<std::string, std::string> properties_;
-  std::unordered_map<std::string, std::string> nodeProperties_;
+  SessionProperties sessionProperties_;
 };
+
 } // namespace facebook::presto

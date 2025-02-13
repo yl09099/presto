@@ -28,13 +28,13 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 
+import static com.facebook.presto.execution.QueryState.FAILED;
 import static com.facebook.presto.execution.QueryState.QUEUED;
 import static com.facebook.presto.execution.QueryState.RUNNING;
 import static com.facebook.presto.execution.TestQueryRunnerUtil.createQuery;
 import static com.facebook.presto.execution.TestQueryRunnerUtil.waitForQueryState;
-import static com.facebook.presto.execution.TestQueues.LONG_LASTING_QUERY;
 import static com.facebook.presto.execution.TestQueues.newSession;
-import static com.facebook.presto.spi.StandardErrorCode.QUERY_HAS_TOO_MANY_STAGES;
+import static com.facebook.presto.spi.StandardErrorCode.CLUSTER_HAS_TOO_MANY_RUNNING_TASKS;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -46,6 +46,8 @@ import static org.testng.Assert.assertTrue;
 @Test(singleThreaded = true)
 public class TestQueryTaskLimit
 {
+    public static final String LONG_LASTING_QUERY = "SELECT COUNT(*) FROM lineitem";
+
     private ExecutorService executor;
     private Session defaultSession;
 
@@ -90,16 +92,29 @@ public class TestQueryTaskLimit
     public void testQueuingWhenTaskLimitExceeds()
             throws Exception
     {
-        try (DistributedQueryRunner queryRunner = createQueryRunner(defaultSession, ImmutableMap.of())) {
-            QueryId firstQuery = createQuery(queryRunner, newSession("test", ImmutableSet.of(), null), LONG_LASTING_QUERY);
+        ImmutableMap<String, String> extraProperties = ImmutableMap.<String, String>builder()
+                .put("experimental.spill-enabled", "false")
+                .put("experimental.max-total-running-task-count-to-not-execute-new-query", "2")
+                .build();
+
+        try (DistributedQueryRunner queryRunner = createQueryRunner(defaultSession, extraProperties)) {
+            QueryId firstQuery = createQuery(queryRunner, newSession("test", ImmutableSet.of(), null),
+                    LONG_LASTING_QUERY);
             waitForQueryState(queryRunner, firstQuery, RUNNING);
 
-            queryRunner.getCoordinator().getResourceGroupManager().get().setTaskLimitExceeded(true);
+            // wait for the first query to schedule more than 2 tasks, so exceed resource group manager's total task limit
+            confirmQueryScheduledTasksGreaterThan(queryRunner, firstQuery, 2);
 
             QueryId secondQuery = createQuery(queryRunner, newSession("test", ImmutableSet.of(), null), LONG_LASTING_QUERY);
+
+            // When current running tasks exceeded limit, the following query would be queued
             waitForQueryState(queryRunner, secondQuery, QUEUED);
 
-            queryRunner.getCoordinator().getResourceGroupManager().get().setTaskLimitExceeded(false);
+            // Cancel the first query
+            queryRunner.getCoordinator().getDispatchManager().cancelQuery(firstQuery);
+            waitForQueryState(queryRunner, firstQuery, FAILED);
+
+            // When first query is cancelled, the second query would be pass to run
             waitForQueryState(queryRunner, secondQuery, RUNNING);
         }
     }
@@ -127,12 +142,26 @@ public class TestQueryTaskLimit
             for (BasicQueryInfo info : queryRunner.getCoordinator().getQueryManager().getQueries()) {
                 if (info.getState().isDone()) {
                     assertNotNull(info.getErrorCode());
-                    assertEquals(info.getErrorCode().getCode(), QUERY_HAS_TOO_MANY_STAGES.toErrorCode().getCode());
+                    assertEquals(info.getErrorCode().getCode(), CLUSTER_HAS_TOO_MANY_RUNNING_TASKS.toErrorCode().getCode());
                     MILLISECONDS.sleep(100);
                     return;
                 }
             }
             MILLISECONDS.sleep(10);
+        }
+    }
+
+    private void confirmQueryScheduledTasksGreaterThan(DistributedQueryRunner queryRunner, QueryId queryId, int minTaskCount)
+            throws InterruptedException
+    {
+        while (true) {
+            BasicQueryInfo info = queryRunner.getCoordinator().getDispatchManager().getQueryInfo(queryId);
+            if (info.getQueryStats().getRunningTasks() > minTaskCount) {
+                // still wait for a while to ensure resource group manager to refresh
+                MILLISECONDS.sleep(10);
+                break;
+            }
+            MILLISECONDS.sleep(100);
         }
     }
 }

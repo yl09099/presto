@@ -25,7 +25,9 @@ import com.facebook.presto.operator.InterpretedHashGenerator;
 import com.facebook.presto.operator.PartitionFunction;
 import com.facebook.presto.operator.PrecomputedHashGenerator;
 import com.facebook.presto.spi.BucketFunction;
+import com.facebook.presto.spi.Node;
 import com.facebook.presto.spi.connector.ConnectorPartitioningHandle;
+import com.facebook.presto.spi.plan.PartitioningHandle;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
@@ -33,6 +35,7 @@ import com.google.common.collect.ImmutableList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 import static com.facebook.presto.SystemSessionProperties.getHashPartitionCount;
 import static com.facebook.presto.SystemSessionProperties.getMaxTasksPerStage;
@@ -98,13 +101,25 @@ public final class SystemPartitioningHandle
     @Override
     public boolean isSingleNode()
     {
-        return partitioning == SystemPartitioning.COORDINATOR_ONLY || partitioning == SystemPartitioning.SINGLE;
+        return function == SystemPartitionFunction.SINGLE;
     }
 
     @Override
     public boolean isCoordinatorOnly()
     {
         return partitioning == SystemPartitioning.COORDINATOR_ONLY;
+    }
+
+    @Override
+    public boolean isBroadcast()
+    {
+        return function == SystemPartitionFunction.BROADCAST;
+    }
+
+    @Override
+    public boolean isArbitrary()
+    {
+        return function == SystemPartitionFunction.ROUND_ROBIN;
     }
 
     @Override
@@ -136,9 +151,9 @@ public final class SystemPartitioningHandle
         return partitioning.toString();
     }
 
-    public NodePartitionMap getNodePartitionMap(Session session, NodeScheduler nodeScheduler)
+    public NodePartitionMap getNodePartitionMap(Session session, NodeScheduler nodeScheduler, Optional<Predicate<Node>> nodePredicate)
     {
-        NodeSelector nodeSelector = nodeScheduler.createNodeSelector(session, null);
+        NodeSelector nodeSelector = nodeScheduler.createNodeSelector(session, null, nodePredicate);
         List<InternalNode> nodes;
         if (partitioning == SystemPartitioning.COORDINATOR_ONLY) {
             nodes = ImmutableList.of(nodeSelector.selectCurrentNode());

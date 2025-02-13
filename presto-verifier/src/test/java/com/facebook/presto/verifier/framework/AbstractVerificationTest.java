@@ -15,12 +15,15 @@ package com.facebook.presto.verifier.framework;
 
 import com.facebook.airlift.bootstrap.Bootstrap;
 import com.facebook.airlift.bootstrap.LifeCycleManager;
+import com.facebook.presto.common.block.BlockEncodingManager;
+import com.facebook.presto.common.block.BlockEncodingSerde;
 import com.facebook.presto.common.type.TypeManager;
 import com.facebook.presto.sql.parser.ParsingOptions;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.parser.SqlParserOptions;
 import com.facebook.presto.tests.StandaloneQueryRunner;
 import com.facebook.presto.verifier.event.VerifierQueryEvent;
+import com.facebook.presto.verifier.prestoaction.DefaultClientInfoFactory;
 import com.facebook.presto.verifier.prestoaction.JdbcPrestoAction;
 import com.facebook.presto.verifier.prestoaction.JdbcUrlSelector;
 import com.facebook.presto.verifier.prestoaction.PrestoAction;
@@ -34,11 +37,15 @@ import com.facebook.presto.verifier.retry.RetryConfig;
 import com.facebook.presto.verifier.rewrite.QueryRewriteConfig;
 import com.facebook.presto.verifier.rewrite.QueryRewriterFactory;
 import com.facebook.presto.verifier.rewrite.VerificationQueryRewriterFactory;
+import com.facebook.presto.verifier.source.SnapshotQueryConsumer;
+import com.facebook.presto.verifier.source.SnapshotQuerySupplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Injector;
 import org.testng.annotations.AfterClass;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 
 import static com.facebook.presto.sql.parser.IdentifierSymbol.AT_SIGN;
@@ -49,21 +56,32 @@ import static com.facebook.presto.verifier.VerifierTestUtil.SCHEMA;
 import static com.facebook.presto.verifier.VerifierTestUtil.createChecksumValidator;
 import static com.facebook.presto.verifier.VerifierTestUtil.createTypeManager;
 import static com.facebook.presto.verifier.VerifierTestUtil.setupPresto;
+import static com.facebook.presto.verifier.source.AbstractJdbiSnapshotQuerySupplier.VERIFIER_SNAPSHOT_KEY_PATTERN;
+import static java.lang.String.format;
 
 public abstract class AbstractVerificationTest
 {
     protected static final String SUITE = "test-suite";
     protected static final String NAME = "test-query";
     protected static final String TEST_ID = "test-id";
-    protected static final QueryConfiguration QUERY_CONFIGURATION = new QueryConfiguration(CATALOG, SCHEMA, Optional.of("user"), Optional.empty(), Optional.empty());
+    protected static final QueryConfiguration QUERY_CONFIGURATION = new QueryConfiguration(CATALOG, SCHEMA, Optional.of("user"), Optional.empty(),
+            Optional.empty(), true, Optional.empty());
     protected static final ParsingOptions PARSING_OPTIONS = ParsingOptions.builder().setDecimalLiteralTreatment(AS_DOUBLE).build();
     protected static final String CONTROL_TABLE_PREFIX = "tmp_verifier_c";
     protected static final String TEST_TABLE_PREFIX = "tmp_verifier_t";
+
+    protected static VerificationSettings concurrentControlAndTestSettings;
+    protected static VerificationSettings skipControlSettings;
+    protected static VerificationSettings saveSnapshotSettings;
+    protected static VerificationSettings queryBankModeSettings;
+
+    protected static VerificationSettings reuseTableSettings;
 
     private final StandaloneQueryRunner queryRunner;
 
     private final Injector injector;
     private final SqlParser sqlParser = new SqlParser(new SqlParserOptions().allowIdentifierSymbol(COLON, AT_SIGN));
+    private final BlockEncodingSerde blockEncodingSerde = new BlockEncodingManager();
     private final PrestoExceptionClassifier exceptionClassifier = PrestoExceptionClassifier.defaultBuilder().build();
     private final DeterminismAnalyzerConfig determinismAnalyzerConfig = new DeterminismAnalyzerConfig().setMaxAnalysisRuns(3).setRunTeardown(true);
     private final FailureResolverManagerFactory failureResolverManagerFactory;
@@ -76,6 +94,18 @@ public abstract class AbstractVerificationTest
                 .setRequiredConfigurationProperties(ImmutableMap.of("too-many-open-partitions.failure-resolver.enabled", "false"))
                 .initialize();
         this.failureResolverManagerFactory = injector.getInstance(FailureResolverManagerFactory.class);
+
+        concurrentControlAndTestSettings = new VerificationSettings();
+        concurrentControlAndTestSettings.concurrentControlAndTest = Optional.of(true);
+        skipControlSettings = new VerificationSettings();
+        skipControlSettings.skipControl = Optional.of(true);
+        saveSnapshotSettings = new VerificationSettings();
+        saveSnapshotSettings.runningMode = Optional.of("query-bank");
+        saveSnapshotSettings.saveSnapshot = Optional.of(true);
+        queryBankModeSettings = new VerificationSettings();
+        queryBankModeSettings.runningMode = Optional.of("query-bank");
+        reuseTableSettings = new VerificationSettings();
+        reuseTableSettings.reuseTable = Optional.of(true);
     }
 
     @AfterClass
@@ -100,12 +130,27 @@ public abstract class AbstractVerificationTest
 
     protected SourceQuery getSourceQuery(String controlQuery, String testQuery)
     {
-        return new SourceQuery(SUITE, NAME, controlQuery, testQuery, QUERY_CONFIGURATION, QUERY_CONFIGURATION);
+        return new SourceQuery(SUITE, NAME, controlQuery, testQuery, Optional.empty(), Optional.empty(), QUERY_CONFIGURATION, QUERY_CONFIGURATION);
+    }
+
+    protected SourceQuery getSourceQuery(String controlQuery, String testQuery, String controlQueryId, String testQueryId)
+    {
+        return new SourceQuery(SUITE, NAME, controlQuery, testQuery, Optional.of(controlQueryId), Optional.of(testQueryId), QUERY_CONFIGURATION, QUERY_CONFIGURATION);
+    }
+
+    protected SourceQuery getSourceQuery(String controlQuery, String testQuery, String controlQueryId, String testQueryId, QueryConfiguration controlQueryConfiguration, QueryConfiguration testQueryConfiguration)
+    {
+        return new SourceQuery(SUITE, NAME, controlQuery, testQuery, Optional.of(controlQueryId), Optional.of(testQueryId), controlQueryConfiguration, testQueryConfiguration);
     }
 
     protected Optional<VerifierQueryEvent> runExplain(String controlQuery, String testQuery)
     {
         return verify(getSourceQuery(controlQuery, testQuery), true, Optional.empty(), Optional.empty());
+    }
+
+    protected Optional<VerifierQueryEvent> runExplain(String controlQuery, String testQuery, VerificationSettings settings)
+    {
+        return verify(getSourceQuery(controlQuery, testQuery), true, Optional.empty(), Optional.of(settings));
     }
 
     protected Optional<VerifierQueryEvent> runVerification(String controlQuery, String testQuery)
@@ -116,6 +161,16 @@ public abstract class AbstractVerificationTest
     protected Optional<VerifierQueryEvent> runVerification(String controlQuery, String testQuery, VerificationSettings settings)
     {
         return verify(getSourceQuery(controlQuery, testQuery), false, Optional.empty(), Optional.of(settings));
+    }
+
+    protected Optional<VerifierQueryEvent> runVerification(String controlQuery, String testQuery, String controlQueryId, String testQueryId, VerificationSettings settings)
+    {
+        return verify(getSourceQuery(controlQuery, testQuery, controlQueryId, testQueryId), false, Optional.empty(), Optional.of(settings));
+    }
+
+    protected Optional<VerifierQueryEvent> runVerification(String controlQuery, String testQuery, String controlQueryId, String testQueryId, QueryConfiguration controlQueryConfiguration, QueryConfiguration testQueryConfiguration, VerificationSettings settings)
+    {
+        return verify(getSourceQuery(controlQuery, testQuery, controlQueryId, testQueryId, controlQueryConfiguration, testQueryConfiguration), false, Optional.empty(), Optional.of(settings));
     }
 
     protected Optional<VerifierQueryEvent> verify(SourceQuery sourceQuery, boolean explain)
@@ -147,7 +202,7 @@ public abstract class AbstractVerificationTest
                 queryActionsConfig.getChecksumTimeout(),
                 retryConfig,
                 retryConfig,
-                verifierConfig);
+                new DefaultClientInfoFactory(verifierConfig));
     }
 
     private Optional<VerifierQueryEvent> verify(
@@ -160,14 +215,25 @@ public abstract class AbstractVerificationTest
         verificationSettings.ifPresent(settings -> {
             settings.concurrentControlAndTest.ifPresent(verifierConfig::setConcurrentControlAndTest);
             settings.skipControl.ifPresent(verifierConfig::setSkipControl);
+            settings.runningMode.ifPresent(verifierConfig::setRunningMode);
+            settings.saveSnapshot.ifPresent(verifierConfig::setSaveSnapshot);
+            settings.functionSubstitutes.ifPresent(verifierConfig::setFunctionSubstitutes);
+        });
+        QueryRewriteConfig controlRewriteConfig = new QueryRewriteConfig().setTablePrefix(CONTROL_TABLE_PREFIX);
+        QueryRewriteConfig testRewriteConfig = new QueryRewriteConfig().setTablePrefix(TEST_TABLE_PREFIX);
+        verificationSettings.ifPresent(settings -> {
+            settings.reuseTable.ifPresent(controlRewriteConfig::setReuseTable);
+            settings.reuseTable.ifPresent(testRewriteConfig::setReuseTable);
         });
         TypeManager typeManager = createTypeManager();
         PrestoAction prestoAction = mockPrestoAction.orElseGet(() -> getPrestoAction(Optional.of(sourceQuery.getControlConfiguration())));
         QueryRewriterFactory queryRewriterFactory = new VerificationQueryRewriterFactory(
                 sqlParser,
                 typeManager,
-                new QueryRewriteConfig().setTablePrefix(CONTROL_TABLE_PREFIX),
-                new QueryRewriteConfig().setTablePrefix(TEST_TABLE_PREFIX));
+                blockEncodingSerde,
+                controlRewriteConfig,
+                testRewriteConfig,
+                verifierConfig);
 
         VerificationFactory verificationFactory = new VerificationFactory(
                 sqlParser,
@@ -179,7 +245,10 @@ public abstract class AbstractVerificationTest
                 verifierConfig,
                 typeManager,
                 determinismAnalyzerConfig);
-        return verificationFactory.get(sourceQuery, Optional.empty()).run().getEvent();
+        return verificationFactory.get(sourceQuery, Optional.empty(),
+                MockSnapshotSupplierAndConsumer.getMockSnapshotSupplierAndConsumer(),
+                MockSnapshotSupplierAndConsumer.getMockSnapshotSupplierAndConsumer().get()
+                ).run().getEvent();
     }
 
     public static class VerificationSettings
@@ -188,9 +257,41 @@ public abstract class AbstractVerificationTest
         {
             concurrentControlAndTest = Optional.empty();
             skipControl = Optional.empty();
+            runningMode = Optional.empty();
+            saveSnapshot = Optional.empty();
+            functionSubstitutes = Optional.empty();
+            reuseTable = Optional.empty();
         }
 
         Optional<Boolean> concurrentControlAndTest;
         Optional<Boolean> skipControl;
+        Optional<String> runningMode;
+        Optional<Boolean> saveSnapshot;
+        Optional<String> functionSubstitutes;
+        Optional<Boolean> reuseTable;
+    }
+
+    public static class MockSnapshotSupplierAndConsumer
+            implements SnapshotQuerySupplier, SnapshotQueryConsumer
+    {
+        private static MockSnapshotSupplierAndConsumer mockSnapshotSupplierAndConsumer = new MockSnapshotSupplierAndConsumer();
+        private Map<String, SnapshotQuery> snapshots = new HashMap<>();
+        @Override
+        public Map<String, SnapshotQuery> get()
+        {
+            return snapshots;
+        }
+
+        @Override
+        public void accept(SnapshotQuery snapshot)
+        {
+            String key = format(VERIFIER_SNAPSHOT_KEY_PATTERN, snapshot.getSuite(), snapshot.getName(), snapshot.isExplain());
+            snapshots.put(key, snapshot);
+        }
+
+        public static MockSnapshotSupplierAndConsumer getMockSnapshotSupplierAndConsumer()
+        {
+            return mockSnapshotSupplierAndConsumer;
+        }
     }
 }

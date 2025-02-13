@@ -19,12 +19,16 @@ import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.iterative.GroupReference;
 import com.facebook.presto.sql.planner.iterative.Rule;
+import com.google.common.collect.ImmutableMap;
 
-import java.util.stream.Collectors;
+import java.util.AbstractMap.SimpleEntry;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static com.facebook.presto.spi.plan.AggregationNode.Aggregation.removeDistinct;
 import static com.facebook.presto.sql.planner.plan.Patterns.aggregation;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 
 /**
  * Removes distinct from aggregates where the combination of aggregate columns and grouping variables contain a unique key.
@@ -37,17 +41,13 @@ public class RemoveRedundantAggregateDistinct
         implements Rule<AggregationNode>
 {
     private static final Pattern<AggregationNode> PATTERN = aggregation()
-            .matching(RemoveRedundantAggregateDistinct::aggregateDistinctOfUniqueKey);
+            .matching(RemoveRedundantAggregateDistinct::hasAggregations);
 
-    private static boolean aggregateDistinctOfUniqueKey(AggregationNode node)
+    private static boolean hasAggregations(AggregationNode node)
     {
-        return !node.getAggregations().isEmpty() &&
-                ((GroupReference) node.getSource()).getLogicalProperties().isPresent() &&
-                node.getAggregations().values().stream()
-                        .filter(AggregationNode.Aggregation::isDistinct)
-                        .anyMatch(a -> ((GroupReference) node.getSource()).getLogicalProperties().get().isDistinct(
-                                Stream.concat(node.getGroupingKeys().stream().map(VariableReferenceExpression.class::cast),
-                                        a.getArguments().stream().map(VariableReferenceExpression.class::cast)).collect(Collectors.toSet())));
+        return ((GroupReference) node.getSource()).getLogicalProperties().isPresent() &&
+                !node.getAggregations().isEmpty() &&
+                node.getGroupingSetCount() == 1;
     }
 
     @Override
@@ -59,22 +59,56 @@ public class RemoveRedundantAggregateDistinct
     @Override
     public Result apply(AggregationNode node, Captures captures, Context context)
     {
+        ImmutableMap.Builder<VariableReferenceExpression, AggregationNode.Aggregation> aggregationsBuilder = ImmutableMap.builder();
+
+        for (Map.Entry<VariableReferenceExpression, AggregationNode.Aggregation> agg : node.getAggregations().entrySet()) {
+            aggregationsBuilder.put(
+                    canRemoveDistinct(node, agg.getValue()) ?
+                            new SimpleEntry<>(agg.getKey(), removeDistinct(agg.getValue())) :
+                            agg);
+        }
+
+        Map<VariableReferenceExpression, AggregationNode.Aggregation> newAggregations = aggregationsBuilder.build();
+        if (newAggregations.equals(node.getAggregations())) {
+            return Result.empty();
+        }
+
         //create new AggregateNode same as original but with distinct turned off for
         //any aggregate function whose argument variables + grouping variables form a unique key
         return Result.ofPlanNode(new AggregationNode(
                 node.getSourceLocation(),
                 context.getIdAllocator().getNextId(),
                 node.getSource(),
-                node.getAggregations().entrySet().stream().collect(Collectors.toMap(e -> e.getKey(), e ->
-                        (e.getValue().isDistinct() &&
-                                ((GroupReference) node.getSource()).getLogicalProperties().get().isDistinct(
-                                        Stream.concat(node.getGroupingKeys().stream().map(VariableReferenceExpression.class::cast),
-                                                (e.getValue()).getArguments().stream().map(VariableReferenceExpression.class::cast)).collect(Collectors.toSet()))) ?
-                                removeDistinct(e.getValue()) : (e.getValue()))),
+                newAggregations,
                 node.getGroupingSets(),
                 node.getPreGroupedVariables(),
                 node.getStep(),
                 node.getHashVariable(),
-                node.getGroupIdVariable()));
+                node.getGroupIdVariable(),
+                node.getAggregationId()));
+    }
+
+    private boolean canRemoveDistinct(AggregationNode node, AggregationNode.Aggregation aggregation)
+    {
+        if (!aggregation.isDistinct()) {
+            // nothing to do
+            return false;
+        }
+
+        if (!node.getGroupingKeys().stream().allMatch(key -> key instanceof VariableReferenceExpression)
+                || !aggregation.getArguments().stream().allMatch(arg -> arg instanceof VariableReferenceExpression)) {
+            return false;
+        }
+
+        Set<VariableReferenceExpression> varAndGroupingKeySet = Stream.concat(
+                        node.getGroupingKeys()
+                                .stream()
+                                .map(VariableReferenceExpression.class::cast),
+                        aggregation.getArguments()
+                                .stream()
+                                .map(VariableReferenceExpression.class::cast))
+                .collect(toImmutableSet());
+
+        return ((GroupReference) node.getSource()).getLogicalProperties().get().isDistinct(varAndGroupingKeySet);
     }
 }

@@ -63,6 +63,7 @@ import com.facebook.presto.common.type.Type;
 import com.facebook.presto.hive.HdfsContext;
 import com.facebook.presto.hive.HdfsEnvironment;
 import com.facebook.presto.hive.HiveType;
+import com.facebook.presto.hive.PartitionNameWithVersion;
 import com.facebook.presto.hive.PartitionNotFoundException;
 import com.facebook.presto.hive.SchemaAlreadyExistsException;
 import com.facebook.presto.hive.TableAlreadyExistsException;
@@ -74,7 +75,6 @@ import com.facebook.presto.hive.metastore.MetastoreContext;
 import com.facebook.presto.hive.metastore.MetastoreOperationResult;
 import com.facebook.presto.hive.metastore.MetastoreUtil;
 import com.facebook.presto.hive.metastore.Partition;
-import com.facebook.presto.hive.metastore.PartitionNameWithVersion;
 import com.facebook.presto.hive.metastore.PartitionStatistics;
 import com.facebook.presto.hive.metastore.PartitionWithStatistics;
 import com.facebook.presto.hive.metastore.PrincipalPrivileges;
@@ -87,6 +87,7 @@ import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.SchemaNotFoundException;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.TableNotFoundException;
+import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.security.ConnectorIdentity;
 import com.facebook.presto.spi.security.PrestoPrincipal;
 import com.facebook.presto.spi.security.RoleGrant;
@@ -120,10 +121,10 @@ import java.util.function.Function;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_METASTORE_ERROR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_PARTITION_DROPPED_DURING_QUERY;
 import static com.facebook.presto.hive.metastore.MetastoreOperationResult.EMPTY_RESULT;
-import static com.facebook.presto.hive.metastore.MetastoreUtil.convertPredicateToParts;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.createDirectory;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.deleteDirectoryRecursively;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.getHiveBasicStatistics;
+import static com.facebook.presto.hive.metastore.MetastoreUtil.getPartitionNamesWithEmptyVersion;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.isManagedTable;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.makePartName;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.toPartitionValues;
@@ -151,7 +152,24 @@ public class GlueHiveMetastore
     private static final String PUBLIC_ROLE_NAME = "public";
     private static final String DEFAULT_METASTORE_USER = "presto";
     private static final String WILDCARD_EXPRESSION = "";
+
+    // This is the total number of partitions allowed to process in a big batch chunk which splits multiple smaller batch of partitions allowed by BATCH_CREATE_PARTITION_MAX_PAGE_SIZE
+    // Here's an example diagram on how async batches are handled for Create Partition:
+    // |--------BATCH_CREATE_PARTITION_MAX_PAGE_SIZE------------| ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    // | p0, p1, p2 .....................................   p99 |
+    // |--------------------------------------------------------|
+    // | p0, p1, p2 .....................................   p99 |
+    // |--------------------------------------------------------|
+    // BATCH_PARTITION_COMMIT_TOTAL_SIZE / BATCH_CREATE_PARTITION_MAX_PAGE_SIZE ..... (10k/100=100 batches)
+    // |--------------------------------------------------------|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    // | p0, p1, p2 .....................................   p99 |
+    // |--------------------------------------------------------|
+    // | p0, p1, p2 .....................................   p99 |
+    // |--------------------------------------------------------|.......... (100 batches)
+    // |--------------------------------------------------------|++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+    private static final int BATCH_PARTITION_COMMIT_TOTAL_SIZE = 10000;
     private static final int BATCH_GET_PARTITION_MAX_PAGE_SIZE = 1000;
+    // this is the total number of partitions allowed per batch that glue metastore can process to create partitions
     private static final int BATCH_CREATE_PARTITION_MAX_PAGE_SIZE = 100;
     private static final int AWS_GLUE_GET_PARTITIONS_MAX_RESULTS = 1000;
     private static final Comparator<Partition> PARTITION_COMPARATOR = comparing(Partition::getValues, lexicographical(String.CASE_INSENSITIVE_ORDER));
@@ -225,6 +243,14 @@ public class GlueHiveMetastore
     public GlueMetastoreStats getStats()
     {
         return stats;
+    }
+
+    // For Glue metastore there's an upper bound limit on 100 partitions per batch.
+    // Here's the reference: https://docs.aws.amazon.com/glue/latest/webapi/API_BatchCreatePartition.html
+    @Override
+    public int getPartitionCommitBatchSize()
+    {
+        return BATCH_PARTITION_COMMIT_TOTAL_SIZE;
     }
 
     @Override
@@ -319,7 +345,7 @@ public class GlueHiveMetastore
     public Map<String, PartitionStatistics> getPartitionStatistics(MetastoreContext metastoreContext, String databaseName, String tableName, Set<String> partitionNames)
     {
         ImmutableMap.Builder<String, PartitionStatistics> result = ImmutableMap.builder();
-        getPartitionsByNames(metastoreContext, databaseName, tableName, ImmutableList.copyOf(partitionNames)).forEach((partitionName, optionalPartition) -> {
+        getPartitionsByNames(metastoreContext, databaseName, tableName, ImmutableList.copyOf(getPartitionNamesWithEmptyVersion(partitionNames))).forEach((partitionName, optionalPartition) -> {
             Partition partition = optionalPartition.orElseThrow(() ->
                     new PartitionNotFoundException(new SchemaTableName(databaseName, tableName), toPartitionValues(partitionName)));
             PartitionStatistics partitionStatistics = new PartitionStatistics(getHiveBasicStatistics(partition.getParameters()), ImmutableMap.of());
@@ -497,8 +523,12 @@ public class GlueHiveMetastore
     }
 
     @Override
-    public MetastoreOperationResult createTable(MetastoreContext metastoreContext, Table table, PrincipalPrivileges principalPrivileges)
+    public MetastoreOperationResult createTable(MetastoreContext metastoreContext, Table table, PrincipalPrivileges principalPrivileges, List<TableConstraint<String>> constraints)
     {
+        if (constraints != null & !constraints.isEmpty()) {
+            throw new PrestoException(NOT_SUPPORTED, "Glue metastore does not support table constraints");
+        }
+
         try {
             TableInput input = GlueInputConverter.convertTable(table);
             stats.getCreateTable().record(() -> glueClient.createTable(new CreateTableRequest()
@@ -668,11 +698,11 @@ public class GlueHiveMetastore
     }
 
     @Override
-    public Optional<List<String>> getPartitionNames(MetastoreContext metastoreContext, String databaseName, String tableName)
+    public Optional<List<PartitionNameWithVersion>> getPartitionNames(MetastoreContext metastoreContext, String databaseName, String tableName)
     {
         Table table = getTableOrElseThrow(metastoreContext, databaseName, tableName);
         List<Partition> partitions = getPartitions(databaseName, tableName, WILDCARD_EXPRESSION);
-        return Optional.of(buildPartitionNames(table.getPartitionColumns(), partitions));
+        return Optional.of(getPartitionNamesWithEmptyVersion(buildPartitionNames(table.getPartitionColumns(), partitions)));
     }
 
     /**
@@ -687,17 +717,16 @@ public class GlueHiveMetastore
      * @return a list of partition names.
      */
     @Override
-    public List<String> getPartitionNamesByFilter(
+    public List<PartitionNameWithVersion> getPartitionNamesByFilter(
             MetastoreContext metastoreContext,
             String databaseName,
             String tableName,
             Map<Column, Domain> partitionPredicates)
     {
         Table table = getTableOrElseThrow(metastoreContext, databaseName, tableName);
-        List<String> parts = convertPredicateToParts(partitionPredicates);
-        String expression = buildGlueExpression(table.getPartitionColumns(), parts);
+        String expression = buildGlueExpression(partitionPredicates);
         List<Partition> partitions = getPartitions(databaseName, tableName, expression);
-        return buildPartitionNames(table.getPartitionColumns(), partitions);
+        return getPartitionNamesWithEmptyVersion(buildPartitionNames(table.getPartitionColumns(), partitions));
     }
 
     @Override
@@ -782,17 +811,18 @@ public class GlueHiveMetastore
      *     Partition names = ['a=1/b=2', 'a=2/b=2']
      * </pre>
      *
-     * @param partitionNames List of full partition names
+     * @param partitionNamesWithVersion List of full partition names
      * @return Mapping of partition name to partition object
      */
     @Override
-    public Map<String, Optional<Partition>> getPartitionsByNames(MetastoreContext metastoreContext, String databaseName, String tableName, List<String> partitionNames)
+    public Map<String, Optional<Partition>> getPartitionsByNames(MetastoreContext metastoreContext, String databaseName, String tableName, List<PartitionNameWithVersion> partitionNamesWithVersion)
     {
-        requireNonNull(partitionNames, "partitionNames is null");
-        if (partitionNames.isEmpty()) {
+        requireNonNull(partitionNamesWithVersion, "partitionNames is null");
+        if (partitionNamesWithVersion.isEmpty()) {
             return ImmutableMap.of();
         }
 
+        List<String> partitionNames = MetastoreUtil.getPartitionNames(partitionNamesWithVersion);
         List<Partition> partitions = batchGetPartition(databaseName, tableName, partitionNames);
 
         Map<String, List<String>> partitionNameToPartitionValuesMap = partitionNames.stream()
@@ -994,5 +1024,27 @@ public class GlueHiveMetastore
     public void setPartitionLeases(MetastoreContext metastoreContext, String databaseName, String tableName, Map<String, String> partitionNameToLocation, Duration leaseDuration)
     {
         throw new PrestoException(NOT_SUPPORTED, "setPartitionLeases is not supported by Glue");
+    }
+
+    public Optional<Long> lock(MetastoreContext metastoreContext, String databaseName, String tableName)
+    {
+        return Optional.empty();
+    }
+
+    public void unlock(MetastoreContext metastoreContext, long lockId)
+    {
+        //No-op
+    }
+
+    @Override
+    public MetastoreOperationResult dropConstraint(MetastoreContext metastoreContext, String databaseName, String tableName, String constraintName)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "dropConstraint is not supported by Glue");
+    }
+
+    @Override
+    public MetastoreOperationResult addConstraint(MetastoreContext metastoreContext, String databaseName, String tableName, TableConstraint<String> tableConstraint)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "addConstraint is not supported by Glue");
     }
 }

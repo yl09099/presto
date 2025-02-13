@@ -16,7 +16,9 @@ package com.facebook.presto.hive.metastore;
 import com.facebook.presto.common.NotSupportedException;
 import com.facebook.presto.common.predicate.Domain;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.hive.HiveTableHandle;
 import com.facebook.presto.hive.HiveType;
+import com.facebook.presto.hive.PartitionNameWithVersion;
 import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.security.PrestoPrincipal;
 import com.facebook.presto.spi.security.RoleGrant;
@@ -38,6 +40,15 @@ public interface ExtendedHiveMetastore
 
     Optional<Table> getTable(MetastoreContext metastoreContext, String databaseName, String tableName);
 
+    /*
+    If some extended hiveMetastore wants to get additional information available in the HiveTableHandle
+    they can override this method to get the additional information.
+     */
+    default Optional<Table> getTable(MetastoreContext metastoreContext, HiveTableHandle hiveTableHandle)
+    {
+        return getTable(metastoreContext, hiveTableHandle.getSchemaName(), hiveTableHandle.getTableName());
+    }
+
     Set<ColumnStatisticType> getSupportedColumnStatistics(MetastoreContext metastoreContext, Type type);
 
     PartitionStatistics getTableStatistics(MetastoreContext metastoreContext, String databaseName, String tableName);
@@ -58,9 +69,18 @@ public interface ExtendedHiveMetastore
 
     void renameDatabase(MetastoreContext metastoreContext, String databaseName, String newDatabaseName);
 
-    MetastoreOperationResult createTable(MetastoreContext metastoreContext, Table table, PrincipalPrivileges principalPrivileges);
+    MetastoreOperationResult createTable(MetastoreContext metastoreContext, Table table, PrincipalPrivileges principalPrivileges, List<TableConstraint<String>> constraints);
 
     void dropTable(MetastoreContext metastoreContext, String databaseName, String tableName, boolean deleteData);
+
+    /**
+     * Drop table from the metastore, but preserve the data. If no override
+     * is available, default to dropTable with deleteData set to false.
+     */
+    default void dropTableFromMetastore(MetastoreContext metastoreContext, String databaseName, String tableName)
+    {
+        dropTable(metastoreContext, databaseName, tableName, false);
+    }
 
     /**
      * This should only be used if the semantic here is drop and add. Trying to
@@ -79,9 +99,9 @@ public interface ExtendedHiveMetastore
 
     Optional<Partition> getPartition(MetastoreContext metastoreContext, String databaseName, String tableName, List<String> partitionValues);
 
-    Optional<List<String>> getPartitionNames(MetastoreContext metastoreContext, String databaseName, String tableName);
+    Optional<List<PartitionNameWithVersion>> getPartitionNames(MetastoreContext metastoreContext, String databaseName, String tableName);
 
-    List<String> getPartitionNamesByFilter(
+    List<PartitionNameWithVersion> getPartitionNamesByFilter(
             MetastoreContext metastoreContext,
             String databaseName,
             String tableName,
@@ -93,7 +113,7 @@ public interface ExtendedHiveMetastore
             String tableName,
             Map<Column, Domain> partitionPredicates);
 
-    Map<String, Optional<Partition>> getPartitionsByNames(MetastoreContext metastoreContext, String databaseName, String tableName, List<String> partitionNames);
+    Map<String, Optional<Partition>> getPartitionsByNames(MetastoreContext metastoreContext, String databaseName, String tableName, List<PartitionNameWithVersion> partitionNames);
 
     MetastoreOperationResult addPartitions(MetastoreContext metastoreContext, String databaseName, String tableName, List<PartitionWithStatistics> partitions);
 
@@ -121,7 +141,7 @@ public interface ExtendedHiveMetastore
 
     void setPartitionLeases(MetastoreContext metastoreContext, String databaseName, String tableName, Map<String, String> partitionNameToLocation, Duration leaseDuration);
 
-    default long lock(MetastoreContext metastoreContext, String databaseName, String tableName)
+    default Optional<Long> lock(MetastoreContext metastoreContext, String databaseName, String tableName)
     {
         throw new NotSupportedException("Lock is not supported by default");
     }
@@ -135,4 +155,15 @@ public interface ExtendedHiveMetastore
     {
         return ImmutableList.of();
     }
+
+    // Different metastore systems could implement this commit batch size differently based on different underlying database capacity.
+    // Default batch partition commit size is set to 10.
+    default int getPartitionCommitBatchSize()
+    {
+        return 10;
+    }
+
+    MetastoreOperationResult dropConstraint(MetastoreContext metastoreContext, String databaseName, String tableName, String constraintName);
+
+    MetastoreOperationResult addConstraint(MetastoreContext metastoreContext, String databaseName, String tableName, TableConstraint<String> tableConstraint);
 }

@@ -18,15 +18,22 @@ import com.facebook.presto.common.CatalogSchemaName;
 import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.spi.ColumnMetadata;
+import com.facebook.presto.spi.ConnectorId;
+import com.facebook.presto.spi.ConnectorTableHandle;
 import com.facebook.presto.spi.ConnectorTableMetadata;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.SchemaTableName;
+import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.connector.ConnectorMetadata;
+import com.facebook.presto.spi.connector.ConnectorTableVersion;
 import com.facebook.presto.spi.security.PrestoPrincipal;
 import com.facebook.presto.sql.analyzer.SemanticException;
 import com.facebook.presto.sql.tree.GrantorSpecification;
 import com.facebook.presto.sql.tree.Node;
 import com.facebook.presto.sql.tree.PrincipalSpecification;
 import com.facebook.presto.sql.tree.QualifiedName;
+import com.facebook.presto.sql.tree.Statement;
+import com.facebook.presto.transaction.TransactionManager;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
@@ -39,6 +46,7 @@ import static com.facebook.presto.spi.security.PrincipalType.ROLE;
 import static com.facebook.presto.spi.security.PrincipalType.USER;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.CATALOG_NOT_SPECIFIED;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.INVALID_SCHEMA_NAME;
+import static com.facebook.presto.sql.analyzer.SemanticErrorCode.MISSING_CATALOG;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.SCHEMA_NOT_SPECIFIED;
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.String.format;
@@ -48,6 +56,10 @@ import static java.util.Objects.requireNonNull;
 public final class MetadataUtil
 {
     private MetadataUtil() {}
+
+    public static final String likeTableCatalogError = "LIKE table catalog '%s' does not exist";
+    public static final String catalogError = "Catalog %s does not exist";
+    public static final String targetTableCatalogError = "Target catalog '%s' does not exist";
 
     public static void checkTableName(String catalogName, Optional<String> schemaName, Optional<String> tableName)
     {
@@ -76,6 +88,18 @@ public final class MetadataUtil
     public static SchemaTableName toSchemaTableName(QualifiedObjectName qualifiedObjectName)
     {
         return new SchemaTableName(qualifiedObjectName.getSchemaName(), qualifiedObjectName.getObjectName());
+    }
+
+    public static ConnectorId getConnectorIdOrThrow(Session session, Metadata metadata, String catalogName)
+    {
+        return metadata.getCatalogHandle(session, catalogName)
+                .orElseThrow(() -> new SemanticException(MISSING_CATALOG, "Catalog does not exist: " + catalogName));
+    }
+
+    public static ConnectorId getConnectorIdOrThrow(Session session, Metadata metadata, String catalogName, Statement statement, String errorMsg)
+    {
+        return metadata.getCatalogHandle(session, catalogName)
+                .orElseThrow(() -> new SemanticException(MISSING_CATALOG, statement, errorMsg, catalogName));
     }
 
     public static String checkLowerCase(String value, String name)
@@ -157,6 +181,36 @@ public final class MetadataUtil
         return QualifiedName.of(name.getCatalogName(), name.getSchemaName(), name.getObjectName());
     }
 
+    public static Optional<CatalogMetadata> getOptionalCatalogMetadata(Session session, TransactionManager transactionManager, String catalogName)
+    {
+        return transactionManager.getOptionalCatalogMetadata(session.getRequiredTransactionId(), catalogName);
+    }
+
+    public static Optional<TableHandle> getOptionalTableHandle(Session session, TransactionManager transactionManager, QualifiedObjectName table, Optional<ConnectorTableVersion> tableVersion)
+    {
+        requireNonNull(table, "table is null");
+
+        Optional<CatalogMetadata> catalog = getOptionalCatalogMetadata(session, transactionManager, table.getCatalogName());
+        if (catalog.isPresent()) {
+            CatalogMetadata catalogMetadata = catalog.get();
+            ConnectorId connectorId = catalogMetadata.getConnectorId(session, table);
+            ConnectorMetadata metadata = catalogMetadata.getMetadataFor(connectorId);
+
+            ConnectorTableHandle tableHandle;
+            tableHandle = tableVersion
+                    .map(expression -> metadata.getTableHandle(session.toConnectorSession(connectorId), toSchemaTableName(table), Optional.of(expression)))
+                    .orElseGet(() -> metadata.getTableHandle(session.toConnectorSession(connectorId), toSchemaTableName(table)));
+            if (tableHandle != null) {
+                return Optional.of(new TableHandle(
+                        connectorId,
+                        tableHandle,
+                        catalogMetadata.getTransactionHandleFor(connectorId),
+                        Optional.empty()));
+            }
+        }
+        return Optional.empty();
+    }
+
     public static PrestoPrincipal createPrincipal(Session session, GrantorSpecification specification)
     {
         GrantorSpecification.Type type = specification.getType();
@@ -193,7 +247,7 @@ public final class MetadataUtil
             return false;
         }
         QualifiedObjectName name = new QualifiedObjectName(session.getCatalog().get(), session.getSchema().get(), table);
-        return metadata.getTableHandle(session, name).isPresent();
+        return metadata.getMetadataResolver(session).getTableHandle(name).isPresent();
     }
 
     public static class SchemaMetadataBuilder

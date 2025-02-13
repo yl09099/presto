@@ -98,6 +98,7 @@ public class PrestoConnection
     private final QueryExecutor queryExecutor;
     private final WarningsManager warningsManager = new WarningsManager();
     private final List<QueryInterceptor> queryInterceptorInstances;
+    private final boolean validateNextUriSource;
 
     PrestoConnection(PrestoDriverUri uri, QueryExecutor queryExecutor)
             throws SQLException
@@ -116,6 +117,7 @@ public class PrestoConnection
         this.sessionProperties = new ConcurrentHashMap<>(uri.getSessionProperties());
         this.connectionProperties = uri.getProperties();
         this.queryExecutor = requireNonNull(queryExecutor, "queryExecutor is null");
+        this.validateNextUriSource = uri.validateNextUriSource();
         uri.getClientTags().ifPresent(tags -> clientInfo.put("ClientTags", tags));
 
         timeZoneId.set(uri.getTimeZoneId());
@@ -123,6 +125,29 @@ public class PrestoConnection
 
         this.queryInterceptorInstances = ImmutableList.copyOf(uri.getQueryInterceptors());
         initializeQueryInterceptors();
+    }
+
+    public static PrestoConnection newConnectionWithSessionProperties(PrestoConnection connectionWithSessionProperties, Properties connectionProperties)
+            throws SQLException
+    {
+        requireNonNull(connectionWithSessionProperties, "connectionWithSessionProperties is null");
+
+        URI connectionWithSessionPropertiesURI = connectionWithSessionProperties.getURI();
+        String prestoUrl = format("%s://%s:%s%s", connectionWithSessionPropertiesURI.getScheme(), connectionWithSessionPropertiesURI.getHost(), connectionWithSessionPropertiesURI.getPort(), connectionWithSessionPropertiesURI.getPath());
+        PrestoDriverUri uri = new PrestoDriverUri(prestoUrl, connectionProperties);
+        PrestoConnection prestoConnection = new PrestoConnection(uri, connectionWithSessionProperties.queryExecutor);
+        copySessionProperties(connectionWithSessionProperties, prestoConnection);
+
+        return prestoConnection;
+    }
+
+    public static void copySessionProperties(PrestoConnection src, PrestoConnection dst)
+    {
+        requireNonNull(src, "src is null");
+        requireNonNull(dst, "dst is null");
+
+        Map<String, String> map = src.getSessionProperties();
+        map.forEach(dst::setSessionProperty);
     }
 
     @Override
@@ -162,10 +187,11 @@ public class PrestoConnection
             throws SQLException
     {
         checkOpen();
-        boolean wasAutoCommit = this.autoCommit.getAndSet(autoCommit);
+        boolean wasAutoCommit = this.autoCommit.get();
         if (autoCommit && !wasAutoCommit) {
             commit();
         }
+        this.autoCommit.set(autoCommit);
     }
 
     @Override
@@ -184,6 +210,9 @@ public class PrestoConnection
         if (getAutoCommit()) {
             throw new SQLException("Connection is in auto-commit mode");
         }
+        if (transactionId.get() == null) {
+            return;
+        }
         try (PrestoStatement statement = new PrestoStatement(this)) {
             statement.internalExecute("COMMIT");
         }
@@ -196,6 +225,9 @@ public class PrestoConnection
         checkOpen();
         if (getAutoCommit()) {
             throw new SQLException("Connection is in auto-commit mode");
+        }
+        if (transactionId.get() == null) {
+            return;
         }
         try (PrestoStatement statement = new PrestoStatement(this)) {
             statement.internalExecute("ROLLBACK");
@@ -763,7 +795,8 @@ public class PrestoConnection
                 timeout,
                 compressionDisabled,
                 ImmutableMap.of(),
-                customHeaders);
+                customHeaders,
+                validateNextUriSource);
 
         return queryExecutor.startQuery(session, sql);
     }

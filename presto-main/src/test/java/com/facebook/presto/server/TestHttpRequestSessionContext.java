@@ -20,6 +20,7 @@ import com.facebook.presto.spi.function.Parameter;
 import com.facebook.presto.spi.function.RoutineCharacteristics;
 import com.facebook.presto.spi.function.SqlFunctionId;
 import com.facebook.presto.spi.function.SqlInvokedFunction;
+import com.facebook.presto.spi.security.AuthorizedIdentity;
 import com.facebook.presto.spi.security.Identity;
 import com.facebook.presto.spi.security.SelectedRole;
 import com.facebook.presto.sql.parser.IdentifierSymbol;
@@ -55,6 +56,7 @@ import static com.facebook.presto.client.PrestoHeaders.PRESTO_TIME_ZONE;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_USER;
 import static com.facebook.presto.common.type.StandardTypes.INTEGER;
 import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
+import static com.facebook.presto.server.security.ServletSecurityUtils.AUTHORIZED_IDENTITY_ATTRIBUTE;
 import static com.facebook.presto.spi.function.FunctionVersion.notVersioned;
 import static com.facebook.presto.spi.function.RoutineCharacteristics.Determinism.DETERMINISTIC;
 import static com.facebook.presto.spi.function.RoutineCharacteristics.NullCallClause.RETURNS_NULL_ON_NULL_INPUT;
@@ -105,7 +107,8 @@ public class TestHttpRequestSessionContext
                                 urlEncode(SERIALIZED_SQL_FUNCTION_ID_ADD_1_TO_INT_ARRAY),
                                 urlEncode(SERIALIZED_SQL_FUNCTION_ADD_1_to_INT_ARRAY)))
                         .build(),
-                "testRemote");
+                "testRemote",
+                ImmutableMap.of());
 
         HttpRequestSessionContext context = new HttpRequestSessionContext(request, new SqlParserOptions());
         assertEquals(context.getSource(), "testSource");
@@ -145,7 +148,8 @@ public class TestHttpRequestSessionContext
                         .put(PRESTO_CLIENT_INFO, "null")
                         .put(PRESTO_PREPARED_STATEMENT, "query1=abcdefg")
                         .build(),
-                "testRemote");
+                "testRemote",
+                ImmutableMap.of());
         new HttpRequestSessionContext(request, new SqlParserOptions());
     }
 
@@ -163,7 +167,8 @@ public class TestHttpRequestSessionContext
                         .put(PRESTO_CLIENT_INFO, "null")
                         .put(PRESTO_PREPARED_STATEMENT, "query1=select * from tbl:ns")
                         .build(),
-                "testRemote");
+                "testRemote",
+                ImmutableMap.of());
         SqlParserOptions options = new SqlParserOptions();
         options.allowIdentifierSymbol(EnumSet.allOf(IdentifierSymbol.class));
 
@@ -193,7 +198,8 @@ public class TestHttpRequestSessionContext
                         .put(PRESTO_EXTRA_CREDENTIAL, "test.json=" + urlEncode("{\"a\" : \"b\", \"c\" : \"d=\"}") + ", test.token.key3 = abc=cd")
                         .put(PRESTO_EXTRA_CREDENTIAL, "test.token.abc=xyz")
                         .build(),
-                "testRemote");
+                "testRemote",
+                ImmutableMap.of());
 
         HttpRequestSessionContext context = new HttpRequestSessionContext(request, new SqlParserOptions());
         assertEquals(
@@ -205,6 +211,24 @@ public class TestHttpRequestSessionContext
                         .put("test.json", "{\"a\" : \"b\", \"c\" : \"d=\"}")
                         .put("test.token.abc", "xyz")
                         .build());
+    }
+
+    @Test
+    public void testAuthorizedIdentity()
+    {
+        AuthorizedIdentity authorizedIdentity = new AuthorizedIdentity("username", "reasonForSelect", false);
+        HttpServletRequest request = new MockHttpServletRequest(
+                ImmutableListMultimap.<String, String>builder()
+                        .put(PRESTO_USER, "testUser")
+                        .put(PRESTO_SOURCE, "testSource")
+                        .put(PRESTO_CATALOG, "testCatalog")
+                        .put(PRESTO_SCHEMA, "testSchema")
+                        .build(),
+                "testRemote",
+                ImmutableMap.of(AUTHORIZED_IDENTITY_ATTRIBUTE, authorizedIdentity));
+
+        HttpRequestSessionContext context = new HttpRequestSessionContext(request, new SqlParserOptions());
+        assertEquals(context.getAuthorizedIdentity(), Optional.of(authorizedIdentity));
     }
 
     protected static String urlEncode(String value)

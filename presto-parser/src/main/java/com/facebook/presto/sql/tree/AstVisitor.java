@@ -127,6 +127,11 @@ public abstract class AstVisitor<R, C>
         return visitStatement(node, context);
     }
 
+    protected R visitSetProperties(SetProperties node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
     protected R visitShowSchemas(ShowSchemas node, C context)
     {
         return visitStatement(node, context);
@@ -348,6 +353,11 @@ public abstract class AstVisitor<R, C>
     }
 
     protected R visitArithmeticUnary(ArithmeticUnaryExpression node, C context)
+    {
+        return visitExpression(node, context);
+    }
+
+    protected R visitTableVersion(TableVersionExpression node, C context)
     {
         return visitExpression(node, context);
     }
@@ -587,12 +597,37 @@ public abstract class AstVisitor<R, C>
         return visitStatement(node, context);
     }
 
+    protected R visitDropConstraint(DropConstraint node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitAddConstraint(AddConstraint node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitConstraintSpecification(ConstraintSpecification node, C context)
+    {
+        return visitTableElement(node, context);
+    }
+
+    protected R visitAlterColumnNotNull(AlterColumnNotNull node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
     protected R visitAnalyze(Analyze node, C context)
     {
         return visitStatement(node, context);
     }
 
     protected R visitCreateView(CreateView node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitRenameView(RenameView node, C context)
     {
         return visitStatement(node, context);
     }
@@ -650,6 +685,16 @@ public abstract class AstVisitor<R, C>
     protected R visitDelete(Delete node, C context)
     {
         return visitStatement(node, context);
+    }
+
+    protected R visitUpdate(Update node, C context)
+    {
+        return visitStatement(node, context);
+    }
+
+    protected R visitUpdateAssignment(UpdateAssignment node, C context)
+    {
+        return visitNode(node, context);
     }
 
     protected R visitTruncateTable(TruncateTable node, C context)

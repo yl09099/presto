@@ -246,7 +246,8 @@ public class TestNodeScheduler
         Set<Split> splits = ImmutableSet.of(split);
 
         Map.Entry<InternalNode, Split> assignment = Iterables.getOnlyElement(nodeSelector.computeAssignments(splits, ImmutableList.copyOf(taskMap.values())).getAssignments().entries());
-        assertEquals(assignment.getKey().getHostAndPort(), split.getPreferredNodes(new ModularHashingNodeProvider(nodeSelector.getAllNodes())).get(0));
+        ModularHashingNodeProvider modularHashingNodeProvider = new ModularHashingNodeProvider(nodeSelector.getAllNodes());
+        assertEquals(assignment.getKey().getHostAndPort(), split.getPreferredNodes((key) -> modularHashingNodeProvider.get(key, 3)).get(0));
         assertEquals(assignment.getValue(), split);
     }
 
@@ -301,7 +302,7 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         int task = 0;
         for (InternalNode node : assignments.keySet()) {
-            TaskId taskId = new TaskId("test", 1, 0, task);
+            TaskId taskId = new TaskId("test", 1, 0, task, 0);
             task++;
             MockRemoteTaskFactory.MockRemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, ImmutableList.copyOf(assignments.get(node)), nodeTaskMap.createTaskStatsTracker(node, taskId));
             remoteTask.startSplits(25);
@@ -361,10 +362,11 @@ public class TestNodeScheduler
         }
         unassigned = Sets.difference(unassigned, new HashSet<>(assignments.values()));
         assertEquals(unassigned.size(), 3);
+        ModularHashingNodeProvider modularHashingNodeProvider = new ModularHashingNodeProvider(nodeSelector.getAllNodes());
         int rack1 = 0;
         int rack2 = 0;
         for (Split split : unassigned) {
-            String rack = topology.locate(split.getPreferredNodes(new ModularHashingNodeProvider(nodeSelector.getAllNodes())).get(0)).getSegments().get(0);
+            String rack = topology.locate(split.getPreferredNodes((key) -> modularHashingNodeProvider.get(key, 2)).get(0)).getSegments().get(0);
             switch (rack) {
                 case "rack1":
                     rack1++;
@@ -429,7 +431,7 @@ public class TestNodeScheduler
         nodeTtlFetcherManager.refreshTtlInfo();
 
         TestingQueryManager queryManager = new TestingQueryManager();
-        NodeScheduler nodeScheduler = new NodeScheduler(
+        NodeScheduler fallbackEnabledNodeScheduler = new NodeScheduler(
                 new LegacyNetworkTopology(),
                 nodeManager,
                 new NodeSelectionStats(),
@@ -437,19 +439,44 @@ public class TestNodeScheduler
                 nodeTaskMap,
                 nodeTtlFetcherManager,
                 queryManager,
-                new SimpleTtlNodeSelectorConfig());
+                new SimpleTtlNodeSelectorConfig().setFallbackToSimpleNodeSelection(true));
+
+        NodeScheduler fallbackDisabledNodeScheduler = new NodeScheduler(
+                new LegacyNetworkTopology(),
+                nodeManager,
+                new NodeSelectionStats(),
+                nodeSchedulerConfig,
+                nodeTaskMap,
+                nodeTtlFetcherManager,
+                queryManager,
+                new SimpleTtlNodeSelectorConfig().setFallbackToSimpleNodeSelection(false));
 
         // Query is estimated to take 20 mins and has been executing for 3 mins, i.e, 17 mins left
         // So only node2 and node3 have enough TTL to run additional work
         Session session = sessionWithTtlAwareSchedulingStrategyAndEstimatedExecutionTime(new Duration(20, TimeUnit.MINUTES));
-        NodeSelector nodeSelector = nodeScheduler.createNodeSelector(session, CONNECTOR_ID);
+        NodeSelector nodeSelector = fallbackEnabledNodeScheduler.createNodeSelector(session, CONNECTOR_ID);
         queryManager.setExecutionTime(new Duration(3, TimeUnit.MINUTES));
         assertEquals(ImmutableSet.copyOf(nodeSelector.selectRandomNodes(3)), ImmutableSet.of(node2, node3));
+
+        // Query is estimated to take 5 hours and has been executing for 1 hour, i.e, 4 hours left
+        // No nodes will have enough TTL, so we fall back to simple node selection as per the config above
+        session = sessionWithTtlAwareSchedulingStrategyAndEstimatedExecutionTime(new Duration(5, TimeUnit.HOURS));
+        nodeSelector = fallbackEnabledNodeScheduler.createNodeSelector(session, CONNECTOR_ID);
+        queryManager.setExecutionTime(new Duration(1, TimeUnit.HOURS));
+        assertEquals(ImmutableSet.copyOf(nodeSelector.selectRandomNodes(3)), ImmutableSet.of(node1, node2, node3));
+
+        // Query is estimated to take 20 mins and has been executing for 3 mins, i.e, 17 minutes left
+        // So only node2 and node3 have enough TTL to run additional work, however, they are also in the excluded nodes list
+        // So no nodes are selected
+        session = sessionWithTtlAwareSchedulingStrategyAndEstimatedExecutionTime(new Duration(5, TimeUnit.HOURS));
+        nodeSelector = fallbackDisabledNodeScheduler.createNodeSelector(session, CONNECTOR_ID);
+        queryManager.setExecutionTime(new Duration(1, TimeUnit.HOURS));
+        assertEquals(ImmutableSet.copyOf(nodeSelector.selectRandomNodes(3, ImmutableSet.of(node2, node3))), ImmutableSet.of());
 
         // Query is estimated to take 1 hour and has been executing for 45 mins, i.e, 15 mins left
         // So only node2 and node3 have enough TTL to work on new splits
         session = sessionWithTtlAwareSchedulingStrategyAndEstimatedExecutionTime(new Duration(1, TimeUnit.HOURS));
-        nodeSelector = nodeScheduler.createNodeSelector(session, CONNECTOR_ID);
+        nodeSelector = fallbackEnabledNodeScheduler.createNodeSelector(session, CONNECTOR_ID);
         queryManager.setExecutionTime(new Duration(45, TimeUnit.MINUTES));
         Set<Split> splits = new HashSet<>();
         for (int i = 0; i < 2; i++) {
@@ -460,16 +487,27 @@ public class TestNodeScheduler
         assertTrue(assignments.keySet().contains(node2));
         assertTrue(assignments.keySet().contains(node3));
 
+        // Query is estimated to take 5 hours and has been executing for 1 hour, i.e, 4 hours left
+        // No nodes will have enough TTL, so we fall back to simple node selection as per the config above
+        session = sessionWithTtlAwareSchedulingStrategyAndEstimatedExecutionTime(new Duration(5, TimeUnit.HOURS));
+        nodeSelector = fallbackEnabledNodeScheduler.createNodeSelector(session, CONNECTOR_ID);
+        queryManager.setExecutionTime(new Duration(1, TimeUnit.HOURS));
+        splits.clear();
+        for (int i = 0; i < 3; i++) {
+            splits.add(new Split(CONNECTOR_ID, TestingTransactionHandle.create(), new TestSplitRemote()));
+        }
+
+        assignments = nodeSelector.computeAssignments(splits, ImmutableList.copyOf(taskMap.values())).getAssignments();
+        assertEquals(assignments.size(), 3);
+        assertEquals(assignments.keySet().size(), 3);
+        assertTrue(assignments.keySet().contains(node1));
+        assertTrue(assignments.keySet().contains(node2));
+        assertTrue(assignments.keySet().contains(node3));
+
         // Query is estimated to take 1 hour and has been executing for 20 mins, i.e, 40 mins left
         // So only node3 has enough TTL to work on new splits
-        MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
-        TaskId taskId = new TaskId("test", 1, 0, 1);
-        RemoteTask newRemoteTask = remoteTaskFactory.createTableScanTask(taskId, node2, ImmutableList.of(), nodeTaskMap.createTaskStatsTracker(node2, taskId));
-        taskMap.put(node2, newRemoteTask);
-        nodeTaskMap.addTask(node2, newRemoteTask);
-
         session = sessionWithTtlAwareSchedulingStrategyAndEstimatedExecutionTime(new Duration(1, TimeUnit.HOURS));
-        nodeSelector = nodeScheduler.createNodeSelector(session, CONNECTOR_ID);
+        nodeSelector = fallbackEnabledNodeScheduler.createNodeSelector(session, CONNECTOR_ID);
         queryManager.setExecutionTime(new Duration(20, TimeUnit.MINUTES));
         splits.clear();
         for (int i = 0; i < 2; i++) {
@@ -766,11 +804,11 @@ public class TestNodeScheduler
 
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         // Max out number of splits on node
-        TaskId taskId1 = new TaskId("test", 1, 0, 1);
+        TaskId taskId1 = new TaskId("test", 1, 0, 1, 0);
         RemoteTask remoteTask1 = remoteTaskFactory.createTableScanTask(taskId1, newNode, initialSplits.build(), nodeTaskMap.createTaskStatsTracker(newNode, taskId1));
         nodeTaskMap.addTask(newNode, remoteTask1);
 
-        TaskId taskId2 = new TaskId("test", 1, 0, 2);
+        TaskId taskId2 = new TaskId("test", 1, 0, 2, 0);
         RemoteTask remoteTask2 = remoteTaskFactory.createTableScanTask(taskId2, newNode, initialSplits.build(), nodeTaskMap.createTaskStatsTracker(newNode, taskId2));
         nodeTaskMap.addTask(newNode, remoteTask2);
 
@@ -806,13 +844,13 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         for (InternalNode node : nodeManager.getActiveConnectorNodes(CONNECTOR_ID)) {
             // Max out number of splits on node
-            TaskId taskId = new TaskId("test", 1, 0, 1);
+            TaskId taskId = new TaskId("test", 1, 0, 1, 0);
             RemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, initialSplits.build(), nodeTaskMap.createTaskStatsTracker(node, taskId));
             nodeTaskMap.addTask(node, remoteTask);
             tasks.add(remoteTask);
         }
 
-        TaskId taskId = new TaskId("test", 1, 0, 2);
+        TaskId taskId = new TaskId("test", 1, 0, 2, 0);
         RemoteTask newRemoteTask = remoteTaskFactory.createTableScanTask(taskId, newNode, initialSplits.build(), nodeTaskMap.createTaskStatsTracker(newNode, taskId));
         // Max out pending splits on new node
         taskMap.put(newNode, newRemoteTask);
@@ -854,7 +892,7 @@ public class TestNodeScheduler
         int counter = 1;
         for (InternalNode node : nodeManager.getActiveConnectorNodes(CONNECTOR_ID)) {
             // Max out number of unacknowledged splits on each task
-            TaskId taskId = new TaskId("test", 1, 0, counter);
+            TaskId taskId = new TaskId("test", 1, 0, counter, 0);
             counter++;
             MockRemoteTaskFactory.MockRemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, initialSplits.build(), nodeTaskMap.createTaskStatsTracker(node, taskId));
             nodeTaskMap.addTask(node, remoteTask);
@@ -902,7 +940,7 @@ public class TestNodeScheduler
     {
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         InternalNode chosenNode = Iterables.get(nodeManager.getActiveConnectorNodes(CONNECTOR_ID), 0);
-        TaskId taskId = new TaskId("test", 1, 0, 1);
+        TaskId taskId = new TaskId("test", 1, 0, 1, 0);
         RemoteTask remoteTask = remoteTaskFactory.createTableScanTask(
                 taskId,
                 chosenNode,
@@ -924,7 +962,7 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         InternalNode chosenNode = Iterables.get(nodeManager.getActiveConnectorNodes(CONNECTOR_ID), 0);
 
-        TaskId taskId1 = new TaskId("test", 1, 0, 1);
+        TaskId taskId1 = new TaskId("test", 1, 0, 1, 0);
         RemoteTask remoteTask1 = remoteTaskFactory.createTableScanTask(taskId1,
                 chosenNode,
                 ImmutableList.of(
@@ -932,7 +970,7 @@ public class TestNodeScheduler
                         new Split(CONNECTOR_ID, TestingTransactionHandle.create(), new TestSplitRemote())),
                 nodeTaskMap.createTaskStatsTracker(chosenNode, taskId1));
 
-        TaskId taskId2 = new TaskId("test", 1, 0, 2);
+        TaskId taskId2 = new TaskId("test", 1, 0, 2, 0);
         RemoteTask remoteTask2 = remoteTaskFactory.createTableScanTask(
                 taskId2,
                 chosenNode,
@@ -964,7 +1002,7 @@ public class TestNodeScheduler
         InternalNode workerNode = nodeSelector.selectRandomNodes(1).get(0);
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
 
-        TaskId taskId = new TaskId("test", 1, 0, 1);
+        TaskId taskId = new TaskId("test", 1, 0, 1, 0);
         MockRemoteTaskFactory.MockRemoteTask task = remoteTaskFactory.createTableScanTask(taskId, workerNode, ImmutableList.of(), nodeTaskMap.createTaskStatsTracker(workerNode, taskId));
 
         TestingTransactionHandle transactionHandle = TestingTransactionHandle.create();
@@ -1014,7 +1052,7 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         InternalNode chosenNode = Iterables.get(nodeManager.getActiveConnectorNodes(CONNECTOR_ID), 0);
 
-        TaskId taskId1 = new TaskId("test", 1, 0, 1);
+        TaskId taskId1 = new TaskId("test", 1, 0, 1, 0);
         List<Split> splits = ImmutableList.of(
                 new Split(CONNECTOR_ID, TestingTransactionHandle.create(), new TestSplitRemote()),
                 new Split(CONNECTOR_ID, TestingTransactionHandle.create(), new TestSplitRemote()));
@@ -1023,7 +1061,7 @@ public class TestNodeScheduler
                 splits,
                 nodeTaskMap.createTaskStatsTracker(chosenNode, taskId1));
 
-        TaskId taskId2 = new TaskId("test", 1, 0, 2);
+        TaskId taskId2 = new TaskId("test", 1, 0, 2, 0);
         RemoteTask remoteTask2 = remoteTaskFactory.createTableScanTask(
                 taskId2,
                 chosenNode,
@@ -1054,7 +1092,7 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         InternalNode chosenNode = Iterables.get(nodeManager.getActiveConnectorNodes(CONNECTOR_ID), 0);
 
-        TaskId taskId1 = new TaskId("test", 1, 0, 1);
+        TaskId taskId1 = new TaskId("test", 1, 0, 1, 0);
         List<Split> splits = ImmutableList.of(
                 new Split(CONNECTOR_ID, TestingTransactionHandle.create(), new TestSplitRemote()),
                 new Split(CONNECTOR_ID, TestingTransactionHandle.create(), new TestSplitRemote()));
@@ -1063,7 +1101,7 @@ public class TestNodeScheduler
                 splits,
                 nodeTaskMap.createTaskStatsTracker(chosenNode, taskId1));
 
-        TaskId taskId2 = new TaskId("test", 1, 0, 2);
+        TaskId taskId2 = new TaskId("test", 1, 0, 2, 0);
         RemoteTask remoteTask2 = remoteTaskFactory.createTableScanTask(
                 taskId2,
                 chosenNode,
@@ -1169,7 +1207,7 @@ public class TestNodeScheduler
         MockRemoteTaskFactory remoteTaskFactory = new MockRemoteTaskFactory(remoteTaskExecutor, remoteTaskScheduledExecutor);
         int task = 0;
         for (InternalNode node : assignments.keySet()) {
-            TaskId taskId = new TaskId("test", 1, 1, task);
+            TaskId taskId = new TaskId("test", 1, 1, task, 0);
             task++;
             MockRemoteTaskFactory.MockRemoteTask remoteTask = remoteTaskFactory.createTableScanTask(taskId, node, ImmutableList.copyOf(assignments.get(node)), nodeTaskMap.createTaskStatsTracker(node, taskId));
             remoteTask.startSplits(25);
@@ -1317,7 +1355,7 @@ public class TestNodeScheduler
         @Override
         public List<HostAddress> getPreferredNodes(NodeProvider nodeProvider)
         {
-            return nodeProvider.get(format("split%d", scheduleIdentifierId), 1);
+            return nodeProvider.get(format("split%d", scheduleIdentifierId));
         }
 
         @Override
@@ -1357,7 +1395,7 @@ public class TestNodeScheduler
         @Override
         public List<HostAddress> getPreferredNodes(NodeProvider nodeProvider)
         {
-            return nodeProvider.get(String.valueOf(new Random().nextInt()), 1);
+            return nodeProvider.get(String.valueOf(new Random().nextInt()));
         }
     }
 

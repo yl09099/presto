@@ -35,7 +35,9 @@ import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorTableLayoutHandle;
 import com.facebook.presto.spi.plan.AggregationNode;
+import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.plan.SemiJoinNode;
 import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.ConstantExpression;
@@ -48,8 +50,6 @@ import com.facebook.presto.sql.planner.assertions.MatchResult;
 import com.facebook.presto.sql.planner.assertions.Matcher;
 import com.facebook.presto.sql.planner.assertions.PlanMatchPattern;
 import com.facebook.presto.sql.planner.assertions.SymbolAliases;
-import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.sql.planner.plan.SemiJoinNode;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.facebook.presto.sql.tree.FunctionCall;
 import com.facebook.presto.sql.tree.LongLiteral;
@@ -64,11 +64,13 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.apache.hadoop.fs.Path;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -81,6 +83,7 @@ import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_METADATA_QUER
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_METADATA_QUERIES_CALL_THRESHOLD;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_METADATA_QUERIES_IGNORE_STATS;
 import static com.facebook.presto.SystemSessionProperties.PUSHDOWN_DEREFERENCE_ENABLED;
+import static com.facebook.presto.SystemSessionProperties.PUSHDOWN_SUBFIELDS_ENABLED;
 import static com.facebook.presto.common.function.OperatorType.EQUAL;
 import static com.facebook.presto.common.predicate.Domain.create;
 import static com.facebook.presto.common.predicate.Domain.multipleValues;
@@ -95,20 +98,21 @@ import static com.facebook.presto.common.type.DoubleType.DOUBLE;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.common.type.VarcharType.createVarcharType;
 import static com.facebook.presto.expressions.LogicalRowExpressions.TRUE_CONSTANT;
-import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.SYNTHESIZED;
+import static com.facebook.presto.hive.BaseHiveColumnHandle.ColumnType.SYNTHESIZED;
 import static com.facebook.presto.hive.HiveColumnHandle.isPushedDownSubfield;
+import static com.facebook.presto.hive.HiveCommonSessionProperties.RANGE_FILTERS_ON_SUBSCRIPTS_ENABLED;
 import static com.facebook.presto.hive.HiveQueryRunner.HIVE_CATALOG;
 import static com.facebook.presto.hive.HiveSessionProperties.COLLECT_COLUMN_STATISTICS_ON_WRITE;
 import static com.facebook.presto.hive.HiveSessionProperties.PARQUET_DEREFERENCE_PUSHDOWN_ENABLED;
 import static com.facebook.presto.hive.HiveSessionProperties.PARTIAL_AGGREGATION_PUSHDOWN_ENABLED;
 import static com.facebook.presto.hive.HiveSessionProperties.PARTIAL_AGGREGATION_PUSHDOWN_FOR_VARIABLE_LENGTH_DATATYPES_ENABLED;
 import static com.facebook.presto.hive.HiveSessionProperties.PUSHDOWN_FILTER_ENABLED;
-import static com.facebook.presto.hive.HiveSessionProperties.RANGE_FILTERS_ON_SUBSCRIPTS_ENABLED;
 import static com.facebook.presto.hive.HiveSessionProperties.SHUFFLE_PARTITIONED_COLUMNS_FOR_TABLE_WRITE;
 import static com.facebook.presto.hive.TestHiveIntegrationSmokeTest.assertRemoteExchangesCount;
 import static com.facebook.presto.hive.metastore.MetastoreUtil.toPartitionValues;
 import static com.facebook.presto.hive.metastore.StorageFormat.fromHiveStorageFormat;
 import static com.facebook.presto.parquet.ParquetTypeUtils.pushdownColumnNameForSubfield;
+import static com.facebook.presto.spi.plan.JoinType.INNER;
 import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static com.facebook.presto.sql.planner.assertions.MatchResult.NO_MATCH;
 import static com.facebook.presto.sql.planner.assertions.MatchResult.match;
@@ -131,7 +135,6 @@ import static com.facebook.presto.sql.planner.optimizations.PlanNodeSearcher.sea
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.LOCAL;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE_STREAMING;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.GATHER;
-import static com.facebook.presto.sql.planner.plan.JoinNode.Type.INNER;
 import static com.facebook.presto.testing.assertions.Assert.assertEquals;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -145,6 +148,7 @@ import static io.airlift.tpch.TpchTable.ORDERS;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotSame;
 import static org.testng.Assert.assertTrue;
 
 @Test(singleThreaded = true)
@@ -157,8 +161,53 @@ public class TestHiveLogicalPlanner
     {
         return HiveQueryRunner.createQueryRunner(
                 ImmutableList.of(ORDERS, LINE_ITEM, CUSTOMER, NATION),
-                ImmutableMap.of("experimental.pushdown-subfields-enabled", "true"),
+                ImmutableMap.of("experimental.pushdown-subfields-enabled", "true",
+                        "pushdown-subfields-from-lambda-enabled", "true"),
                 Optional.empty());
+    }
+
+    @Test
+    public void testMetadataQueryOptimizationWithLimit()
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        Session sessionWithOptimizeMetadataQueries = getSessionWithOptimizeMetadataQueries();
+        Session defaultSession = queryRunner.getDefaultSession();
+        try {
+            queryRunner.execute("CREATE TABLE test_metadata_query_optimization_with_limit(a varchar, b int, c int) WITH (partitioned_by = ARRAY['b', 'c'])");
+            queryRunner.execute("INSERT INTO test_metadata_query_optimization_with_limit VALUES" +
+                    " ('1001', 1, 1), ('1002', 1, 1), ('1003', 1, 1)," +
+                    " ('1004', 1, 2), ('1005', 1, 2), ('1006', 1, 2)," +
+                    " ('1007', 2, 1), ('1008', 2, 1), ('1009', 2, 1)");
+
+            // Could do metadata optimization when `limit` existing above `aggregation`
+            assertQuery(sessionWithOptimizeMetadataQueries, "select distinct b, c from test_metadata_query_optimization_with_limit order by c desc limit 3",
+                    "values(1, 2), (1, 1), (2, 1)");
+            assertPlan(sessionWithOptimizeMetadataQueries, "select distinct b, c from test_metadata_query_optimization_with_limit order by c desc limit 3",
+                    anyTree(values(ImmutableList.of("b", "c"),
+                            ImmutableList.of(
+                                    ImmutableList.of(new LongLiteral("1"), new LongLiteral("2")),
+                                    ImmutableList.of(new LongLiteral("1"), new LongLiteral("1")),
+                                    ImmutableList.of(new LongLiteral("2"), new LongLiteral("1"))))));
+            // Compare with default session which do not enable metadata optimization
+            assertQuery(defaultSession, "select distinct b, c from test_metadata_query_optimization_with_limit order by c desc limit 3",
+                    "values(1, 2), (1, 1), (2, 1)");
+            assertPlan(defaultSession, "select distinct b, c from test_metadata_query_optimization_with_limit order by c desc limit 3",
+                    anyTree(strictTableScan("test_metadata_query_optimization_with_limit", identityMap("b", "c"))));
+
+            // Should not do metadata optimization when `limit` existing below `aggregation`
+            assertQuery(sessionWithOptimizeMetadataQueries, "with tt as (select b, c from test_metadata_query_optimization_with_limit order by c desc limit 3) select b, min(c), max(c) from tt group by b",
+                    "values(1, 2, 2)");
+            assertPlan(sessionWithOptimizeMetadataQueries, "with tt as (select b, c from test_metadata_query_optimization_with_limit order by c desc limit 3) select b, min(c), max(c) from tt group by b",
+                    anyTree(strictTableScan("test_metadata_query_optimization_with_limit", identityMap("b", "c"))));
+            // Compare with default session which do not enable metadata optimization
+            assertQuery(defaultSession, "with tt as (select b, c from test_metadata_query_optimization_with_limit order by c desc limit 3) select b, min(c), max(c) from tt group by b",
+                    "values(1, 2, 2)");
+            assertPlan(defaultSession, "with tt as (select b, c from test_metadata_query_optimization_with_limit order by c desc limit 3) select b, min(c), max(c) from tt group by b",
+                    anyTree(strictTableScan("test_metadata_query_optimization_with_limit", identityMap("b", "c"))));
+        }
+        finally {
+            queryRunner.execute("DROP TABLE test_metadata_query_optimization_with_limit");
+        }
     }
 
     @Test
@@ -224,7 +273,8 @@ public class TestHiveLogicalPlanner
 
         assertPlan(pushdownFilterEnabled, "SELECT partkey, linenumber FROM lineitem WHERE partkey = 10",
                 output(exchange(
-                        strictTableScan("lineitem", identityMap("partkey", "linenumber")))),
+                        project(
+                                strictTableScan("lineitem", identityMap("linenumber"))))),
                 plan -> assertTableLayout(plan, "lineitem", withColumnDomains(ImmutableMap.of(new Subfield("partkey", ImmutableList.of()), singleValue(BIGINT, 10L))), TRUE_CONSTANT, ImmutableSet.of("partkey")));
 
         // Only remaining predicate
@@ -254,7 +304,7 @@ public class TestHiveLogicalPlanner
                 output(values("linenumber")));
 
         FunctionAndTypeManager functionAndTypeManager = getQueryRunner().getMetadata().getFunctionAndTypeManager();
-        FunctionResolution functionResolution = new FunctionResolution(functionAndTypeManager);
+        FunctionResolution functionResolution = new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver());
         RowExpression remainingPredicate = new CallExpression(EQUAL.name(),
                 functionResolution.comparisonFunction(EQUAL, BIGINT, BIGINT),
                 BOOLEAN,
@@ -290,7 +340,9 @@ public class TestHiveLogicalPlanner
 
         assertPlan(pushdownFilterEnabled, "SELECT partkey, orderkey, linenumber FROM lineitem WHERE partkey = 10 AND mod(orderkey, 2) = 1",
                 output(exchange(
-                        strictTableScan("lineitem", identityMap("partkey", "orderkey", "linenumber")))),
+                        project(
+                                ImmutableMap.of("expr_8", expression("10")),
+                                strictTableScan("lineitem", identityMap("orderkey", "linenumber"))))),
                 plan -> assertTableLayout(plan, "lineitem", withColumnDomains(ImmutableMap.of(new Subfield("partkey", ImmutableList.of()), singleValue(BIGINT, 10L))), remainingPredicate, ImmutableSet.of("partkey", "orderkey")));
     }
 
@@ -545,7 +597,7 @@ public class TestHiveLogicalPlanner
                 "CREATE TABLE test_metadata_aggregation_folding_with_empty_partitions WITH (partitioned_by = ARRAY['ds']) AS " +
                         "SELECT orderkey, CAST(to_iso8601(date_add('DAY', orderkey % 2, date('2020-07-01'))) AS VARCHAR) AS ds FROM orders WHERE orderkey < 1000");
         ExtendedHiveMetastore metastore = replicateHiveMetastore((DistributedQueryRunner) queryRunner);
-        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER);
+        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Collections.emptySet(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER, getSession().getWarningCollector(), getSession().getRuntimeStats());
         Table table = metastore.getTable(metastoreContext, getSession().getSchema().get(), "test_metadata_aggregation_folding_with_empty_partitions").get();
 
         // Add one partition with no statistics.
@@ -689,7 +741,7 @@ public class TestHiveLogicalPlanner
                 "CREATE TABLE test_metadata_aggregation_folding_with_empty_partitions_with_threshold WITH (partitioned_by = ARRAY['ds']) AS " +
                         "SELECT orderkey, CAST(to_iso8601(date_add('DAY', orderkey % 2, date('2020-07-01'))) AS VARCHAR) AS ds FROM orders WHERE orderkey < 1000");
         ExtendedHiveMetastore metastore = replicateHiveMetastore((DistributedQueryRunner) queryRunner);
-        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER);
+        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Collections.emptySet(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER, getSession().getWarningCollector(), getSession().getRuntimeStats());
         Table table = metastore.getTable(metastoreContext, getSession().getSchema().get(), "test_metadata_aggregation_folding_with_empty_partitions_with_threshold").get();
 
         // Add one partition with no statistics.
@@ -763,7 +815,7 @@ public class TestHiveLogicalPlanner
                         "SELECT orderkey, CAST(to_iso8601(date_add('DAY', orderkey % 2, date('2020-07-01'))) AS VARCHAR) AS ds, IF(orderkey % 2 = 1, 'A', 'B') status " +
                         "FROM orders WHERE orderkey < 1000");
         ExtendedHiveMetastore metastore = replicateHiveMetastore((DistributedQueryRunner) queryRunner);
-        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER);
+        MetastoreContext metastoreContext = new MetastoreContext(getSession().getUser(), getSession().getQueryId().getId(), Optional.empty(), Collections.emptySet(), Optional.empty(), Optional.empty(), false, HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER, getSession().getWarningCollector(), getSession().getRuntimeStats());
         Table table = metastore.getTable(metastoreContext, getSession().getSchema().get(), "test_metadata_aggregation_folding_with_two_partitions_columns").get();
 
         // Add one partition with no statistics.
@@ -822,13 +874,25 @@ public class TestHiveLogicalPlanner
         }
     }
 
-    @Test
-    public void testMetadataAggregationFoldingWithFilters()
+    @DataProvider(name = "optimize_metadata_filter_properties")
+    public static Object[][] optimizeMetadataFilterProperties()
+    {
+        return new Object[][] {
+                {true, true},
+                {true, false},
+                {false, true},
+                {false, false}
+        };
+    }
+
+    @Test(dataProvider = "optimize_metadata_filter_properties")
+    public void testMetadataAggregationFoldingWithFilters(boolean pushdownSubfieldsEnabled, boolean pushdownFilterEnabled)
     {
         QueryRunner queryRunner = getQueryRunner();
         Session optimizeMetadataQueries = Session.builder(this.getQueryRunner().getDefaultSession())
                 .setSystemProperty(OPTIMIZE_METADATA_QUERIES, Boolean.toString(true))
-                .setCatalogSessionProperty(HIVE_CATALOG, PUSHDOWN_FILTER_ENABLED, Boolean.toString(true))
+                .setSystemProperty(PUSHDOWN_SUBFIELDS_ENABLED, Boolean.toString(pushdownSubfieldsEnabled))
+                .setCatalogSessionProperty(HIVE_CATALOG, PUSHDOWN_FILTER_ENABLED, Boolean.toString(pushdownFilterEnabled))
                 .build();
         Session shufflePartitionColumns = Session.builder(this.getQueryRunner().getDefaultSession())
                 .setCatalogSessionProperty(HIVE_CATALOG, SHUFFLE_PARTITIONED_COLUMNS_FOR_TABLE_WRITE, Boolean.toString(true))
@@ -837,13 +901,22 @@ public class TestHiveLogicalPlanner
         queryRunner.execute(
                 shufflePartitionColumns,
                 "CREATE TABLE test_metadata_aggregation_folding_with_filters WITH (partitioned_by = ARRAY['ds']) AS " +
-                        "SELECT orderkey, ARRAY[orderstatus] AS orderstatus, CAST(to_iso8601(date_add('DAY', orderkey % 2, date('2020-07-01'))) AS VARCHAR) AS ds FROM orders WHERE orderkey < 1000");
+                        "SELECT orderkey, ARRAY[orderstatus] AS orderstatus, CAST (ROW (orderkey) as ROW(subfield BIGINT)) AS struct, CAST(to_iso8601(date_add('DAY', orderkey % 2, date('2020-07-01'))) AS VARCHAR) AS ds FROM orders WHERE orderkey < 1000");
 
         try {
             // There is a filter on non-partition column which can be pushed down to the connector. Disable the rewrite.
             assertPlan(
                     optimizeMetadataQueries,
                     "SELECT max(ds) from test_metadata_aggregation_folding_with_filters WHERE contains(orderstatus, 'F')",
+                    anyTree(
+                            tableScanWithConstraint(
+                                    "test_metadata_aggregation_folding_with_filters",
+                                    ImmutableMap.of("ds", multipleValues(VARCHAR, utf8Slices("2020-07-01", "2020-07-02"))))));
+
+            // There is a filter on a subfield of non-partition column which can be pushed down to the connector. Disable the rewrite.
+            assertPlan(
+                    optimizeMetadataQueries,
+                    "SELECT max(ds) from test_metadata_aggregation_folding_with_filters WHERE struct.subfield is null",
                     anyTree(
                             tableScanWithConstraint(
                                     "test_metadata_aggregation_folding_with_filters",
@@ -1187,6 +1260,92 @@ public class TestHiveLogicalPlanner
     }
 
     @Test
+    public void testPushDownSubfieldsFromLambdas()
+    {
+        final String tableName = "test_pushdown_subfields_from_array_lambda";
+        try {
+            assertUpdate("CREATE TABLE " + tableName + "(id bigint, " +
+                    "a array(bigint), " +
+                    "b array(array(varchar)), " +
+                    "mi map(int,array(row(a1 bigint, a2 double))), " +
+                    "mv map(varchar,array(row(a1 bigint, a2 double))), " +
+                    "m1 map(int,row(a1 bigint, a2 double)), " +
+                    "m2 map(int,row(a1 bigint, a2 double)), " +
+                    "m3 map(int,row(a1 bigint, a2 double)), " +
+                    "r row(a array(row(a1 bigint, a2 double)), i bigint, d row(d1 bigint, d2 double)), " +
+                    "y array(row(a bigint, b varchar, c double, d row(d1 bigint, d2 double))), " +
+                    "yy array(row(a bigint, b varchar, c double, d row(d1 bigint, d2 double))), " +
+                    "yyy array(row(a bigint, b varchar, c double, d row(d1 bigint, d2 double))), " +
+                    "am array(map(int,row(a1 bigint, a2 double))), " +
+                    "aa array(array(row(a1 bigint, a2 double))), " +
+                    "z array(array(row(p bigint, e row(e1 bigint, e2 varchar)))))");
+            // transform
+            assertPushdownSubfields("SELECT TRANSFORM(y, x -> x.d.d1) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields("y[*].d.d1")));
+
+            // map_zip_with
+            assertPushdownSubfields("SELECT MAP_ZIP_WITH(m1, m2, (k, v1, v2) -> v1.a1 + v2.a2) FROM " + tableName, tableName,
+                    ImmutableMap.of("m1", toSubfields("m1[*].a1"), "m2", toSubfields("m2[*].a2")));
+
+            // transform_values
+            assertPushdownSubfields("SELECT TRANSFORM_VALUES(m1, (k, v) -> v.a1 * 1000) FROM " + tableName, tableName,
+                    ImmutableMap.of("m1", toSubfields("m1[*].a1")));
+
+            // transform
+            assertPushdownSubfields("SELECT TRANSFORM(y, x -> ROW(x.a, x.d.d1)) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields("y[*].a", "y[*].d.d1")));
+
+            assertPushdownSubfields("SELECT TRANSFORM(r.a, x -> x.a1) FROM " + tableName, tableName,
+                    ImmutableMap.of("r", toSubfields("r.a[*].a1")));
+
+            // zip_with
+            assertPushdownSubfields("SELECT ZIP_WITH(y, yy, (x, xx) -> ROW(x.a, xx.d.d1)) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields("y[*].a"), "yy", toSubfields("yy[*].d.d1")));
+
+            // functions that outputing all subfields and accept functional parameter
+
+            //filter
+            assertPushdownSubfields("SELECT FILTER(y, x -> x.a > 0) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields()));
+
+            // flatten
+            assertPushdownSubfields("SELECT TRANSFORM(FLATTEN(z), x -> x.p) FROM " + tableName, tableName,
+                    ImmutableMap.of("z", toSubfields("z[*][*].p")));
+
+            // concat
+            assertPushdownSubfields("SELECT TRANSFORM(y || yy,  x -> x.d.d1) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields("y[*].d.d1"), "yy", toSubfields("yy[*].d.d1")));
+
+            assertPushdownSubfields("SELECT TRANSFORM(CONCAT(y, yy)  ,  x -> x.d.d1) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields("y[*].d.d1"), "yy", toSubfields("yy[*].d.d1")));
+
+            assertPushdownSubfields("SELECT TRANSFORM(CONCAT(y, yy, yyy)  ,  x -> x.d.d1) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields("y[*].d.d1"), "yy", toSubfields("yy[*].d.d1"), "yyy", toSubfields("yyy[*].d.d1")));
+
+            assertPushdownSubfields("SELECT TRANSFORM(y, x -> COALESCE(x, row(1, '', 1.0, row(1, 1.0)))) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields())); // 'coalesce' effectively includes the entire subfield to returned values
+
+            // row_construction
+            assertPushdownSubfields("SELECT TRANSFORM(y, x -> ROW(x)) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields())); // entire struct of the element of 'y' was included to the output
+
+            assertPushdownSubfields("SELECT ZIP_WITH(y, yy, (x, xx) -> ROW(x,xx)) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields(), "yy", toSubfields())); // entire struct of the elements of 'y' and 'yy' was included to the output
+
+            // switch
+            assertPushdownSubfields("SELECT TRANSFORM(y, x -> CASE x WHEN row(1, '', 1.0, row(1, 1.0)) THEN true ELSE false END) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields())); // entire struct of the element of 'y' was accessed
+
+            // if
+            assertPushdownSubfields("SELECT TRANSFORM(y, x -> IF(x = row(1, '', 1.0, row(1, 1.0)), 1, 0)) FROM " + tableName, tableName,
+                    ImmutableMap.of("y", toSubfields())); // entire struct of the element of 'y' was accessed
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
     public void testPushdownSubfields()
     {
         assertUpdate("CREATE TABLE test_pushdown_struct_subfields(id bigint, x row(a bigint, b varchar, c double, d row(d1 bigint, d2 double)), y array(row(a bigint, b varchar, c double, d row(d1 bigint, d2 double))))");
@@ -1207,7 +1366,6 @@ public class TestHiveLogicalPlanner
                 ImmutableMap.of("x", toSubfields("x.a", "x.b")));
 
         // Join
-        Session session = getQueryRunner().getDefaultSession();
         assertPlan("SELECT l.orderkey, x.a, mod(x.d.d1, 2) FROM lineitem l, test_pushdown_struct_subfields a WHERE l.linenumber = a.id",
                 anyTree(
                         node(JoinNode.class,
@@ -1741,7 +1899,7 @@ public class TestHiveLogicalPlanner
 
             Map<Optional<String>, ExpectedValueProvider<FunctionCall>> aggregations = ImmutableMap.of(Optional.of("count"),
                     PlanMatchPattern.functionCall("count", false, ImmutableList.of(anySymbol())));
-            List<String> groupByKey = ImmutableList.of("count_star");
+
             assertPlan(partialAggregatePushdownEnabled(),
                     "select count(*) from orders_partitioned_parquet",
                     anyTree(aggregation(globalAggregation(), aggregations, ImmutableMap.of(), Optional.empty(), AggregationNode.Step.FINAL,
@@ -1757,33 +1915,16 @@ public class TestHiveLogicalPlanner
                     Optional.of("min"),
                     PlanMatchPattern.functionCall("max", false, ImmutableList.of(anySymbol())));
 
+            // Negative tests
             assertPlan(partialAggregatePushdownEnabled(),
                     "select count(orderkey), max(orderpriority), min(ds) from orders_partitioned_parquet",
-                    anyTree(new PlanMatchPattern[] {aggregation(globalAggregation(), aggregations, ImmutableMap.of(), Optional.empty(), AggregationNode.Step.FINAL,
-                            exchange(LOCAL, GATHER,
-                                    new PlanMatchPattern[] {exchange(REMOTE_STREAMING, GATHER,
-                                            new PlanMatchPattern[] {tableScan(
-                                                    "orders_partitioned_parquet",
-                                                    ImmutableMap.of("orderkey",
-                                                            ImmutableSet.of(),
-                                                            "orderpriority",
-                                                            ImmutableSet.of(),
-                                                            "ds",
-                                                            ImmutableSet.of()))})}))}));
-
-            // Negative tests
+                    anyTree(PlanMatchPattern.tableScan("orders_partitioned_parquet")),
+                    plan -> assertNoAggregatedColumns(plan, "orders_partitioned_parquet"));
             assertPlan(partialAggregatePushdownEnabled(),
                     "select count(orderkey), max(orderpriority), min(ds) from orders_partitioned_parquet where orderkey = 100",
                     anyTree(PlanMatchPattern.tableScan("orders_partitioned_parquet")),
                     plan -> assertNoAggregatedColumns(plan, "orders_partitioned_parquet"));
 
-            aggregations = ImmutableMap.of(
-                    Optional.of("count_1"),
-                    PlanMatchPattern.functionCall("count", false, ImmutableList.of(anySymbol())),
-                    Optional.of("arbitrary"),
-                    PlanMatchPattern.functionCall("arbitrary", false, ImmutableList.of(anySymbol())),
-                    Optional.of("min"),
-                    PlanMatchPattern.functionCall("max", false, ImmutableList.of(anySymbol())));
             assertPlan(partialAggregatePushdownEnabled(),
                     "select count(orderkey), arbitrary(orderpriority), min(ds) from orders_partitioned_parquet",
                     anyTree(PlanMatchPattern.tableScan("orders_partitioned_parquet")),
@@ -1791,6 +1932,10 @@ public class TestHiveLogicalPlanner
 
             assertPlan(partialAggregatePushdownEnabled(),
                     "select count(orderkey), max(orderpriority), min(ds) from orders_partitioned_parquet where ds = '2019-11-01' and orderkey = 100",
+                    anyTree(PlanMatchPattern.tableScan("orders_partitioned_parquet")),
+                    plan -> assertNoAggregatedColumns(plan, "orders_partitioned_parquet"));
+            assertPlan(partialAggregatePushdownEnabled(),
+                    "SELECT min(ds) from orders_partitioned_parquet",
                     anyTree(PlanMatchPattern.tableScan("orders_partitioned_parquet")),
                     plan -> assertNoAggregatedColumns(plan, "orders_partitioned_parquet"));
 
@@ -1880,6 +2025,13 @@ public class TestHiveLogicalPlanner
     private void assertParquetDereferencePushDown(Session session, String query, String tableName, Map<String, Subfield> expectedDeferencePushDowns)
     {
         assertPlan(session, query, anyTree(tableScanParquetDeferencePushDowns(tableName, expectedDeferencePushDowns)));
+    }
+
+    protected Session getSessionWithOptimizeMetadataQueries()
+    {
+        return Session.builder(getQueryRunner().getDefaultSession())
+                .setSystemProperty(OPTIMIZE_METADATA_QUERIES, "true")
+                .build();
     }
 
     private Session pushdownFilterEnabled()
@@ -1975,7 +2127,7 @@ public class TestHiveLogicalPlanner
         for (ColumnHandle columnHandle : tableScan.getAssignments().values()) {
             assertTrue(columnHandle instanceof HiveColumnHandle);
             HiveColumnHandle hiveColumnHandle = (HiveColumnHandle) columnHandle;
-            assertFalse(hiveColumnHandle.getColumnType() == HiveColumnHandle.ColumnType.AGGREGATED);
+            assertNotSame(hiveColumnHandle.getColumnType(), HiveColumnHandle.ColumnType.AGGREGATED);
             assertFalse(hiveColumnHandle.getPartialAggregation().isPresent());
         }
     }
@@ -2009,12 +2161,12 @@ public class TestHiveLogicalPlanner
 
     static ExtendedHiveMetastore replicateHiveMetastore(DistributedQueryRunner queryRunner)
     {
-        URI baseDir = queryRunner.getCoordinator().getBaseDataDir().resolve("hive_data").toUri();
+        URI dataDirectory = queryRunner.getCoordinator().getDataDirectory().resolve("hive_data").toUri();
         HiveClientConfig hiveClientConfig = new HiveClientConfig();
         MetastoreClientConfig metastoreClientConfig = new MetastoreClientConfig();
-        HdfsConfiguration hdfsConfiguration = new HiveHdfsConfiguration(new HdfsConfigurationInitializer(hiveClientConfig, metastoreClientConfig), ImmutableSet.of());
+        HdfsConfiguration hdfsConfiguration = new HiveHdfsConfiguration(new HdfsConfigurationInitializer(hiveClientConfig, metastoreClientConfig), ImmutableSet.of(), hiveClientConfig);
         HdfsEnvironment hdfsEnvironment = new HdfsEnvironment(hdfsConfiguration, metastoreClientConfig, new NoHdfsAuthentication());
-        return new FileHiveMetastore(hdfsEnvironment, baseDir.toString(), "test");
+        return new FileHiveMetastore(hdfsEnvironment, dataDirectory.toString(), "test");
     }
 
     private static PlanMatchPattern tableScan(String tableName, TupleDomain<String> domainPredicate, RowExpression remainingPredicate, Set<String> predicateColumnNames)

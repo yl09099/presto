@@ -23,7 +23,10 @@ import com.facebook.presto.spi.constraints.PrimaryKeyConstraint;
 import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.constraints.UniqueConstraint;
 import com.facebook.presto.spi.plan.Assignments;
+import com.facebook.presto.spi.plan.EquiJoinClause;
 import com.facebook.presto.spi.plan.FilterNode;
+import com.facebook.presto.spi.plan.JoinNode;
+import com.facebook.presto.spi.plan.JoinType;
 import com.facebook.presto.spi.plan.LimitNode;
 import com.facebook.presto.spi.plan.LogicalProperties;
 import com.facebook.presto.spi.plan.PlanNode;
@@ -41,7 +44,6 @@ import com.facebook.presto.sql.planner.iterative.properties.LogicalPropertiesPro
 import com.facebook.presto.sql.planner.iterative.properties.MaxCardProperty;
 import com.facebook.presto.sql.planner.iterative.rule.test.BaseRuleTest;
 import com.facebook.presto.sql.planner.iterative.rule.test.RuleTester;
-import com.facebook.presto.sql.planner.plan.JoinNode;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.facebook.presto.testing.TestingTransactionHandle;
 import com.facebook.presto.tpch.TpchColumnHandle;
@@ -56,11 +58,10 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.DoubleType.DOUBLE;
@@ -114,7 +115,7 @@ public class TestLogicalPropertyPropagation
     {
         tester = new RuleTester(emptyList(), ImmutableMap.of(), Optional.of(1), new TestTableConstraintsConnectorFactory(1));
         ConnectorId connectorId = tester().getCurrentConnectorId();
-        functionResolution = new FunctionResolution(tester.getMetadata().getFunctionAndTypeManager());
+        functionResolution = new FunctionResolution(tester.getMetadata().getFunctionAndTypeManager().getFunctionAndTypeResolver());
         logicalPropertiesProvider = new LogicalPropertiesProviderImpl(functionResolution);
 
         TpchTableHandle customerTpchTableHandle = new TpchTableHandle("customer", 1.0);
@@ -171,7 +172,7 @@ public class TestLogicalPropertyPropagation
     @Test
     void testValuesNodeLogicalProperties()
     {
-        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty(ImmutableSet.of()));
 
@@ -186,7 +187,7 @@ public class TestLogicalPropertyPropagation
 
         //Values has more than one row.
         VariableReferenceExpression a = new VariableReferenceExpression(Optional.empty(), "a", BIGINT);
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(3L),
                 new KeyProperty(ImmutableSet.of()));
 
@@ -203,7 +204,7 @@ public class TestLogicalPropertyPropagation
     public void testTableScanNodeLogicalProperties()
     {
         // "custkey" should be a key in the result of TableScan(customer)
-        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)))));
         tester().assertThat(new NoOpRule(), logicalPropertiesProvider)
@@ -217,13 +218,13 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         // add an additional unique constraint on customer (comment, nationkey)column
-        Set<ColumnHandle> commentcolumnSet = new HashSet<>();
+        LinkedHashSet<ColumnHandle> commentcolumnSet = new LinkedHashSet<>();
         commentcolumnSet.add(customerCommentColumn);
-        UniqueConstraint<ColumnHandle> commentConstraint = new UniqueConstraint<>(commentcolumnSet, true, true);
+        UniqueConstraint<ColumnHandle> commentConstraint = new UniqueConstraint<>(commentcolumnSet, true, true, false);
         List<TableConstraint<ColumnHandle>> customerConstraints = new ArrayList<>(tester().getTableConstraints(customerTableHandle));
         customerConstraints.add(commentConstraint);
 
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)), new Key(ImmutableSet.of(customerCommentVariable)))));
         List<TableConstraint<ColumnHandle>> finalCustomerConstraints = customerConstraints;
@@ -238,7 +239,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //TEST: the previous test but there is no assigment for the comment column
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)))));
         tester().assertThat(new NoOpRule(), logicalPropertiesProvider)
@@ -252,14 +253,14 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //TEST: add a superfulous unique constraint on the (custkey, comment) combination
-        Set<ColumnHandle> custkeyCommentColumnSet = new HashSet<>();
+        LinkedHashSet<ColumnHandle> custkeyCommentColumnSet = new LinkedHashSet<>();
         custkeyCommentColumnSet.add(customerCustKeyColumn);
         custkeyCommentColumnSet.add(customerCommentColumn);
-        UniqueConstraint<ColumnHandle> custkeyCommentConstraint = new UniqueConstraint<>(custkeyCommentColumnSet, true, true);
+        UniqueConstraint<ColumnHandle> custkeyCommentConstraint = new UniqueConstraint<>(custkeyCommentColumnSet, true, true, false);
         customerConstraints = new ArrayList<>(tester().getTableConstraints(customerTableHandle));
         customerConstraints.add(custkeyCommentConstraint);
 
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)))));
         List<TableConstraint<ColumnHandle>> finalCustomerConstraints1 = customerConstraints;
@@ -275,7 +276,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //Define a table with key (A,B) but only give a table scan mapping for A (B). The key property of the table scan should be empty.
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of()));
         tester().assertThat(new NoOpRule(), logicalPropertiesProvider)
@@ -289,7 +290,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         // INVARIANT: define a table with primary key (A) and unique key (A,B) and ensure that the table scan key property only has key (A) (both A and B should have mappings)
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)))));
 
@@ -305,10 +306,10 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         // INVARIANT: define a table with primary key (A,B) and unique key (A) and ensure that the table scan key property only has key (A) (both A and B should have mappings)
-        PrimaryKeyConstraint<ColumnHandle> custkeyCommentPK = new PrimaryKeyConstraint<>("primarykey", custkeyCommentColumnSet, true, true);
-        UniqueConstraint<ColumnHandle> custkeyUniqueConstraint = new UniqueConstraint<>(ImmutableSet.of(customerCustKeyColumn), true, true);
+        PrimaryKeyConstraint<ColumnHandle> custkeyCommentPK = new PrimaryKeyConstraint<>(Optional.of("primarykey"), custkeyCommentColumnSet, true, true, false);
+        UniqueConstraint<ColumnHandle> custkeyUniqueConstraint = new UniqueConstraint<>(new LinkedHashSet<>(ImmutableList.of(customerCustKeyColumn)), true, true, false);
 
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)))));
 
@@ -328,8 +329,8 @@ public class TestLogicalPropertyPropagation
     void testFilterNodeLogicalProperties()
     {
         ConstantExpression constExpr = new ConstantExpression(100L, BIGINT);
-        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(customerCustKeyVariable, constExpr);
+        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(customerCustKeyVariable, constExpr);
 
         LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -358,16 +359,16 @@ public class TestLogicalPropertyPropagation
         ColumnHandle colB = new TpchColumnHandle("B", BIGINT);
         ColumnHandle colC = new TpchColumnHandle("C", BIGINT);
 
-        PrimaryKeyConstraint<ColumnHandle> primaryKeyConstraint = new PrimaryKeyConstraint<>("primarykey", ImmutableSet.of(colA), true, true);
-        UniqueConstraint<ColumnHandle> uniqueConstraint = new UniqueConstraint<>(ImmutableSet.of(colB, colC), true, true);
+        PrimaryKeyConstraint<ColumnHandle> primaryKeyConstraint = new PrimaryKeyConstraint<>(Optional.of("primarykey"), new LinkedHashSet<>(ImmutableList.of(colA)), true, true, false);
+        UniqueConstraint<ColumnHandle> uniqueConstraint = new UniqueConstraint<>(new LinkedHashSet<>(ImmutableList.of(colB, colC)), true, true, false);
         List<TableConstraint<ColumnHandle>> tableConstraints = ImmutableList.of(primaryKeyConstraint, uniqueConstraint);
 
         VariableReferenceExpression varA = new VariableReferenceExpression(Optional.empty(), "A", BIGINT);
         VariableReferenceExpression varB = new VariableReferenceExpression(Optional.empty(), "B", BIGINT);
         VariableReferenceExpression varC = new VariableReferenceExpression(Optional.empty(), "C", BIGINT);
 
-        equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(varA, varB);
+        equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(varA, varB);
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -390,12 +391,12 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT: define a table with keys (A,C) and (B,C) and apply predicate A=constant and ensure that the filter key property has only has one key (C)
-        PrimaryKeyConstraint<ColumnHandle> primaryKeyConstraint1 = new PrimaryKeyConstraint<>("primarykey", ImmutableSet.of(colA, colC), true, true);
-        UniqueConstraint<ColumnHandle> uniqueConstraint1 = new UniqueConstraint<>(ImmutableSet.of(colB, colC), true, true);
+        PrimaryKeyConstraint<ColumnHandle> primaryKeyConstraint1 = new PrimaryKeyConstraint<>(Optional.of("primarykey"), new LinkedHashSet<>(ImmutableList.of(colA, colC)), true, true, false);
+        UniqueConstraint<ColumnHandle> uniqueConstraint1 = new UniqueConstraint<>(new LinkedHashSet<>(ImmutableList.of(colB, colC)), true, true, false);
         List<TableConstraint<ColumnHandle>> tableConstraints1 = ImmutableList.of(primaryKeyConstraint1, uniqueConstraint1);
 
-        equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(varA, constant(100L, BIGINT));
+        equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(varA, constant(100L, BIGINT));
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -419,11 +420,11 @@ public class TestLogicalPropertyPropagation
 
         //INVARIANT: define a table with key (A,B) and apply predicates A=constant1 and B=constant2 ensure that the filter has maxcard=1 and key property is empty
 
-        List<TableConstraint<ColumnHandle>> tableConstraints2 = ImmutableList.of(new PrimaryKeyConstraint<>("primarykey", ImmutableSet.of(colA, colB), true, true));
+        List<TableConstraint<ColumnHandle>> tableConstraints2 = ImmutableList.of(new PrimaryKeyConstraint<>(Optional.of("primarykey"), new LinkedHashSet<>(ImmutableList.of(colA, colB)), true, true, false));
 
-        equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(varA, constant(100L, BIGINT));
-        equivalenceClasses.update(varB, constant(50L, BIGINT));
+        equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(varA, constant(100L, BIGINT));
+        equivalenceClasses = equivalenceClasses.combineWith(varB, constant(50L, BIGINT));
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -446,9 +447,9 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT: define a table with key (A,B) and apply predicates A=constant and A=B ensure that the filter has maxcard=1 and key property is empty
-        equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(varA, varB);
-        equivalenceClasses.update(varA, constant(100L, BIGINT));
+        equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(varA, varB);
+        equivalenceClasses = equivalenceClasses.combineWith(varA, constant(100L, BIGINT));
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -477,7 +478,7 @@ public class TestLogicalPropertyPropagation
         VariableReferenceExpression projectedCustKeyVariable = new VariableReferenceExpression(Optional.empty(), "newcustkey", BIGINT);
         Assignments assignments = Assignments.builder().put(projectedCustKeyVariable, customerCustKeyVariable).build();
 
-        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(projectedCustKeyVariable)))));
 
@@ -498,11 +499,11 @@ public class TestLogicalPropertyPropagation
         VariableReferenceExpression varA = new VariableReferenceExpression(Optional.empty(), "A", BIGINT);
         VariableReferenceExpression varB = new VariableReferenceExpression(Optional.empty(), "B", BIGINT);
         VariableReferenceExpression projectedVarA = new VariableReferenceExpression(Optional.empty(), "A1", BIGINT);
-        List<TableConstraint<ColumnHandle>> tableConstraints = ImmutableList.of(new PrimaryKeyConstraint<>("primarykey", ImmutableSet.of(colA, colB), true, true));
+        List<TableConstraint<ColumnHandle>> tableConstraints = ImmutableList.of(new PrimaryKeyConstraint<>(Optional.of("primarykey"), new LinkedHashSet<>(ImmutableList.of(colA, colB)), true, true, false));
         Assignments assignments1 = Assignments.builder().put(projectedVarA, varA).build();
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of()));
 
@@ -521,12 +522,12 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //TableScan key property has key (A), Filter applies predicate A=B, Project only has a mapping B->B'. Project should have key property with (B').
-        List<TableConstraint<ColumnHandle>> tableConstraints1 = ImmutableList.of(new PrimaryKeyConstraint<>("primarykey", ImmutableSet.of(colA), true, true));
+        List<TableConstraint<ColumnHandle>> tableConstraints1 = ImmutableList.of(new PrimaryKeyConstraint<>(Optional.of("primarykey"), new LinkedHashSet<>(ImmutableList.of(colA)), true, true, false));
         VariableReferenceExpression projectedA = new VariableReferenceExpression(Optional.empty(), "A1", BIGINT);
         Assignments assignments2 = Assignments.builder().put(projectedA, varA).build();
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(projectedA)))));
 
@@ -582,11 +583,11 @@ public class TestLogicalPropertyPropagation
                 .build();
 
         // A = B and B = C and D = E and E = F
-        EquivalenceClassProperty equivalenceClassProperty = new EquivalenceClassProperty(functionResolution);
-        equivalenceClassProperty.update(projectedA, projectedB);
-        equivalenceClassProperty.update(projectedB, projectedC);
-        equivalenceClassProperty.update(projectedD, projectedE);
-        equivalenceClassProperty.update(projectedE, projectedF);
+        EquivalenceClassProperty equivalenceClassProperty = new EquivalenceClassProperty();
+        equivalenceClassProperty = equivalenceClassProperty.combineWith(projectedA, projectedB);
+        equivalenceClassProperty = equivalenceClassProperty.combineWith(projectedB, projectedC);
+        equivalenceClassProperty = equivalenceClassProperty.combineWith(projectedD, projectedE);
+        equivalenceClassProperty = equivalenceClassProperty.combineWith(projectedE, projectedF);
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClassProperty,
                 new MaxCardProperty(),
@@ -621,7 +622,7 @@ public class TestLogicalPropertyPropagation
                 .put(projectedD, varD)
                 .build();
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(projectedA)))));
 
@@ -654,9 +655,9 @@ public class TestLogicalPropertyPropagation
                 .put(projectedE, varE)
                 .put(projectedF, varF)
                 .build();
-        EquivalenceClassProperty equivalenceClassProperty1 = new EquivalenceClassProperty(functionResolution);
-        equivalenceClassProperty1.update(projectedB, projectedC);
-        equivalenceClassProperty1.update(projectedE, projectedF);
+        EquivalenceClassProperty equivalenceClassProperty1 = new EquivalenceClassProperty();
+        equivalenceClassProperty1 = equivalenceClassProperty1.combineWith(projectedB, projectedC);
+        equivalenceClassProperty1 = equivalenceClassProperty1.combineWith(projectedE, projectedF);
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClassProperty1,
@@ -690,8 +691,8 @@ public class TestLogicalPropertyPropagation
                 .put(projectedE, varE)
                 .put(projectedF, varF)
                 .build();
-        EquivalenceClassProperty equivalenceClassProperty2 = new EquivalenceClassProperty(functionResolution);
-        equivalenceClassProperty2.update(projectedE, projectedF);
+        EquivalenceClassProperty equivalenceClassProperty2 = new EquivalenceClassProperty();
+        equivalenceClassProperty2 = equivalenceClassProperty2.combineWith(projectedE, projectedF);
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClassProperty2,
@@ -726,10 +727,10 @@ public class TestLogicalPropertyPropagation
         // TEST: n to 1 inner join between orders and customers with limit 5 on left table.
         // orders key property,  maxcard=5 and equivalence classes(o_custkey=c_custkey), (shippriority=10) and
         // (mktsegment='BUILDING') should be propagated.
-        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(ordersCustKeyVariable, customerCustKeyVariable);
-        equivalenceClasses.update(shipPriorityVariable, constant(10L, INTEGER));
-        equivalenceClasses.update(mktSegmentVariable, constant(Slices.utf8Slice("BUILDING"), createVarcharType(8)));
+        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(ordersCustKeyVariable, customerCustKeyVariable);
+        equivalenceClasses = equivalenceClasses.combineWith(shipPriorityVariable, constant(10L, INTEGER));
+        equivalenceClasses = equivalenceClasses.combineWith(mktSegmentVariable, constant(Slices.utf8Slice("BUILDING"), createVarcharType(8)));
 
         LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -758,11 +759,11 @@ public class TestLogicalPropertyPropagation
 
                     p.variable(shipPriorityVariable);
                     p.variable(mktSegmentVariable);
-                    return p.join(JoinNode.Type.INNER,
+                    return p.join(JoinType.INNER,
                             p.limit(5, ordersTableScan),
                             p.filter(p.rowExpression("c_mktsegment = 'BUILDING'"), customerTableScan),
                             p.rowExpression("o_shippriority = 10"),
-                            new JoinNode.EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
+                            new EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
@@ -795,11 +796,11 @@ public class TestLogicalPropertyPropagation
 
                     p.variable(shipPriorityVariable);
                     p.variable(mktSegmentVariable);
-                    return p.join(JoinNode.Type.INNER,
+                    return p.join(JoinType.INNER,
                             p.limit(1, ordersTableScan),
                             p.filter(p.rowExpression("c_mktsegment = 'BUILDING'"), customerTableScan),
                             p.rowExpression("o_shippriority = 10"),
-                            new JoinNode.EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
+                            new EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
@@ -833,11 +834,11 @@ public class TestLogicalPropertyPropagation
 
                     p.variable(shipPriorityVariable);
                     p.variable(mktSegmentVariable);
-                    return p.join(JoinNode.Type.INNER,
+                    return p.join(JoinType.INNER,
                             p.filter(p.rowExpression("c_mktsegment = 'BUILDING'"), customerTableScan),
                             p.limit(6, ordersTableScan),
                             p.rowExpression("o_shippriority = 10"),
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
+                            new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
@@ -870,18 +871,18 @@ public class TestLogicalPropertyPropagation
 
                     p.variable(shipPriorityVariable);
                     p.variable(mktSegmentVariable);
-                    return p.join(JoinNode.Type.INNER,
+                    return p.join(JoinType.INNER,
                             p.filter(p.rowExpression("c_mktsegment = 'BUILDING'"), customerTableScan),
                             p.limit(1, ordersTableScan),
                             p.rowExpression("o_shippriority = 10"),
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
+                            new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: n to 1 left join between orders and customers with limit(7) on the left table.
         // orders keys and maxcard=7 are propagated
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(7L),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable)))));
 
@@ -903,15 +904,15 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.LEFT, p.limit(7, ordersTableScan), customerTableScan,
-                            new JoinNode.EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
+                    return p.join(JoinType.LEFT, p.limit(7, ordersTableScan), customerTableScan,
+                            new EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: n to 1 left join between orders and customers with limit on right table.
         // orders keys are propagated. Maxcard should not be propagated.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable)))));
 
@@ -933,15 +934,15 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.LEFT, ordersTableScan, p.limit(8, customerTableScan),
-                            new JoinNode.EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
+                    return p.join(JoinType.LEFT, ordersTableScan, p.limit(8, customerTableScan),
+                            new EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: 1 to n right join between customers and orders. Limit(9) on the right table.
         // orders keys are propagated and maxcard=9 should be propagated.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(9L),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable)))));
 
@@ -963,15 +964,15 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.RIGHT, customerTableScan, p.limit(9, ordersTableScan),
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
+                    return p.join(JoinType.RIGHT, customerTableScan, p.limit(9, ordersTableScan),
+                            new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: 1 to n right join between customers and orders. Limit(10) on the left table.
         // orders keys are propagated. maxcard should not be propagated.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable)))));
 
@@ -993,14 +994,14 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.RIGHT, p.limit(10, customerTableScan), ordersTableScan,
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
+                    return p.join(JoinType.RIGHT, p.limit(10, customerTableScan), ordersTableScan,
+                            new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: 1 to n left join between customers and orders - no keys are propagated
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty());
 
@@ -1022,14 +1023,14 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.LEFT, customerTableScan, ordersTableScan,
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
+                    return p.join(JoinType.LEFT, customerTableScan, ordersTableScan,
+                            new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: n to m  inner join between customers and orders - concatenated key (orderkey, custkey) should get propagated.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable, customerCustKeyVariable)))));
 
@@ -1051,14 +1052,14 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.INNER, customerTableScan, ordersTableScan, emptyList(), ImmutableList.of(ordersOrderKeyVariable, customerCustKeyVariable, ordersCustKeyVariable), Optional.empty());
+                    return p.join(JoinType.INNER, customerTableScan, ordersTableScan, emptyList(), ImmutableList.of(customerCustKeyVariable, ordersOrderKeyVariable, ordersCustKeyVariable), Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: n to m  inner join between customers and orders and limit 11 left table and limit 12 on right table.
         // concatenated key (orderkey, custkey) should get propagated. Maxcard should be maxCardLeft * maxCardRight = 132.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(132L),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable, customerCustKeyVariable)))));
 
@@ -1080,19 +1081,19 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.INNER, p.limit(11, customerTableScan), p.limit(12, ordersTableScan), emptyList(), ImmutableList.of(ordersOrderKeyVariable, ordersCustKeyVariable, customerCustKeyVariable), Optional.empty());
+                    return p.join(JoinType.INNER, p.limit(11, customerTableScan), p.limit(12, ordersTableScan), emptyList(), ImmutableList.of(customerCustKeyVariable, ordersOrderKeyVariable, ordersCustKeyVariable), Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
 
         //test m to n cases where there are multiple keys in the left and right tables to concatenate e.g. add unique keys customer.comment and orders.comment
         List<TableConstraint<ColumnHandle>> customerTableConstraints = new ArrayList<>(tester().getTableConstraints(customerTableHandle));
-        customerTableConstraints.add(new UniqueConstraint<>(ImmutableSet.of(customerCommentColumn), true, true));
+        customerTableConstraints.add(new UniqueConstraint<>(new LinkedHashSet<>(ImmutableList.of(customerCommentColumn)), true, true, false));
 
         List<TableConstraint<ColumnHandle>> orderTableConstraints = new ArrayList<>(tester().getTableConstraints(ordersTableHandle));
-        orderTableConstraints.add(new UniqueConstraint<>(ImmutableSet.of(ordersCommentColumn), true, true));
+        orderTableConstraints.add(new UniqueConstraint<>(new LinkedHashSet<>(ImmutableList.of(ordersCommentColumn)), true, true, false));
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable, customerCustKeyVariable)),
                         new Key(ImmutableSet.of(customerCommentVariable, ordersCommentVariable)),
@@ -1119,9 +1120,8 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             orderTableConstraints);
 
-                    return p.join(JoinNode.Type.INNER, customerTableScan, ordersTableScan, emptyList(),
-                            ImmutableList.of(ordersOrderKeyVariable, ordersCustKeyVariable, ordersCommentVariable,
-                                    customerCustKeyVariable, customerCommentVariable),
+                    return p.join(JoinType.INNER, customerTableScan, ordersTableScan, emptyList(),
+                            ImmutableList.of(customerCustKeyVariable, customerCommentVariable, ordersOrderKeyVariable, ordersCustKeyVariable, ordersCommentVariable),
                             Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
@@ -1131,7 +1131,7 @@ public class TestLogicalPropertyPropagation
         VariableReferenceExpression c2 = new VariableReferenceExpression(Optional.empty(), "c2", BIGINT);
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1139,7 +1139,7 @@ public class TestLogicalPropertyPropagation
                 .on(p -> {
                     ValuesNode values1 = p.values(1, c1);
                     ValuesNode values2 = p.values(1, c2);
-                    return p.join(JoinNode.Type.INNER, values1, values2, emptyList(), ImmutableList.of(c1, c2), Optional.empty());
+                    return p.join(JoinType.INNER, values1, values2, emptyList(), ImmutableList.of(c1, c2), Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
 
@@ -1148,7 +1148,7 @@ public class TestLogicalPropertyPropagation
         VariableReferenceExpression c4 = new VariableReferenceExpression(Optional.empty(), "c2", BIGINT);
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1156,13 +1156,13 @@ public class TestLogicalPropertyPropagation
                 .on(p -> {
                     ValuesNode values1 = p.values(1, c3);
                     ValuesNode values2 = p.values(1, c4);
-                    return p.join(JoinNode.Type.FULL, values1, values2, emptyList(), ImmutableList.of(c3, c4), Optional.empty());
+                    return p.join(JoinType.FULL, values1, values2, emptyList(), ImmutableList.of(c3, c4), Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: 1 to n  full join between customers and orders - nothing should get propagated.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty());
 
@@ -1184,14 +1184,14 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.FULL, customerTableScan, ordersTableScan, emptyList(), ImmutableList.of(customerCustKeyVariable, ordersOrderKeyVariable), Optional.empty());
+                    return p.join(JoinType.FULL, customerTableScan, ordersTableScan, emptyList(), ImmutableList.of(customerCustKeyVariable, ordersOrderKeyVariable), Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: n to 1  full join between customers and orders with limit(12) on left and and limit(10) on right table.
         // The product of the maxcards 120 should get propagated
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(120L),
                 new KeyProperty());
 
@@ -1213,9 +1213,9 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.FULL, p.limit(12, customerTableScan), p.limit(10, ordersTableScan),
-                            ImmutableList.of(new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable)),
-                            ImmutableList.of(ordersOrderKeyVariable, customerCustKeyVariable),
+                    return p.join(JoinType.FULL, p.limit(12, customerTableScan), p.limit(10, ordersTableScan),
+                            ImmutableList.of(new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable)),
+                            ImmutableList.of(customerCustKeyVariable, ordersOrderKeyVariable),
                             Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
@@ -1223,7 +1223,7 @@ public class TestLogicalPropertyPropagation
         // TEST: n to m  full join between customers and orders with maxcard 2 on left and unknown maxcard on right table.
         // Concatenated keys and a maxcard of unknown should get propagated
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable, customerCustKeyVariable)))));
 
@@ -1245,9 +1245,8 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.INNER, p.limit(2, customerTableScan), ordersTableScan, emptyList(),
-                            ImmutableList.of(ordersOrderKeyVariable, ordersCustKeyVariable,
-                                    customerCustKeyVariable),
+                    return p.join(JoinType.INNER, p.limit(2, customerTableScan), ordersTableScan, emptyList(),
+                            ImmutableList.of(customerCustKeyVariable, ordersOrderKeyVariable, ordersCustKeyVariable),
                             Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
@@ -1255,7 +1254,7 @@ public class TestLogicalPropertyPropagation
         // TEST: n to m  full join between customers and orders with maxcard 2 on left and unknown maxcard on right table.
         // Concatenated keys and a maxcard of unknown should get propagated
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable, customerCustKeyVariable)))));
 
@@ -1277,17 +1276,16 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.INNER, ordersTableScan, p.limit(2, customerTableScan), emptyList(),
-                            ImmutableList.of(ordersOrderKeyVariable, ordersCustKeyVariable,
-                                    customerCustKeyVariable),
+                    return p.join(JoinType.INNER, ordersTableScan, p.limit(2, customerTableScan), emptyList(),
+                            ImmutableList.of(ordersOrderKeyVariable, ordersCustKeyVariable, customerCustKeyVariable),
                             Optional.empty());
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: 1 to 1 inner join between values(1) and customers - maxcard(1) is propagated
-        equivalenceClasses = new EquivalenceClassProperty(functionResolution);
+        equivalenceClasses = new EquivalenceClassProperty();
         VariableReferenceExpression c = new VariableReferenceExpression(Optional.empty(), "c", BIGINT);
-        equivalenceClasses.update(c, customerCustKeyVariable);
+        equivalenceClasses = equivalenceClasses.combineWith(c, customerCustKeyVariable);
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
                 new MaxCardProperty(1L),
@@ -1306,15 +1304,15 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(customerTableHandle));
 
-                    return p.join(JoinNode.Type.INNER, values, customerTableScan,
-                            new JoinNode.EquiJoinClause(finalC1, customerCustKeyVariable));
+                    return p.join(JoinType.INNER, values, customerTableScan,
+                            new EquiJoinClause(finalC1, customerCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: 1 to 1 inner join between customers and values(1) - maxcard(1) is propagated
-        equivalenceClasses = new EquivalenceClassProperty(functionResolution);
+        equivalenceClasses = new EquivalenceClassProperty();
         c = new VariableReferenceExpression(Optional.empty(), "c", BIGINT);
-        equivalenceClasses.update(c, customerCustKeyVariable);
+        equivalenceClasses = equivalenceClasses.combineWith(c, customerCustKeyVariable);
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
                 new MaxCardProperty(1L),
@@ -1333,14 +1331,14 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(customerTableHandle));
 
-                    return p.join(JoinNode.Type.INNER, customerTableScan, values,
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, finalC));
+                    return p.join(JoinType.INNER, customerTableScan, values,
+                            new EquiJoinClause(customerCustKeyVariable, finalC));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: 1 to n full join between customers and values(1) where n=1 - maxcard(1) is propagated
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1357,14 +1355,14 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(customerTableHandle));
 
-                    return p.join(JoinNode.Type.FULL, customerTableScan, values,
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, finalC2));
+                    return p.join(JoinType.FULL, customerTableScan, values,
+                            new EquiJoinClause(customerCustKeyVariable, finalC2));
                 })
                 .matches(expectedLogicalProperties);
 
         // TEST: n to 1 full join between values(1) and customers where n=1 - maxcard(1) is propagated
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1380,16 +1378,16 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(customerTableHandle));
 
-                    return p.join(JoinNode.Type.FULL, values, customerTableScan,
-                            new JoinNode.EquiJoinClause(finalC3, customerCustKeyVariable));
+                    return p.join(JoinType.FULL, values, customerTableScan,
+                            new EquiJoinClause(finalC3, customerCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         // Three table join. Key (l_orderkey, l_linenumber), maxCard=6 and equivalence classes (o_orderkey,l_orderkey) and
         // (o_custkey, c_custkey) should be propagated.
-        equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(customerCustKeyVariable, ordersCustKeyVariable);
-        equivalenceClasses.update(ordersOrderKeyVariable, lineitemOrderkeyVariable);
+        equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(customerCustKeyVariable, ordersCustKeyVariable);
+        equivalenceClasses = equivalenceClasses.combineWith(ordersOrderKeyVariable, lineitemOrderkeyVariable);
 
         expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -1425,15 +1423,15 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(lineitemTableHandle));
 
-                    JoinNode customerOrderJoin = p.join(JoinNode.Type.INNER,
+                    JoinNode customerOrderJoin = p.join(JoinType.INNER,
                             customerTableScan,
                             p.limit(6, ordersTableScan),
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
+                            new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
 
-                    return p.join(JoinNode.Type.INNER,
+                    return p.join(JoinType.INNER,
                             customerOrderJoin,
                             lineitemTableScan,
-                            new JoinNode.EquiJoinClause(ordersOrderKeyVariable, lineitemOrderkeyVariable));
+                            new EquiJoinClause(ordersOrderKeyVariable, lineitemOrderkeyVariable));
                 })
                 .matches(expectedLogicalProperties);
     }
@@ -1441,10 +1439,10 @@ public class TestLogicalPropertyPropagation
     @Test
     public void testSemiJoinNodeLogicalProperties()
     {
-        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(ordersCustKeyVariable, customerCustKeyVariable);
+        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(ordersCustKeyVariable, customerCustKeyVariable);
 
-        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable)))));
 
@@ -1473,7 +1471,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //source table is 1-tuple
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1494,8 +1492,8 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //maxcard derived from limit propagates semijoin
-        EquivalenceClassProperty equivalenceClassProperty = new EquivalenceClassProperty(functionResolution);
-        equivalenceClassProperty.update(ordersOrderPriorityVariable, constant(Slices.utf8Slice("URGENT"), createVarcharType(6)));
+        EquivalenceClassProperty equivalenceClassProperty = new EquivalenceClassProperty();
+        equivalenceClassProperty = equivalenceClassProperty.combineWith(ordersOrderPriorityVariable, constant(Slices.utf8Slice("URGENT"), createVarcharType(6)));
 
         expectedLogicalProperties = new LogicalPropertiesImpl(equivalenceClassProperty,
                 new MaxCardProperty(5L),
@@ -1534,7 +1532,7 @@ public class TestLogicalPropertyPropagation
     public void testAggregationNodeLogicalProperties()
     {
         // Aggregation node adds new key (nationkey)
-        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerNationKeyVariable)))));
 
@@ -1551,7 +1549,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT: Grouping on (nationkey, custkey) but (custkey) is already a key. So grouping result should have only (custkey)
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)))));
 
@@ -1568,8 +1566,8 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT. Group by nationkey Filter binds nationkey to a constant before grouping. Result should have maxcard=1;
-        EquivalenceClassProperty equivalenceClassProperty = new EquivalenceClassProperty(functionResolution);
-        equivalenceClassProperty.update(customerNationKeyVariable, constant(20L, BIGINT));
+        EquivalenceClassProperty equivalenceClassProperty = new EquivalenceClassProperty();
+        equivalenceClassProperty = equivalenceClassProperty.combineWith(customerNationKeyVariable, constant(20L, BIGINT));
         expectedLogicalProperties = new LogicalPropertiesImpl(equivalenceClassProperty,
                 new MaxCardProperty(1L),
                 new KeyProperty());
@@ -1591,8 +1589,8 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT. Group on (nationkey, mktsegment) and after first binding "mktsegment" to a constant. The grouping result should have key (nationkey)
-        EquivalenceClassProperty equivalenceClassProperty1 = new EquivalenceClassProperty(functionResolution);
-        equivalenceClassProperty1.update(mktSegmentVariable, constant(Slices.utf8Slice("BUILDING"), createVarcharType(8)));
+        EquivalenceClassProperty equivalenceClassProperty1 = new EquivalenceClassProperty();
+        equivalenceClassProperty1 = equivalenceClassProperty1.combineWith(mktSegmentVariable, constant(Slices.utf8Slice("BUILDING"), createVarcharType(8)));
         expectedLogicalProperties = new LogicalPropertiesImpl(equivalenceClassProperty1,
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerNationKeyVariable)))));
@@ -1614,7 +1612,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT. Group by with aggregate functions but no grouping columns. Maxard should be 1 and no keys propagated.
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1635,7 +1633,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT. Maxcard is set to 1 prior to group by with grouping columns. Maxard of group by should be 1 and no keys propagated.
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1655,14 +1653,16 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         // Test propagation of equivalence classes through aggregation.
-        // None of the equivalence classes from aggregation's source node should be propagated since none of the
-        // members are projected by the aggregation node.
         // Key property (shippriority, linenumber) which form the group by keys and maxcard=6 should be propagated.
 
+        EquivalenceClassProperty equivalenceClassProperty2 = new EquivalenceClassProperty(ImmutableMap.of(customerCustKeyVariable, ordersOrderKeyVariable),
+                ImmutableMap.of(customerCustKeyVariable, ImmutableList.of(ordersCustKeyVariable), ordersOrderKeyVariable, ImmutableList.of(lineitemOrderkeyVariable)));
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                equivalenceClassProperty2,
                 new MaxCardProperty(),
-                new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(shipPriorityVariable, lineitemLinenumberVariable)))));
+                new KeyProperty(ImmutableSet.of(
+                        new Key(ImmutableSet.of(shipPriorityVariable, lineitemLinenumberVariable)),
+                        new Key(ImmutableSet.of(ordersOrderKeyVariable, lineitemLinenumberVariable)))));
 
         tester().assertThat(new NoOpRule(), logicalPropertiesProvider)
                 .on(p -> {
@@ -1693,26 +1693,26 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(lineitemTableHandle));
 
-                    JoinNode customerOrderJoin = p.join(JoinNode.Type.INNER,
+                    JoinNode customerOrderJoin = p.join(JoinType.INNER,
                             customerTableScan,
                             p.limit(6, ordersTableScan),
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
+                            new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
 
                     p.variable(lineitemExtendedPriceVariable);
                     return p.aggregation(builder -> builder
                             .addAggregation(p.variable("sum_price", DOUBLE), p.rowExpression("sum(l_extendedprice)"))
                             .singleGroupingSet(lineitemLinenumberVariable, shipPriorityVariable)
-                            .source(p.join(JoinNode.Type.INNER,
+                            .source(p.join(JoinType.INNER,
                                     customerOrderJoin,
                                     lineitemTableScan,
-                                    new JoinNode.EquiJoinClause(ordersOrderKeyVariable, lineitemOrderkeyVariable))));
+                                    new EquiJoinClause(ordersOrderKeyVariable, lineitemOrderkeyVariable))));
                 })
                 .matches(expectedLogicalProperties);
 
         // A variation to the above case, where in groupby keys are (l_lineitem,o_orderkey,shippriority). Since
         // (o_orderkey, l_lineitem) are already a key, the key should be normalized to have only (o_orderkey, l_lineitem).
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                equivalenceClassProperty2,
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(ordersOrderKeyVariable, lineitemLinenumberVariable)))));
 
@@ -1745,19 +1745,19 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(lineitemTableHandle));
 
-                    JoinNode customerOrderJoin = p.join(JoinNode.Type.INNER,
+                    JoinNode customerOrderJoin = p.join(JoinType.INNER,
                             customerTableScan,
                             p.limit(6, ordersTableScan),
-                            new JoinNode.EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
+                            new EquiJoinClause(customerCustKeyVariable, ordersCustKeyVariable));
 
                     p.variable(lineitemExtendedPriceVariable);
                     return p.aggregation(builder -> builder
                             .addAggregation(p.variable("sum_price", DOUBLE), p.rowExpression("sum(l_extendedprice)"))
                             .singleGroupingSet(lineitemLinenumberVariable, ordersOrderKeyVariable, shipPriorityVariable)
-                            .source(p.join(JoinNode.Type.INNER,
+                            .source(p.join(JoinType.INNER,
                                     customerOrderJoin,
                                     lineitemTableScan,
-                                    new JoinNode.EquiJoinClause(ordersOrderKeyVariable, lineitemOrderkeyVariable))));
+                                    new EquiJoinClause(ordersOrderKeyVariable, lineitemOrderkeyVariable))));
                 })
                 .matches(expectedLogicalProperties);
     }
@@ -1768,7 +1768,7 @@ public class TestLogicalPropertyPropagation
         VariableReferenceExpression c = new VariableReferenceExpression(Optional.empty(), "c", BIGINT);
         VariableReferenceExpression unique = new VariableReferenceExpression(Optional.empty(), "unique", BIGINT);
 
-        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(5L),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(unique)))));
 
@@ -1783,7 +1783,7 @@ public class TestLogicalPropertyPropagation
     {
         VariableReferenceExpression c = new VariableReferenceExpression(Optional.empty(), "c", BIGINT);
 
-        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(3L),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(c)))));
 
@@ -1794,7 +1794,7 @@ public class TestLogicalPropertyPropagation
         //Tests where where DistinctLimit adds a key! Mirror the aggregation tests.
 
         // DistinctLimit node adds new key (nationkey)
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(5L),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerNationKeyVariable)))));
 
@@ -1810,7 +1810,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT: DistinctLimit on (nationkey, custkey) but (custkey) is already a key. So grouping result should have only (custkey)
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(6L),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)))));
 
@@ -1827,8 +1827,8 @@ public class TestLogicalPropertyPropagation
 
         //INVARIANT. DistinctLimit with nationkey as distinct symbol.
         // Filter binds nationkey to a constant before grouping. Result should have maxcard=1;
-        EquivalenceClassProperty equivalenceClassProperty = new EquivalenceClassProperty(functionResolution);
-        equivalenceClassProperty.update(customerNationKeyVariable, constant(20L, BIGINT));
+        EquivalenceClassProperty equivalenceClassProperty = new EquivalenceClassProperty();
+        equivalenceClassProperty = equivalenceClassProperty.combineWith(customerNationKeyVariable, constant(20L, BIGINT));
         expectedLogicalProperties = new LogicalPropertiesImpl(equivalenceClassProperty,
                 new MaxCardProperty(1L),
                 new KeyProperty());
@@ -1850,8 +1850,8 @@ public class TestLogicalPropertyPropagation
 
         //INVARIANT. DistinctLimit with (nationkey, mktsegment) as symbols and after first binding "mktsegment" to a constant.
         // The grouping result should have key (nationkey)
-        EquivalenceClassProperty equivalenceClassProperty1 = new EquivalenceClassProperty(functionResolution);
-        equivalenceClassProperty1.update(mktSegmentVariable, constant(Slices.utf8Slice("BUILDING"), createVarcharType(8)));
+        EquivalenceClassProperty equivalenceClassProperty1 = new EquivalenceClassProperty();
+        equivalenceClassProperty1 = equivalenceClassProperty1.combineWith(mktSegmentVariable, constant(Slices.utf8Slice("BUILDING"), createVarcharType(8)));
         expectedLogicalProperties = new LogicalPropertiesImpl(equivalenceClassProperty1,
                 new MaxCardProperty(7L),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerNationKeyVariable)))));
@@ -1872,7 +1872,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //INVARIANT. Maxcard is set to 1 prior to distinct limit. Maxard of distinct limit should be 1 and no keys propagated.
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1891,7 +1891,7 @@ public class TestLogicalPropertyPropagation
                 .matches(expectedLogicalProperties);
 
         //test cases where the DistinctLimit count is 1 and results in maxcard 1
-        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -1913,8 +1913,8 @@ public class TestLogicalPropertyPropagation
     @Test
     public void testLimitNodeLogicalProperties()
     {
-        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(ordersCustKeyVariable, customerCustKeyVariable);
+        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(ordersCustKeyVariable, customerCustKeyVariable);
 
         LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -1940,8 +1940,8 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    JoinNode ordersCustomerJoin = p.join(JoinNode.Type.INNER, ordersTableScan, customerTableScan,
-                            new JoinNode.EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
+                    JoinNode ordersCustomerJoin = p.join(JoinType.INNER, ordersTableScan, customerTableScan,
+                            new EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
 
                     return p.limit(6, ordersCustomerJoin);
                 })
@@ -1971,14 +1971,14 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.INNER, p.limit(5, ordersTableScan), customerTableScan,
-                            new JoinNode.EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
+                    return p.join(JoinType.INNER, p.limit(5, ordersTableScan), customerTableScan,
+                            new EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         //INVARIANT: maxcard is set to K (by Values or Filter) and TopN and/or Limit comes along and tries to set it to N>K. Should still be set to K.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(5L),
                 new KeyProperty());
 
@@ -1988,7 +1988,7 @@ public class TestLogicalPropertyPropagation
 
         //INVARIANT: maxcard is set to K (by Values or Filter) and TopN and/or Limit comes along and tries to set it to N<K. Should still be set to N.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(6L),
                 new KeyProperty());
 
@@ -1998,7 +1998,7 @@ public class TestLogicalPropertyPropagation
 
         //INVARIANT: TableScan with key (A) and TopN and/or Limit sets result N=1. Key property should be emptied.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -2021,8 +2021,8 @@ public class TestLogicalPropertyPropagation
     public void testTopNNodeLogicalProperties()
     {
         //just duplicate the comprehensive limit tests but also do negative tests for the case where TopN is not final
-        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(ordersCustKeyVariable, customerCustKeyVariable);
+        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(ordersCustKeyVariable, customerCustKeyVariable);
 
         LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(
                 equivalenceClasses,
@@ -2048,8 +2048,8 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    JoinNode ordersCustomerJoin = p.join(JoinNode.Type.INNER, ordersTableScan, customerTableScan,
-                            new JoinNode.EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
+                    JoinNode ordersCustomerJoin = p.join(JoinType.INNER, ordersTableScan, customerTableScan,
+                            new EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
 
                     return p.topN(6, ImmutableList.of(ordersCustKeyVariable, ordersOrderKeyVariable),
                             ordersCustomerJoin);
@@ -2080,14 +2080,14 @@ public class TestLogicalPropertyPropagation
                             TupleDomain.none(),
                             tester().getTableConstraints(ordersTableHandle));
 
-                    return p.join(JoinNode.Type.INNER, p.topN(5, ImmutableList.of(ordersCustKeyVariable), ordersTableScan), customerTableScan,
-                            new JoinNode.EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
+                    return p.join(JoinType.INNER, p.topN(5, ImmutableList.of(ordersCustKeyVariable), ordersTableScan), customerTableScan,
+                            new EquiJoinClause(ordersCustKeyVariable, customerCustKeyVariable));
                 })
                 .matches(expectedLogicalProperties);
 
         //INVARIANT: maxcard is set to K (by Values or Filter) and TopN comes along and tries to set it to N>K. Should still be set to K.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(5L),
                 new KeyProperty());
 
@@ -2100,7 +2100,7 @@ public class TestLogicalPropertyPropagation
 
         //INVARIANT: maxcard is set to K (by Values or Filter) and TopN and/or Limit comes along and tries to set it to N<K. Should still be set to N.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(6L),
                 new KeyProperty());
 
@@ -2113,7 +2113,7 @@ public class TestLogicalPropertyPropagation
 
         //INVARIANT: TableScan with key (A) and TopN and/or Limit sets result N=1. Key property should be emptied.
         expectedLogicalProperties = new LogicalPropertiesImpl(
-                new EquivalenceClassProperty(functionResolution),
+                new EquivalenceClassProperty(),
                 new MaxCardProperty(1L),
                 new KeyProperty());
 
@@ -2136,7 +2136,7 @@ public class TestLogicalPropertyPropagation
     void testSortNodeLogicalProperties()
     {
         // Test KeyProperty propagation through sort.
-        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties expectedLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty(ImmutableSet.of(new Key(ImmutableSet.of(customerCustKeyVariable)))));
         tester().assertThat(new NoOpRule(), logicalPropertiesProvider)
@@ -2154,8 +2154,8 @@ public class TestLogicalPropertyPropagation
 
         //TEST: Propagate maxcard through the filter below the sort
         ConstantExpression constExpr = new ConstantExpression(100L, BIGINT);
-        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty(functionResolution);
-        equivalenceClasses.update(customerCustKeyVariable, constExpr);
+        EquivalenceClassProperty equivalenceClasses = new EquivalenceClassProperty();
+        equivalenceClasses = equivalenceClasses.combineWith(customerCustKeyVariable, constExpr);
 
         expectedLogicalProperties = new LogicalPropertiesImpl(equivalenceClasses,
                 new MaxCardProperty(1L),
@@ -2179,7 +2179,7 @@ public class TestLogicalPropertyPropagation
     @Test
     public void testDefaultLogicalProperties()
     {
-        LogicalProperties defaultLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(functionResolution),
+        LogicalProperties defaultLogicalProperties = new LogicalPropertiesImpl(new EquivalenceClassProperty(),
                 new MaxCardProperty(),
                 new KeyProperty());
 

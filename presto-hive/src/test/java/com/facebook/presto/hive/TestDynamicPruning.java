@@ -15,6 +15,7 @@ package com.facebook.presto.hive;
 
 import com.facebook.airlift.testing.TempFile;
 import com.facebook.presto.cache.CacheConfig;
+import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.predicate.Domain;
 import com.facebook.presto.common.predicate.TupleDomain;
 import com.facebook.presto.common.type.StandardTypes;
@@ -47,14 +48,15 @@ import static com.facebook.presto.common.type.IntegerType.INTEGER;
 import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.common.type.VarcharType.createVarcharType;
 import static com.facebook.presto.expressions.LogicalRowExpressions.TRUE_CONSTANT;
+import static com.facebook.presto.hive.BaseHiveColumnHandle.ColumnType.PARTITION_KEY;
+import static com.facebook.presto.hive.BaseHiveColumnHandle.ColumnType.REGULAR;
 import static com.facebook.presto.hive.BucketFunctionType.HIVE_COMPATIBLE;
 import static com.facebook.presto.hive.CacheQuotaRequirement.NO_CACHE_REQUIREMENT;
-import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.PARTITION_KEY;
-import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static com.facebook.presto.hive.HiveQueryRunner.HIVE_CATALOG;
 import static com.facebook.presto.hive.HiveTestUtils.FUNCTION_AND_TYPE_MANAGER;
 import static com.facebook.presto.hive.HiveTestUtils.ROW_EXPRESSION_SERVICE;
 import static com.facebook.presto.hive.HiveTestUtils.createTestHdfsEnvironment;
+import static com.facebook.presto.hive.HiveTestUtils.getDefaultHiveAggregatedPageSourceFactories;
 import static com.facebook.presto.hive.HiveTestUtils.getDefaultHiveBatchPageSourceFactories;
 import static com.facebook.presto.hive.HiveTestUtils.getDefaultHiveRecordCursorProvider;
 import static com.facebook.presto.hive.HiveTestUtils.getDefaultHiveSelectivePageSourceFactories;
@@ -125,15 +127,22 @@ public class TestDynamicPruning
     {
         ImmutableList<HivePartitionKey> partitionKeys = ImmutableList.of(new HivePartitionKey(PARTITION_COLUMN.getName(), Optional.of("2020-09-09")));
         Map<Integer, Column> partitionSchemaDifference = ImmutableMap.of(1, new Column("ds", HIVE_STRING, Optional.empty(), Optional.empty()));
-        HiveSplit split = new HiveSplit(
-                SCHEMA_NAME,
-                TABLE_NAME,
-                "",
+        HiveFileSplit fileSplit = new HiveFileSplit(
                 "file:///" + outputFile.getAbsolutePath(),
                 0,
                 outputFile.length(),
                 outputFile.length(),
                 Instant.now().toEpochMilli(),
+                Optional.empty(),
+                ImmutableMap.of(),
+                0);
+
+        HiveSplit split = new HiveSplit(
+                fileSplit,
+                SCHEMA_NAME,
+                TABLE_NAME,
+                "",
+
                 new Storage(
                         StorageFormat.create(config.getHiveStorageFormat().getSerDe(), config.getHiveStorageFormat().getInputFormat(), config.getHiveStorageFormat().getOutputFormat()),
                         "location",
@@ -150,38 +159,47 @@ public class TestDynamicPruning
                 TableToPartitionMapping.mapColumnsByIndex(partitionSchemaDifference),
                 Optional.empty(),
                 false,
-                Optional.empty(),
                 NO_CACHE_REQUIREMENT,
                 Optional.empty(),
-                ImmutableMap.of(),
                 ImmutableSet.of(),
-                SplitWeight.standard());
+                SplitWeight.standard(),
+                Optional.empty());
 
+        HiveTableHandle hiveTableHandle = new HiveTableHandle(SCHEMA_NAME, TABLE_NAME);
+        HiveTableLayoutHandle tableLayoutHandle = new HiveTableLayoutHandle.Builder()
+                .setSchemaTableName(new SchemaTableName(SCHEMA_NAME, TABLE_NAME))
+                .setTablePath("path")
+                .setPartitionColumns(ImmutableList.of(PARTITION_HIVE_COLUMN_HANDLE))
+                .setDataColumns(getColumnHandles().stream().map(column -> new Column(column.getName(), column.getHiveType(), Optional.empty(), Optional.empty())).collect(toImmutableList()))
+                .setTableParameters(ImmutableMap.of())
+                .setDomainPredicate(TupleDomain.all())
+                .setRemainingPredicate(TRUE_CONSTANT)
+                .setPredicateColumns(ImmutableMap.of())
+                .setPartitionColumnPredicate(TupleDomain.all())
+                .setBucketHandle(Optional.empty())
+                .setBucketFilter(Optional.empty())
+                .setPushdownFilterEnabled(false)
+                .setLayoutString("layout")
+                .setRequestedColumns(Optional.empty())
+                .setPartialAggregationsPushedDown(false)
+                .setAppendRowNumberEnabled(false)
+                .setPartitions(Optional.empty())
+                .setHiveTableHandle(hiveTableHandle)
+                .build();
         TableHandle tableHandle = new TableHandle(
                 new ConnectorId(HIVE_CATALOG),
-                new HiveTableHandle(SCHEMA_NAME, TABLE_NAME),
+                hiveTableHandle,
                 transaction,
-                Optional.of(new HiveTableLayoutHandle(
-                        new SchemaTableName(SCHEMA_NAME, TABLE_NAME),
-                        "path",
-                        ImmutableList.of(PARTITION_HIVE_COLUMN_HANDLE),
-                        getColumnHandles().stream()
-                                .map(column -> new Column(column.getName(), column.getHiveType(), Optional.empty(), Optional.empty()))
-                                .collect(toImmutableList()),
-                        ImmutableMap.of(),
-                        TupleDomain.all(),
-                        TRUE_CONSTANT,
-                        ImmutableMap.of(),
-                        TupleDomain.all(),
-                        Optional.empty(),
-                        Optional.empty(),
-                        false,
-                        "layout",
-                        Optional.empty(),
-                        false,
-                        false)));
-        HivePageSourceProvider provider = new HivePageSourceProvider(config, createTestHdfsEnvironment(config, metastoreClientConfig), getDefaultHiveRecordCursorProvider(config, metastoreClientConfig), getDefaultHiveBatchPageSourceFactories(config, metastoreClientConfig), getDefaultHiveSelectivePageSourceFactories(config, metastoreClientConfig), FUNCTION_AND_TYPE_MANAGER, ROW_EXPRESSION_SERVICE);
-        return provider.createPageSource(transaction, getSession(config), split, tableHandle.getLayout().get(), ImmutableList.copyOf(getColumnHandles()), splitContext);
+                Optional.of(tableLayoutHandle));
+        HivePageSourceProvider provider = new HivePageSourceProvider(
+                config, createTestHdfsEnvironment(config, metastoreClientConfig),
+                getDefaultHiveRecordCursorProvider(config, metastoreClientConfig),
+                getDefaultHiveBatchPageSourceFactories(config, metastoreClientConfig),
+                getDefaultHiveSelectivePageSourceFactories(config, metastoreClientConfig),
+                getDefaultHiveAggregatedPageSourceFactories(config, metastoreClientConfig),
+                FUNCTION_AND_TYPE_MANAGER,
+                ROW_EXPRESSION_SERVICE);
+        return provider.createPageSource(transaction, getSession(config), split, tableHandle.getLayout().get(), ImmutableList.copyOf(getColumnHandles()), splitContext, new RuntimeStats());
     }
 
     private static TupleDomain<ColumnHandle> getToSkipTupleDomain()

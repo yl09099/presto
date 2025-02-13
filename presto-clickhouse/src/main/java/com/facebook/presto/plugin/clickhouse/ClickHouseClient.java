@@ -17,6 +17,7 @@ import com.facebook.airlift.log.Logger;
 import com.facebook.presto.common.predicate.TupleDomain;
 import com.facebook.presto.common.type.CharType;
 import com.facebook.presto.common.type.DecimalType;
+import com.facebook.presto.common.type.TimestampType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.common.type.VarbinaryType;
 import com.facebook.presto.common.type.VarcharType;
@@ -192,7 +193,8 @@ public class ClickHouseClient
                 tableHandle.getTableName(),
                 layoutHandle.getTupleDomain(),
                 layoutHandle.getAdditionalPredicate(),
-                layoutHandle.getSimpleExpression());
+                layoutHandle.getSimpleExpression(),
+                layoutHandle.getClickhouseSQL());
         return new FixedSplitSource(ImmutableList.of(clickHouseSplit));
     }
 
@@ -255,7 +257,8 @@ public class ClickHouseClient
                 columnHandles,
                 split.getTupleDomain(),
                 split.getAdditionalPredicate(),
-                split.getSimpleExpression());
+                split.getSimpleExpression(),
+                split.getClickhouseSQL());
     }
 
     public String getIdentifierQuote()
@@ -852,10 +855,10 @@ public class ClickHouseClient
         if (type == BIGINT) {
             return "Int64";
         }
-        if (type == REAL) {
+        if (type.equals(REAL)) {
             return "Float32";
         }
-        if (type == DOUBLE) {
+        if (type.equals(DOUBLE)) {
             return "Float64";
         }
         if (type instanceof DecimalType) {
@@ -868,11 +871,13 @@ public class ClickHouseClient
             return "String";
         }
         if (type instanceof VarbinaryType) {
-            // Strings of arbitrary length.
             return "String";
         }
         if (type == DATE) {
             return "Date";
+        }
+        if (type instanceof TimestampType) {
+            return "DateTime64(3)";
         }
         throw new PrestoException(NOT_SUPPORTED, "Unsupported column type: " + type);
     }

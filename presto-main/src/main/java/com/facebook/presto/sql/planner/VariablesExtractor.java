@@ -37,8 +37,6 @@ import static com.facebook.presto.sql.planner.ExpressionExtractor.extractExpress
 import static com.facebook.presto.sql.planner.ExpressionExtractor.extractExpressionsNonRecursive;
 import static com.facebook.presto.sql.planner.iterative.Lookup.noLookup;
 import static com.facebook.presto.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.isExpression;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Objects.requireNonNull;
 
@@ -46,26 +44,26 @@ public final class VariablesExtractor
 {
     private VariablesExtractor() {}
 
-    public static Set<VariableReferenceExpression> extractUnique(PlanNode node, TypeProvider types)
+    public static Set<VariableReferenceExpression> extractUnique(PlanNode node)
     {
         ImmutableSet.Builder<VariableReferenceExpression> unique = ImmutableSet.builder();
-        extractExpressions(node).forEach(expression -> unique.addAll(extractUniqueVariableInternal(expression, types)));
+        extractExpressions(node).forEach(expression -> unique.addAll(extractUniqueVariableInternal(expression)));
 
         return unique.build();
     }
 
-    public static Set<VariableReferenceExpression> extractUniqueNonRecursive(PlanNode node, TypeProvider types)
+    public static Set<VariableReferenceExpression> extractUniqueNonRecursive(PlanNode node)
     {
         ImmutableSet.Builder<VariableReferenceExpression> uniqueVariables = ImmutableSet.builder();
-        extractExpressionsNonRecursive(node).forEach(expression -> uniqueVariables.addAll(extractUniqueVariableInternal(expression, types)));
+        extractExpressionsNonRecursive(node).forEach(expression -> uniqueVariables.addAll(extractUniqueVariableInternal(expression)));
 
         return uniqueVariables.build();
     }
 
-    public static Set<VariableReferenceExpression> extractUnique(PlanNode node, Lookup lookup, TypeProvider types)
+    public static Set<VariableReferenceExpression> extractUnique(PlanNode node, Lookup lookup)
     {
         ImmutableSet.Builder<VariableReferenceExpression> unique = ImmutableSet.builder();
-        extractExpressions(node, lookup).forEach(expression -> unique.addAll(extractUniqueVariableInternal(expression, types)));
+        extractExpressions(node, lookup).forEach(expression -> unique.addAll(extractUniqueVariableInternal(expression)));
         return unique.build();
     }
 
@@ -141,11 +139,8 @@ public final class VariablesExtractor
                 .collect(toImmutableSet());
     }
 
-    private static Set<VariableReferenceExpression> extractUniqueVariableInternal(RowExpression expression, TypeProvider types)
+    private static Set<VariableReferenceExpression> extractUniqueVariableInternal(RowExpression expression)
     {
-        if (isExpression(expression)) {
-            return extractUnique(castToExpression(expression), types);
-        }
         return extractUnique(expression);
     }
 

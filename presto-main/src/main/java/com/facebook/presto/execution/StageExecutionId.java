@@ -50,6 +50,7 @@ public class StageExecutionId
     public StageExecutionId(StageId stageId, int id)
     {
         this.stageId = requireNonNull(stageId, "stageId is null");
+        checkArgument(id >= 0, "id is negative: %s", id);
         this.id = id;
     }
 
@@ -89,6 +90,14 @@ public class StageExecutionId
     @JsonValue
     public String toString()
     {
-        return stageId + "." + id;
+        StringBuilder builder = new StringBuilder();
+        appendString(builder);
+        return builder.toString();
+    }
+
+    public void appendString(StringBuilder builder)
+    {
+        stageId.appendString(builder);
+        builder.append(".").append(id);
     }
 }

@@ -101,7 +101,7 @@ public class RewriteAggregationIfToFilter
     {
         this.functionAndTypeManager = requireNonNull(functionAndTypeManager, "functionManager is null");
         this.rowExpressionDeterminismEvaluator = new RowExpressionDeterminismEvaluator(functionAndTypeManager);
-        this.standardFunctionResolution = new FunctionResolution(functionAndTypeManager);
+        this.standardFunctionResolution = new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver());
     }
 
     @Override
@@ -231,7 +231,8 @@ public class RewriteAggregationIfToFilter
                         aggregationNode.getPreGroupedVariables(),
                         aggregationNode.getStep(),
                         aggregationNode.getHashVariable(),
-                        aggregationNode.getGroupIdVariable()));
+                        aggregationNode.getGroupIdVariable(),
+                        aggregationNode.getAggregationId()));
     }
 
     private boolean shouldRewriteAggregation(Aggregation aggregation, ProjectNode sourceProject)

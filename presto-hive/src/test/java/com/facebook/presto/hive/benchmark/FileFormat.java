@@ -26,6 +26,7 @@ import com.facebook.presto.hive.HiveColumnHandle;
 import com.facebook.presto.hive.HiveCompressionCodec;
 import com.facebook.presto.hive.HiveDwrfEncryptionProvider;
 import com.facebook.presto.hive.HiveFileContext;
+import com.facebook.presto.hive.HiveFileSplit;
 import com.facebook.presto.hive.HiveRecordCursorProvider;
 import com.facebook.presto.hive.HiveStorageFormat;
 import com.facebook.presto.hive.HiveType;
@@ -48,6 +49,7 @@ import com.facebook.presto.orc.StorageStripeMetadataSource;
 import com.facebook.presto.orc.StripeMetadataSourceFactory;
 import com.facebook.presto.orc.cache.StorageOrcFileTailSource;
 import com.facebook.presto.parquet.cache.MetadataReader;
+import com.facebook.presto.parquet.writer.ParquetSchemaConverter;
 import com.facebook.presto.parquet.writer.ParquetWriter;
 import com.facebook.presto.parquet.writer.ParquetWriterOptions;
 import com.facebook.presto.rcfile.AircompressorCodecFactory;
@@ -79,8 +81,8 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Properties;
 
+import static com.facebook.presto.hive.BaseHiveColumnHandle.ColumnType.REGULAR;
 import static com.facebook.presto.hive.CacheQuota.NO_CACHE_CONSTRAINTS;
-import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static com.facebook.presto.hive.HiveCompressionCodec.NONE;
 import static com.facebook.presto.hive.HiveStorageFormat.PAGEFILE;
 import static com.facebook.presto.hive.HiveTestUtils.FUNCTION_AND_TYPE_MANAGER;
@@ -159,7 +161,6 @@ public enum FileFormat
         {
             HiveBatchPageSourceFactory pageSourceFactory = new OrcBatchPageSourceFactory(
                     FUNCTION_AND_TYPE_MANAGER,
-                    FUNCTION_RESOLUTION,
                     false,
                     hdfsEnvironment,
                     new FileFormatDataSourceStats(),
@@ -250,12 +251,6 @@ public enum FileFormat
                 compressionCodec = NONE;
             }
             return new PrestoPageFormatWriter(targetFile, compressionCodec);
-        }
-
-        @Override
-        public boolean supportsDate()
-        {
-            return true;
         }
     },
 
@@ -432,21 +427,27 @@ public enum FileFormat
             columnHandles.add(new HiveColumnHandle(columnName, toHiveType(typeTranslator, columnType), columnType.getTypeSignature(), i, REGULAR, Optional.empty(), Optional.empty()));
         }
 
+        HiveFileSplit fileSplit = new HiveFileSplit(
+                targetFile.getAbsolutePath(),
+                0,
+                targetFile.length(),
+                targetFile.length(),
+                0,
+                Optional.empty(),
+                ImmutableMap.of(),
+                0);
+
         RecordCursor recordCursor = cursorProvider
                 .createRecordCursor(
                         conf,
                         session,
-                        new Path(targetFile.getAbsolutePath()),
-                        0,
-                        targetFile.length(),
-                        targetFile.length(),
+                        fileSplit,
                         createSchema(format, columnNames, columnTypes),
                         columnHandles,
                         TupleDomain.all(),
                         DateTimeZone.forID(session.getSqlFunctionProperties().getTimeZoneKey().getId()),
                         FUNCTION_AND_TYPE_MANAGER,
-                        false,
-                        ImmutableMap.of())
+                        false)
                 .get();
         return new RecordPageSource(columnTypes, recordCursor);
     }
@@ -470,14 +471,21 @@ public enum FileFormat
 
         SchemaTableName tableName = new SchemaTableName("hive", "testtable");
 
+        HiveFileSplit fileSplit = new HiveFileSplit(
+                targetFile.getAbsolutePath(),
+                0,
+                targetFile.length(),
+                targetFile.length(),
+                0,
+                Optional.empty(),
+                ImmutableMap.of(),
+                0);
+
         return pageSourceFactory
                 .createPageSource(
                         conf,
                         session,
-                        new Path(targetFile.getAbsolutePath()),
-                        0,
-                        targetFile.length(),
-                        targetFile.length(),
+                        fileSplit,
                         new Storage(
                                 StorageFormat.create(format.getSerDe(), format.getInputFormat(), format.getOutputFormat()),
                                 "location",
@@ -499,6 +507,7 @@ public enum FileFormat
                                 OptionalLong.of(targetFile.length()),
                                 modificationTime,
                                 false),
+                        Optional.empty(),
                         Optional.empty())
                 .get();
     }
@@ -678,8 +687,13 @@ public enum FileFormat
         public PrestoParquetFormatWriter(File targetFile, List<String> columnNames, List<Type> types, HiveCompressionCodec compressionCodec)
                 throws IOException
         {
+            ParquetSchemaConverter schemaConverter = new ParquetSchemaConverter(
+                    types,
+                    columnNames);
             writer = new ParquetWriter(
                     new FileOutputStream(targetFile),
+                    schemaConverter.getMessageType(),
+                    schemaConverter.getPrimitiveTypes(),
                     columnNames,
                     types,
                     ParquetWriterOptions.builder().build(),

@@ -11,16 +11,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package com.facebook.presto.sql.planner;
 
 import com.facebook.airlift.json.Codec;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.cost.StatsAndCosts;
-import com.facebook.presto.operator.StageExecutionDescriptor;
+import com.facebook.presto.spi.plan.PartitioningHandle;
+import com.facebook.presto.spi.plan.PartitioningScheme;
+import com.facebook.presto.spi.plan.PlanFragmentId;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeId;
+import com.facebook.presto.spi.plan.StageExecutionDescriptor;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.planner.plan.PlanFragmentId;
 import com.facebook.presto.sql.planner.plan.RemoteSourceNode;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -51,8 +54,10 @@ public class PlanFragment
     private final List<RemoteSourceNode> remoteSourceNodes;
     private final PartitioningScheme partitioningScheme;
     private final StageExecutionDescriptor stageExecutionDescriptor;
+
+    // Only true for output table writer and false for temporary table writers
     private final boolean outputTableWriterFragment;
-    private final StatsAndCosts statsAndCosts;
+    private final Optional<StatsAndCosts> statsAndCosts;
     private final Optional<String> jsonRepresentation;
 
     // This is ensured to be lazily populated on the first successful call to #toBytes
@@ -71,7 +76,7 @@ public class PlanFragment
             @JsonProperty("partitioningScheme") PartitioningScheme partitioningScheme,
             @JsonProperty("stageExecutionDescriptor") StageExecutionDescriptor stageExecutionDescriptor,
             @JsonProperty("outputTableWriterFragment") boolean outputTableWriterFragment,
-            @JsonProperty("statsAndCosts") StatsAndCosts statsAndCosts,
+            @JsonProperty("statsAndCosts") Optional<StatsAndCosts> statsAndCosts,
             @JsonProperty("jsonRepresentation") Optional<String> jsonRepresentation)
     {
         this.id = requireNonNull(id, "id is null");
@@ -147,7 +152,7 @@ public class PlanFragment
     }
 
     @JsonProperty
-    public StatsAndCosts getStatsAndCosts()
+    public Optional<StatsAndCosts> getStatsAndCosts()
     {
         return statsAndCosts;
     }
@@ -155,23 +160,38 @@ public class PlanFragment
     @JsonProperty
     public Optional<String> getJsonRepresentation()
     {
-        // @reviewer: I believe this should be a json raw value, but that would make this class have a different deserialization constructor.
-        // workers don't need this, so that should be OK, but it's worth thinking about.
         return jsonRepresentation;
     }
 
     // Serialize this plan fragment with the provided codec, caching the results
-    public synchronized byte[] toBytes(Codec<PlanFragment> codec)
+    // This should be used when serializing the fragment to send to worker nodes.
+    public synchronized byte[] bytesForTaskSerialization(Codec<PlanFragment> codec)
     {
         requireNonNull(codec, "codec is null");
         if (cachedSerialization != null) {
             verify(codec == lastUsedCodec, "Only one Codec may be used to serialize PlanFragments");
         }
         else {
-            cachedSerialization = codec.toBytes(this);
+            cachedSerialization = codec.toBytes(this.forTaskSerialization());
             lastUsedCodec = codec;
         }
         return cachedSerialization;
+    }
+
+    /**
+     * @return an equivalent plan fragment without estimated costs or the cached
+     * JSON representation
+     */
+    private PlanFragment forTaskSerialization()
+    {
+        return new PlanFragment(
+                id, root, variables, partitioning,
+                tableScanSchedulingOrder,
+                partitioningScheme,
+                stageExecutionDescriptor,
+                outputTableWriterFragment,
+                Optional.empty(),
+                Optional.empty());
     }
 
     public List<Type> getTypes()
@@ -273,6 +293,21 @@ public class PlanFragment
                 tableScanSchedulingOrder,
                 partitioningScheme,
                 StageExecutionDescriptor.recoverableGroupedExecution(capableTableScanNodes, totalLifespans),
+                outputTableWriterFragment,
+                statsAndCosts,
+                jsonRepresentation);
+    }
+
+    public PlanFragment withSubPlan(PlanNode subPlan)
+    {
+        return new PlanFragment(
+                id,
+                subPlan,
+                variables,
+                partitioning,
+                tableScanSchedulingOrder,
+                partitioningScheme,
+                stageExecutionDescriptor,
                 outputTableWriterFragment,
                 statsAndCosts,
                 jsonRepresentation);

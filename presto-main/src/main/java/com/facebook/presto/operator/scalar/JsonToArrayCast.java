@@ -95,7 +95,7 @@ public class JsonToArrayCast
             }
             BlockBuilder blockBuilder = arrayType.getElementType().createBlockBuilder(null, 20);
             while (jsonParser.nextToken() != JsonToken.END_ARRAY) {
-                elementAppender.append(jsonParser, blockBuilder);
+                elementAppender.append(jsonParser, blockBuilder, properties);
             }
             if (jsonParser.nextToken() != null) {
                 throw new JsonCastException(format("Unexpected trailing token: %s", jsonParser.getText()));
@@ -104,10 +104,10 @@ public class JsonToArrayCast
             return blockBuilder.build();
         }
         catch (PrestoException | JsonCastException e) {
-            throw new PrestoException(INVALID_CAST_ARGUMENT, format("Cannot cast to %s. %s\n%s", arrayType, e.getMessage(), truncateIfNecessaryForErrorMessage(json)), e);
+            throw new PrestoException(INVALID_CAST_ARGUMENT, format("Cannot cast to %s. %s%n%s", arrayType, e.getMessage(), truncateIfNecessaryForErrorMessage(json)), e);
         }
         catch (Exception e) {
-            throw new PrestoException(INVALID_CAST_ARGUMENT, format("Cannot cast to %s.\n%s", arrayType, truncateIfNecessaryForErrorMessage(json)), e);
+            throw new PrestoException(INVALID_CAST_ARGUMENT, format("Cannot cast to %s.%n%s", arrayType, truncateIfNecessaryForErrorMessage(json)), e);
         }
     }
 }

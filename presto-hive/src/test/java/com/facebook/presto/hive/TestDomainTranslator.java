@@ -34,6 +34,7 @@ import com.facebook.presto.spi.relation.ExpressionOptimizer;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.SpecialFormExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.spi.session.PropertyMetadata;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.facebook.presto.sql.relational.RowExpressionDomainTranslator;
 import com.facebook.presto.testing.TestingConnectorSession;
@@ -43,6 +44,7 @@ import io.airlift.slice.Slices;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -93,7 +95,7 @@ public class TestDomainTranslator
         }
 
         @Override
-        public Object optimize(RowExpression expression, Level level, ConnectorSession session, Function<VariableReferenceExpression, Object> variableResolver)
+        public RowExpression optimize(RowExpression expression, Level level, ConnectorSession session, Function<VariableReferenceExpression, Object> variableResolver)
         {
             throw new UnsupportedOperationException();
         }
@@ -108,15 +110,18 @@ public class TestDomainTranslator
     {
         metadata = createTestMetadataManager();
         domainTranslator = new RowExpressionDomainTranslator(metadata);
+        List<PropertyMetadata<?>> allSessionProperties = new ArrayList<>(new HiveSessionProperties(
+                new HiveClientConfig(),
+                new OrcFileWriterConfig(),
+                new ParquetFileWriterConfig(),
+                new CacheConfig()).getSessionProperties());
+        allSessionProperties.addAll(new HiveCommonSessionProperties(
+                new HiveCommonClientConfig().setRangeFiltersOnSubscriptsEnabled(true)).getSessionProperties());
+
         columnExtractor = new SubfieldExtractor(
-                new FunctionResolution(metadata.getFunctionAndTypeManager()),
+                new FunctionResolution(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver()),
                 TEST_EXPRESSION_OPTIMIZER,
-                new TestingConnectorSession(
-                        new HiveSessionProperties(
-                                new HiveClientConfig().setRangeFiltersOnSubscriptsEnabled(true),
-                                new OrcFileWriterConfig(),
-                                new ParquetFileWriterConfig(),
-                                new CacheConfig()).getSessionProperties())).toColumnExtractor();
+                new TestingConnectorSession(allSessionProperties)).toColumnExtractor();
     }
 
     @Test
@@ -173,7 +178,7 @@ public class TestDomainTranslator
 
     private RowExpression not(RowExpression expression)
     {
-        return call("not", new FunctionResolution(metadata.getFunctionAndTypeManager()).notFunction(), BOOLEAN, expression);
+        return call("not", new FunctionResolution(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver()).notFunction(), BOOLEAN, expression);
     }
 
     private RowExpression arraySubscript(RowExpression arrayExpression, int index)

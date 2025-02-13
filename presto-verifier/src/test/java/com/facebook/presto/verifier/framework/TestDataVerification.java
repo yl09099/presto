@@ -18,8 +18,8 @@ import com.facebook.presto.verifier.event.QueryInfo;
 import com.facebook.presto.verifier.event.VerifierQueryEvent;
 import com.facebook.presto.verifier.event.VerifierQueryEvent.EventStatus;
 import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.util.List;
@@ -52,21 +52,9 @@ import static org.testng.Assert.assertTrue;
 public class TestDataVerification
         extends AbstractVerificationTest
 {
-    private static VerificationSettings concurrentControlAndTestSettings;
-    private static VerificationSettings skipControlSettings;
-
     public TestDataVerification()
             throws Exception
     {
-    }
-
-    @BeforeClass
-    public static void beforeClass()
-    {
-        concurrentControlAndTestSettings = new VerificationSettings();
-        concurrentControlAndTestSettings.concurrentControlAndTest = Optional.of(true);
-        skipControlSettings = new VerificationSettings();
-        skipControlSettings.skipControl = Optional.of(true);
     }
 
     @Test
@@ -192,6 +180,26 @@ public class TestDataVerification
     }
 
     @Test
+    public void testInvalidFunctionCallSubstitutes()
+    {
+        VerificationSettings settings = new VerificationSettings();
+        settings.functionSubstitutes = Optional.of("/ARRAY_AGG(c)/MIN(c)/");
+        String sourceQuery = "SELECT ARRAY_AGG(c)[1] FROM (VALUES (10), (100)) AS t(c)";
+
+        Optional<VerifierQueryEvent> event = runVerification(sourceQuery, sourceQuery, settings);
+        assertTrue(event.isPresent());
+        assertEquals(event.get().getSkippedReason(), FAILED_BEFORE_CONTROL_QUERY.name());
+        assertEvent(
+                event.get(),
+                SKIPPED,
+                Optional.empty(),
+                Optional.of("PRESTO(SYNTAX_ERROR)"),
+                Optional.of("Test state NOT_RUN, Control state NOT_RUN.\n\n" +
+                        "REWRITE query failed on CONTROL cluster:\n.*" +
+                        "com.facebook.presto.sql.analyzer.SemanticException.*"));
+    }
+
+    @Test
     public void testControlFailed()
     {
         Optional<VerifierQueryEvent> event = runVerification("INSERT INTO dest SELECT * FROM test", "SELECT 1");
@@ -204,6 +212,29 @@ public class TestDataVerification
                 Optional.of("PRESTO(SYNTAX_ERROR)"),
                 Optional.of("Test state NOT_RUN, Control state FAILED_TO_SETUP.\n\n" +
                         "CONTROL SETUP query failed on CONTROL cluster:\n.*"));
+    }
+
+    @Test
+    public void testReuseTable()
+    {
+        getQueryRunner().execute("CREATE TABLE test_reuse_table (test_column INT)");
+        String testQuery = "INSERT INTO test_reuse_table SELECT 1";
+        getQueryRunner().execute(testQuery);
+        String testQueryId = "test_query_id";
+
+        getQueryRunner().execute("CREATE TABLE control_reuse_table (test_column INT)");
+        String controlQuery = "INSERT INTO control_reuse_table SELECT 1";
+        getQueryRunner().execute(controlQuery);
+        String controlQueryId = "control_query_id";
+
+        Optional<VerifierQueryEvent> event = runVerification(testQuery, controlQuery, controlQueryId, testQueryId,
+                new QueryConfiguration(CATALOG, SCHEMA, Optional.of("user"), Optional.empty(),
+                        Optional.empty(), true, Optional.of(ImmutableList.of("test_column=1"))),
+                new QueryConfiguration(CATALOG, SCHEMA, Optional.of("user"), Optional.empty(),
+                        Optional.empty(), true, Optional.empty()), reuseTableSettings);
+        assertTrue(event.get().getControlQueryInfo().getIsReuseTable());
+        assertFalse(event.get().getTestQueryInfo().getIsReuseTable());
+        assertEvent(event.get(), SUCCEEDED, Optional.empty(), Optional.empty(), Optional.empty());
     }
 
     @Test
@@ -350,11 +381,24 @@ public class TestDataVerification
     @Test
     public void testExecutionTimeSessionProperty()
     {
-        QueryConfiguration configuration = new QueryConfiguration(CATALOG, SCHEMA, Optional.of("user"), Optional.empty(), Optional.of(ImmutableMap.of(QUERY_MAX_EXECUTION_TIME, "20m")));
-        SourceQuery sourceQuery = new SourceQuery(SUITE, NAME, "SELECT 1.0", "SELECT 1.00001", configuration, configuration);
+        QueryConfiguration configuration = new QueryConfiguration(CATALOG, SCHEMA, Optional.of("user"), Optional.empty(), Optional.of(ImmutableMap.of(QUERY_MAX_EXECUTION_TIME,
+                "20m")), Optional.empty(), Optional.empty());
+        SourceQuery sourceQuery = new SourceQuery(SUITE, NAME, "SELECT 1.0", "SELECT 1.00001", Optional.empty(), Optional.empty(), configuration, configuration);
         Optional<VerifierQueryEvent> event = verify(sourceQuery, false);
         assertTrue(event.isPresent());
         assertEvent(event.get(), SUCCEEDED, Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
+    @Test
+    public void testRunningInQueryBankMode()
+    {
+        Optional<VerifierQueryEvent> event = runVerification("SELECT ARRAY[ROW(1, 'a'), ROW(2, 'b')]", "SELECT ARRAY[ROW(1, 'a'), ROW(2, 'b')]", saveSnapshotSettings);
+        assertTrue(event.isPresent());
+        assertEvent(event.get(), SUCCEEDED, Optional.empty(), Optional.empty(), Optional.empty(), false);
+
+        event = runVerification("SELECT ARRAY[ROW(1, 'a'), ROW(2, 'b')]", "SELECT ARRAY[ROW(1, 'a'), ROW(2, 'b')]", queryBankModeSettings);
+        assertTrue(event.isPresent());
+        assertEvent(event.get(), SUCCEEDED, Optional.empty(), Optional.empty(), Optional.empty(), false);
     }
 
     private void assertEvent(
@@ -418,16 +462,28 @@ public class TestDataVerification
         assertNotNull(queryInfo.getSessionProperties());
         assertNotNull(queryInfo.getSetupQueries());
         assertNotNull(queryInfo.getTeardownQueries());
-        assertEquals(queryInfo.getTeardownQueries().size(), 1);
 
         assertNotNull(queryInfo.getQueryId());
         assertNotNull(queryInfo.getSetupQueryIds());
         assertNotNull(queryInfo.getTeardownQueryIds());
-        assertEquals(queryInfo.getTeardownQueryIds().size(), 1);
+        if (queryInfo.getIsReuseTable()) {
+            assertEquals(queryInfo.getTeardownQueries().size(), 0);
+            assertEquals(queryInfo.getTeardownQueryIds().size(), 0);
+        }
+        else {
+            assertEquals(queryInfo.getTeardownQueries().size(), 1);
+            assertEquals(queryInfo.getTeardownQueryIds().size(), 1);
+        }
 
         if (queryType == QueryType.INSERT) {
-            assertEquals(queryInfo.getSetupQueries().size(), 1);
-            assertEquals(queryInfo.getSetupQueryIds().size(), 1);
+            if (queryInfo.getIsReuseTable()) {
+                assertEquals(queryInfo.getSetupQueries().size(), 0);
+                assertEquals(queryInfo.getSetupQueryIds().size(), 0);
+            }
+            else {
+                assertEquals(queryInfo.getSetupQueries().size(), 1);
+                assertEquals(queryInfo.getSetupQueryIds().size(), 1);
+            }
         }
 
         assertNotNull(queryInfo.getOutputTableName());

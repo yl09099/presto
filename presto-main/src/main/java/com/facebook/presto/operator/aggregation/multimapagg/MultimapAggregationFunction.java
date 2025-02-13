@@ -91,7 +91,7 @@ public class MultimapAggregationFunction
         DynamicClassLoader classLoader = new DynamicClassLoader(MultimapAggregationFunction.class.getClassLoader());
         List<Type> inputTypes = ImmutableList.of(keyType, valueType);
         MultimapAggregationStateSerializer stateSerializer = new MultimapAggregationStateSerializer(keyType, valueType);
-        Type intermediateType = stateSerializer.getSerializedType();
+        Type intermediateType = overrideIntermediateType(outputType, stateSerializer.getSerializedType());
 
         AggregationMetadata metadata = new AggregationMetadata(
                 generateAggregationName(NAME, outputType.getTypeSignature(), inputTypes.stream().map(Type::getTypeSignature).collect(toImmutableList())),
@@ -149,8 +149,7 @@ public class MultimapAggregationFunction
 
             state.forEach((key, value, keyValueIndex) -> {
                 // Merge values of the same key into an array
-                if (!keySet.contains(key, keyValueIndex)) {
-                    keySet.add(key, keyValueIndex);
+                if (keySet.add(key, keyValueIndex)) {
                     keyType.appendTo(key, keyValueIndex, distinctKeyBlockBuilder);
                     BlockBuilder valueArrayBuilder = valueType.createBlockBuilder(null, 10, expectedValueSize(valueType, EXPECTED_ENTRY_SIZE));
                     valueArrayBlockBuilders.set(keySet.positionOf(key, keyValueIndex), valueArrayBuilder);
@@ -167,5 +166,10 @@ public class MultimapAggregationFunction
             }
             out.closeEntry();
         }
+    }
+
+    protected Type overrideIntermediateType(Type outputType, Type defaultIntermediateType)
+    {
+        return defaultIntermediateType;
     }
 }

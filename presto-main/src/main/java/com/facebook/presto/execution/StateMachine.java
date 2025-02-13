@@ -181,7 +181,7 @@ public class StateMachine<T>
                 return false;
             }
 
-            // change to same state is not a change, and does not notify the notify listeners
+            // change to same state is not a change, and does not notify the listeners
             if (state.equals(newState)) {
                 return false;
             }
@@ -281,6 +281,11 @@ public class StateMachine<T>
     boolean isTerminalState(T state)
     {
         return terminalStates.contains(state);
+    }
+
+    public void clearEventListeners()
+    {
+        stateChangeListeners.clear();
     }
 
     @VisibleForTesting

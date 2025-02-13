@@ -177,8 +177,8 @@ MAP Encoding
 
 * Keys column
 * Values column
-* Hash table size - 4 bytes
-* [optional] Hash table
+* Hash table size (number of 4-byte chunks in the Hash table) - 4 bytes
+* [optional] Hash table: <Hash table size> * <4 bytes>
 * Number of rows - 4 bytes
 * Offsets - (number of rows + 1) * 4 bytes; 4 bytes per offset
 * Null flags
@@ -211,6 +211,20 @@ from the null flags.
 
 .. image:: serialized-page-row-column.png
   :width: 600
+
+DICTIONARY Encoding
+-------------------
+
+* Number of rows - 4 bytes
+* Dictionary values column. This column itself is a serialized block whose encoding can be any of the encodings mentioned in this document.
+* Indices - number of rows * 4 bytes; 4 bytes per index
+* Dictionary ID - 24 bytes
+
+RLE Encoding
+------------
+
+* Number of rows - 4 bytes
+* Single-row constant value column
 
 Additional Usage
 ----------------

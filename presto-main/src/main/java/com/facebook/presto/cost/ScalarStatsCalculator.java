@@ -23,6 +23,7 @@ import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.function.FunctionMetadata;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.ConstantExpression;
+import com.facebook.presto.spi.relation.ExpressionOptimizerProvider;
 import com.facebook.presto.spi.relation.InputReferenceExpression;
 import com.facebook.presto.spi.relation.LambdaDefinitionExpression;
 import com.facebook.presto.spi.relation.RowExpression;
@@ -31,11 +32,11 @@ import com.facebook.presto.spi.relation.SpecialFormExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.analyzer.ExpressionAnalyzer;
 import com.facebook.presto.sql.analyzer.Scope;
+import com.facebook.presto.sql.expressions.ExpressionOptimizerManager;
 import com.facebook.presto.sql.planner.ExpressionInterpreter;
 import com.facebook.presto.sql.planner.NoOpVariableResolver;
 import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.relational.FunctionResolution;
-import com.facebook.presto.sql.relational.RowExpressionOptimizer;
 import com.facebook.presto.sql.tree.ArithmeticBinaryExpression;
 import com.facebook.presto.sql.tree.ArithmeticUnaryExpression;
 import com.facebook.presto.sql.tree.AstVisitor;
@@ -78,11 +79,18 @@ import static java.util.Objects.requireNonNull;
 public class ScalarStatsCalculator
 {
     private final Metadata metadata;
+    private final ExpressionOptimizerProvider expressionOptimizerProvider;
 
     @Inject
-    public ScalarStatsCalculator(Metadata metadata)
+    public ScalarStatsCalculator(Metadata metadata, ExpressionOptimizerManager expressionOptimizerManager)
+    {
+        this(metadata, (ExpressionOptimizerProvider) expressionOptimizerManager);
+    }
+
+    public ScalarStatsCalculator(Metadata metadata, ExpressionOptimizerProvider expressionOptimizerProvider)
     {
         this.metadata = requireNonNull(metadata, "metadata can not be null");
+        this.expressionOptimizerProvider = requireNonNull(expressionOptimizerProvider, "expressionOptimizerManager can not be null");
     }
 
     @Deprecated
@@ -106,7 +114,7 @@ public class ScalarStatsCalculator
     {
         private final PlanNodeStatsEstimate input;
         private final ConnectorSession session;
-        private final FunctionResolution resolution = new FunctionResolution(metadata.getFunctionAndTypeManager());
+        private final FunctionResolution resolution = new FunctionResolution(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver());
 
         public RowExpressionStatsVisitor(PlanNodeStatsEstimate input, ConnectorSession session)
         {
@@ -126,7 +134,7 @@ public class ScalarStatsCalculator
                 return computeArithmeticBinaryStatistics(call, context);
             }
 
-            RowExpression value = new RowExpressionOptimizer(metadata).optimize(call, OPTIMIZED, session);
+            RowExpression value = expressionOptimizerProvider.getExpressionOptimizer(session).optimize(call, OPTIMIZED, session);
 
             if (isNull(value)) {
                 return nullStatsEstimate();
@@ -243,7 +251,7 @@ public class ScalarStatsCalculator
                         .setHighValue(-stats.getLowValue())
                         .build();
             }
-            throw new IllegalStateException(format("Unexpected sign: %s(%s)" + call.getDisplayName(), call.getFunctionHandle()));
+            throw new IllegalStateException(format("Unexpected sign: %s(%s)", call.getDisplayName(), call.getFunctionHandle()));
         }
 
         private VariableStatsEstimate computeArithmeticBinaryStatistics(CallExpression call, Void context)
@@ -356,7 +364,7 @@ public class ScalarStatsCalculator
         protected VariableStatsEstimate visitLiteral(Literal node, Void context)
         {
             Object value = evaluate(metadata, session.toConnectorSession(), node);
-            Type type = ExpressionAnalyzer.createConstantAnalyzer(metadata, session, ImmutableMap.of(), WarningCollector.NOOP).analyze(node, Scope.create());
+            Type type = ExpressionAnalyzer.createConstantAnalyzer(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver(), session, ImmutableMap.of(), WarningCollector.NOOP).analyze(node, Scope.create());
             OptionalDouble doubleValue = toStatsRepresentation(metadata, session, type, value);
             VariableStatsEstimate.Builder estimate = VariableStatsEstimate.builder()
                     .setNullsFraction(0)
@@ -395,11 +403,11 @@ public class ScalarStatsCalculator
         private Map<NodeRef<Expression>, Type> getExpressionTypes(Session session, Expression expression, TypeProvider types)
         {
             ExpressionAnalyzer expressionAnalyzer = ExpressionAnalyzer.createWithoutSubqueries(
-                    metadata.getFunctionAndTypeManager(),
+                    metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver(),
                     session,
                     types,
                     emptyMap(),
-                    node -> new IllegalStateException("Unexpected node: %s" + node),
+                    node -> new IllegalStateException("Unexpected node: " + node),
                     WarningCollector.NOOP,
                     false);
             expressionAnalyzer.analyze(expression, Scope.create());

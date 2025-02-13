@@ -13,14 +13,15 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
+import com.facebook.presto.common.block.SortOrder;
 import com.facebook.presto.spi.function.FunctionHandle;
+import com.facebook.presto.spi.plan.Ordering;
+import com.facebook.presto.spi.plan.OrderingScheme;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.assertions.ExpectedValueProvider;
 import com.facebook.presto.sql.planner.iterative.rule.test.BaseRuleTest;
-import com.facebook.presto.sql.planner.plan.WindowNode;
-import com.facebook.presto.sql.tree.SymbolReference;
-import com.facebook.presto.sql.tree.Window;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.testng.annotations.Test;
@@ -32,14 +33,16 @@ import java.util.stream.Collectors;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.DoubleType.DOUBLE;
 import static com.facebook.presto.metadata.MetadataManager.createTestMetadataManager;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.BoundType.CURRENT_ROW;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.BoundType.PRECEDING;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.BoundType.UNBOUNDED_PRECEDING;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.WindowType.RANGE;
+import static com.facebook.presto.spi.plan.WindowNode.Frame.WindowType.ROWS;
 import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.functionCall;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.specification;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.values;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.window;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.BoundType.CURRENT_ROW;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.BoundType.UNBOUNDED_PRECEDING;
-import static com.facebook.presto.sql.planner.plan.WindowNode.Frame.WindowType.RANGE;
 import static com.facebook.presto.sql.relational.Expressions.call;
 
 public class TestSwapAdjacentWindowsBySpecifications
@@ -54,7 +57,9 @@ public class TestSwapAdjacentWindowsBySpecifications
                 RANGE,
                 UNBOUNDED_PRECEDING,
                 Optional.empty(),
+                Optional.empty(),
                 CURRENT_ROW,
+                Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
@@ -92,9 +97,6 @@ public class TestSwapAdjacentWindowsBySpecifications
         ExpectedValueProvider<WindowNode.Specification> specificationA = specification(ImmutableList.of(columnAAlias), ImmutableList.of(), ImmutableMap.of());
         ExpectedValueProvider<WindowNode.Specification> specificationAB = specification(ImmutableList.of(columnAAlias, columnBAlias), ImmutableList.of(), ImmutableMap.of());
 
-        Optional<Window> windowAB = Optional.of(new Window(ImmutableList.of(new SymbolReference("a"), new SymbolReference("b")), Optional.empty(), Optional.empty()));
-        Optional<Window> windowA = Optional.of(new Window(ImmutableList.of(new SymbolReference("a")), Optional.empty(), Optional.empty()));
-
         tester().assertThat(new GatherAndMergeWindows.SwapAdjacentWindowsBySpecifications(0))
                 .on(p ->
                         p.window(new WindowNode.Specification(
@@ -119,8 +121,6 @@ public class TestSwapAdjacentWindowsBySpecifications
     @Test
     public void dependentWindowsAreNotReordered()
     {
-        Optional<Window> windowA = Optional.of(new Window(ImmutableList.of(new SymbolReference("a")), Optional.empty(), Optional.empty()));
-
         tester().assertThat(new GatherAndMergeWindows.SwapAdjacentWindowsBySpecifications(0))
                 .on(p ->
                         p.window(new WindowNode.Specification(
@@ -132,6 +132,96 @@ public class TestSwapAdjacentWindowsBySpecifications
                                                 Optional.empty()),
                                         ImmutableMap.of(p.variable("avg_2"), newWindowNodeFunction(ImmutableList.of(new Symbol("a")))),
                                         p.values(p.variable("a"), p.variable("b")))))
+                .doesNotFire();
+    }
+
+    @Test
+    public void dependentWindowsAreNotReorderedWithOffset()
+    {
+        FunctionHandle rankFunction = createTestMetadataManager().getFunctionAndTypeManager().lookupFunction("rank", ImmutableList.of());
+        WindowNode.Function windowFunction = new WindowNode.Function(
+                call(
+                        "rank",
+                        rankFunction,
+                        BIGINT,
+                        ImmutableList.of()),
+                frame,
+                false);
+        WindowNode.Frame frameWithRowOffset = new WindowNode.Frame(
+                ROWS,
+                PRECEDING,
+                Optional.of(new VariableReferenceExpression(Optional.empty(), "startValue", BIGINT)),
+                Optional.empty(),
+                CURRENT_ROW,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of("startValue"),
+                Optional.empty());
+        WindowNode.Function functionWithOffset = new WindowNode.Function(
+                call(
+                        "avg",
+                        functionHandle,
+                        BIGINT,
+                        ImmutableList.of(new VariableReferenceExpression(Optional.empty(), "a", BIGINT))),
+                frameWithRowOffset,
+                false);
+
+        tester().assertThat(new GatherAndMergeWindows.SwapAdjacentWindowsBySpecifications(0))
+                .on(p ->
+                        p.window(new WindowNode.Specification(
+                                        ImmutableList.of(p.variable("a")),
+                                        Optional.of(new OrderingScheme(ImmutableList.of(new Ordering(p.variable("sortkey", BIGINT), SortOrder.ASC_NULLS_FIRST))))),
+                                ImmutableMap.of(p.variable("avg_1"), functionWithOffset),
+                                p.window(new WindowNode.Specification(
+                                                ImmutableList.of(p.variable("a"), p.variable("b")),
+                                                Optional.of(new OrderingScheme(ImmutableList.of(new Ordering(p.variable("sortkey", BIGINT), SortOrder.ASC_NULLS_FIRST))))),
+                                        ImmutableMap.of(p.variable("startValue"), windowFunction),
+                                        p.values(p.variable("a"), p.variable("b"), p.variable("sortkey")))))
+                .doesNotFire();
+    }
+
+    @Test
+    public void dependentWindowsWithRangeAreNotReordered()
+    {
+        FunctionHandle rankFunction = createTestMetadataManager().getFunctionAndTypeManager().lookupFunction("rank", ImmutableList.of());
+        WindowNode.Function windowFunction = new WindowNode.Function(
+                call(
+                        "rank",
+                        rankFunction,
+                        BIGINT,
+                        ImmutableList.of()),
+                frame,
+                false);
+        WindowNode.Frame frameWithRowOffset = new WindowNode.Frame(
+                RANGE,
+                PRECEDING,
+                Optional.of(new VariableReferenceExpression(Optional.empty(), "startValue", BIGINT)),
+                Optional.of(new VariableReferenceExpression(Optional.empty(), "sortKeyCoercedForFrameStartComparison", BIGINT)),
+                CURRENT_ROW,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of("startValue"),
+                Optional.empty());
+        WindowNode.Function functionWithOffset = new WindowNode.Function(
+                call(
+                        "avg",
+                        functionHandle,
+                        BIGINT,
+                        ImmutableList.of(new VariableReferenceExpression(Optional.empty(), "a", BIGINT))),
+                frameWithRowOffset,
+                false);
+
+        tester().assertThat(new GatherAndMergeWindows.SwapAdjacentWindowsBySpecifications(0))
+                .on(p ->
+                        p.window(new WindowNode.Specification(
+                                        ImmutableList.of(p.variable("a")),
+                                        Optional.of(new OrderingScheme(ImmutableList.of(new Ordering(p.variable("sortkey", BIGINT), SortOrder.ASC_NULLS_FIRST))))),
+                                ImmutableMap.of(p.variable("avg_1"), functionWithOffset),
+                                p.window(new WindowNode.Specification(
+                                                ImmutableList.of(p.variable("a"), p.variable("b")),
+                                                Optional.of(new OrderingScheme(ImmutableList.of(new Ordering(p.variable("sortkey", BIGINT), SortOrder.ASC_NULLS_FIRST))))),
+                                        ImmutableMap.of(p.variable("startValue"), windowFunction),
+                                        p.values(p.variable("a"), p.variable("b"), p.variable("sortkey")))))
                 .doesNotFire();
     }
 

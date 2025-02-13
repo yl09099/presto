@@ -26,27 +26,18 @@ import com.facebook.presto.spi.plan.AggregationNode.Aggregation;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.ProjectNode;
 import com.facebook.presto.spi.plan.UnionNode;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.SimplePlanVisitor;
-import com.facebook.presto.sql.planner.TypeProvider;
-import com.facebook.presto.sql.planner.plan.WindowNode;
-import com.facebook.presto.sql.tree.Expression;
-import com.facebook.presto.sql.tree.NodeRef;
-import com.facebook.presto.sql.tree.SymbolReference;
 
 import java.util.List;
 import java.util.Map;
 
 import static com.facebook.presto.common.type.UnknownType.UNKNOWN;
-import static com.facebook.presto.sql.analyzer.ExpressionAnalyzer.getExpressionTypes;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.isExpression;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static java.util.Collections.emptyMap;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -58,27 +49,19 @@ public final class TypeValidator
     public TypeValidator() {}
 
     @Override
-    public void validate(PlanNode plan, Session session, Metadata metadata, SqlParser sqlParser, TypeProvider types, WarningCollector warningCollector)
+    public void validate(PlanNode plan, Session session, Metadata metadata, WarningCollector warningCollector)
     {
-        plan.accept(new Visitor(session, metadata, sqlParser, types, warningCollector), null);
+        plan.accept(new Visitor(metadata), null);
     }
 
     private static class Visitor
             extends SimplePlanVisitor<Void>
     {
-        private final Session session;
         private final Metadata metadata;
-        private final SqlParser sqlParser;
-        private final TypeProvider types;
-        private final WarningCollector warningCollector;
 
-        public Visitor(Session session, Metadata metadata, SqlParser sqlParser, TypeProvider types, WarningCollector warningCollector)
+        public Visitor(Metadata metadata)
         {
-            this.session = requireNonNull(session, "session is null");
             this.metadata = requireNonNull(metadata, "metadata is null");
-            this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
-            this.types = requireNonNull(types, "types is null");
-            this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
         }
 
         @Override
@@ -124,20 +107,8 @@ public final class TypeValidator
 
             for (Map.Entry<VariableReferenceExpression, RowExpression> entry : node.getAssignments().entrySet()) {
                 RowExpression expression = entry.getValue();
-                if (isExpression(expression)) {
-                    if (castToExpression(expression) instanceof SymbolReference) {
-                        SymbolReference symbolReference = (SymbolReference) castToExpression(expression);
-                        verifyTypeSignature(entry.getKey(), types.get(symbolReference).getTypeSignature());
-                        continue;
-                    }
-                    Map<NodeRef<Expression>, Type> expressionTypes = getExpressionTypes(session, metadata, sqlParser, types, castToExpression(expression), emptyMap(), warningCollector);
-                    Type actualType = expressionTypes.get(NodeRef.of(castToExpression(expression)));
-                    verifyTypeSignature(entry.getKey(), actualType.getTypeSignature());
-                }
-                else {
-                    Type actualType = expression.getType();
-                    verifyTypeSignature(entry.getKey(), actualType.getTypeSignature());
-                }
+                Type actualType = expression.getType();
+                verifyTypeSignature(entry.getKey(), actualType.getTypeSignature());
             }
 
             return null;
@@ -198,10 +169,8 @@ public final class TypeValidator
                 int expectedArgumentSize = functionMetadata.getArgumentTypes().size();
                 checkArgument(argumentSize == expectedArgumentSize,
                         "Number of arguments is different from function signature: expected %s but got %s", expectedArgumentSize, argumentSize);
-                List<TypeSignature> argumentTypes = aggregation.getArguments()
-                        .stream()
-                        .map(argument -> isExpression(argument) ?
-                                UNKNOWN.getTypeSignature() : argument.getType().getTypeSignature())
+                List<TypeSignature> argumentTypes = aggregation.getArguments().stream()
+                        .map(argument -> argument.getType().getTypeSignature())
                         .collect(toImmutableList());
                 for (int i = 0; i < functionMetadata.getArgumentTypes().size(); i++) {
                     TypeSignature expected = functionMetadata.getArgumentTypes().get(i);

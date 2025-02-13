@@ -15,7 +15,9 @@ package com.facebook.presto.dispatcher;
 
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.Session;
+import com.facebook.presto.common.ErrorCode;
 import com.facebook.presto.event.QueryMonitor;
+import com.facebook.presto.eventlistener.EventListenerManager;
 import com.facebook.presto.execution.ClusterSizeMonitor;
 import com.facebook.presto.execution.ExecutionFailureInfo;
 import com.facebook.presto.execution.QueryExecution;
@@ -23,13 +25,13 @@ import com.facebook.presto.execution.QueryState;
 import com.facebook.presto.execution.QueryStateMachine;
 import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.server.BasicQueryInfo;
-import com.facebook.presto.spi.ErrorCode;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.prerequisites.QueryPrerequisites;
 import com.facebook.presto.spi.prerequisites.QueryPrerequisitesContext;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupQueryLimits;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.units.DataSize;
@@ -77,6 +79,19 @@ public class LocalDispatchQuery
     private final QueryPrerequisites queryPrerequisites;
     private final WarningCollector warningCollector;
 
+    /**
+     * Local dispatch query encapsulates QueryExecution and submit to the ResourceGroupManager waiting for resource to get executed.
+     *
+     * @param stateMachine the state machine to keep track of the state of the query
+     * @param queryMonitor the query monitor records information to the {@link EventListenerManager}
+     * @param queryExecutionFuture the query execution future
+     * @param clusterSizeMonitor the cluster size monitor provides a method to obtain a listener object when the minimum number of workers for the cluster has been met
+     * @param queryExecutor the query executor is used to start a future for query to get executed. This will trigger the query execution phase by involving {@code querySubmitter}
+     * @param queryQueuer the query queuer is used to register the query that is being queued while waiting for query prerequisites being returned
+     * @param querySubmitter the query submitter takes in query execution object. This will trigger query to start executed with {@link com.facebook.presto.execution.SqlQueryManager}
+     * @param retry if this is a retry query
+     * @param queryPrerequisites the query prerequisites are conditions when the query is ready to be queued for execution
+     */
     public LocalDispatchQuery(
             QueryStateMachine stateMachine,
             QueryMonitor queryMonitor,
@@ -171,21 +186,22 @@ public class LocalDispatchQuery
     public void startWaitingForResources()
     {
         if (stateMachine.transitionToWaitingForResources()) {
-            waitForMinimumWorkers();
+            waitForMinimumCoordinatorSidecarsAndWorkers();
         }
     }
 
-    private void waitForMinimumWorkers()
+    private void waitForMinimumCoordinatorSidecarsAndWorkers()
     {
-        ListenableFuture<?> minimumWorkerFuture = clusterSizeMonitor.waitForMinimumWorkers();
-        // when worker requirement is met, wait for query execution to finish construction and then start the execution
-        addSuccessCallback(minimumWorkerFuture, () -> {
+        ListenableFuture<?> minimumResourcesFuture = Futures.allAsList(
+                clusterSizeMonitor.waitForMinimumCoordinatorSidecars(),
+                clusterSizeMonitor.waitForMinimumWorkers());
+        // when worker and sidecar requirement is met, wait for query execution to finish construction and then start the execution
+        addSuccessCallback(minimumResourcesFuture, () -> {
             // It's the time to end waiting for resources
             boolean isDispatching = stateMachine.transitionToDispatching();
             addSuccessCallback(queryExecutionFuture, queryExecution -> startExecution(queryExecution, isDispatching));
         });
-
-        addExceptionCallback(minimumWorkerFuture, throwable -> queryExecutor.execute(() -> fail(throwable)));
+        addExceptionCallback(minimumResourcesFuture, throwable -> queryExecutor.execute(() -> fail(throwable)));
     }
 
     private void startExecution(QueryExecution queryExecution, boolean isDispatching)
@@ -283,7 +299,7 @@ public class LocalDispatchQuery
     {
         return tryGetQueryExecution()
                 .map(QueryExecution::getTotalCpuTime)
-                .orElse(new Duration(0, MILLISECONDS));
+                .orElseGet(() -> new Duration(0, MILLISECONDS));
     }
 
     @Override
@@ -291,7 +307,7 @@ public class LocalDispatchQuery
     {
         return tryGetQueryExecution()
                 .map(QueryExecution::getTotalMemoryReservation)
-                .orElse(new DataSize(0, BYTE));
+                .orElseGet(() -> new DataSize(0, BYTE));
     }
 
     @Override
@@ -299,7 +315,12 @@ public class LocalDispatchQuery
     {
         return tryGetQueryExecution()
                 .map(QueryExecution::getUserMemoryReservation)
-                .orElse(new DataSize(0, BYTE));
+                .orElseGet(() -> new DataSize(0, BYTE));
+    }
+
+    public int getRunningTaskCount()
+    {
+        return stateMachine.getCurrentRunningTaskCount();
     }
 
     @Override
@@ -307,7 +328,7 @@ public class LocalDispatchQuery
     {
         return tryGetQueryExecution()
                 .map(QueryExecution::getBasicQueryInfo)
-                .orElse(stateMachine.getBasicQueryInfo(Optional.empty()));
+                .orElseGet(() -> stateMachine.getBasicQueryInfo(Optional.empty()));
     }
 
     @Override
@@ -336,9 +357,15 @@ public class LocalDispatchQuery
     }
 
     @Override
-    public void pruneInfo()
+    public void pruneExpiredQueryInfo()
     {
-        stateMachine.pruneQueryInfo();
+        stateMachine.pruneQueryInfoExpired();
+    }
+
+    @Override
+    public void pruneFinishedQueryInfo()
+    {
+        stateMachine.pruneQueryInfoFinished();
     }
 
     @Override

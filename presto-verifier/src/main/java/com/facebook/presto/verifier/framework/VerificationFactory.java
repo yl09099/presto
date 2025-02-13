@@ -24,11 +24,13 @@ import com.facebook.presto.verifier.resolver.FailureResolverManager;
 import com.facebook.presto.verifier.resolver.FailureResolverManagerFactory;
 import com.facebook.presto.verifier.rewrite.QueryRewriter;
 import com.facebook.presto.verifier.rewrite.QueryRewriterFactory;
+import com.facebook.presto.verifier.source.SnapshotQueryConsumer;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import javax.inject.Inject;
 
+import java.util.Map;
 import java.util.Optional;
 
 import static com.facebook.presto.verifier.framework.ClusterType.CONTROL;
@@ -74,7 +76,10 @@ public class VerificationFactory
         this.determinismAnalyzerConfig = requireNonNull(determinismAnalyzerConfig, "determinismAnalyzerConfig is null");
     }
 
-    public Verification get(SourceQuery sourceQuery, Optional<VerificationContext> existingContext)
+    public Verification get(SourceQuery sourceQuery,
+                            Optional<VerificationContext> existingContext,
+                            SnapshotQueryConsumer snapshotQueryConsumer,
+                            Map<String, SnapshotQuery> snapshotQueries)
     {
         QueryType queryType = QueryType.of(sqlParser.createStatement(sourceQuery.getQuery(CONTROL), PARSING_OPTIONS));
         VerificationContext verificationContext = existingContext.map(VerificationContext::createForResubmission)
@@ -89,22 +94,40 @@ public class VerificationFactory
                     verificationContext,
                     verifierConfig,
                     sqlParser,
-                    executor);
+                    executor,
+                    snapshotQueryConsumer,
+                    snapshotQueries);
         }
 
         QueryRewriter queryRewriter = queryRewriterFactory.create(queryActions.getHelperAction());
+        DeterminismAnalyzer determinismAnalyzer = new DeterminismAnalyzer(
+                sourceQuery,
+                queryActions.getHelperAction(),
+                queryRewriter,
+                checksumValidator,
+                typeManager,
+                determinismAnalyzerConfig);
+        FailureResolverManager failureResolverManager = failureResolverManagerFactory.create(new FailureResolverFactoryContext(sqlParser, queryActions.getHelperAction()));
         switch (queryType) {
             case CREATE_TABLE_AS_SELECT:
             case INSERT:
+                if (verifierConfig.isExtendedVerification()) {
+                    return new ExtendedVerification(
+                            queryActions,
+                            sourceQuery,
+                            queryRewriter,
+                            determinismAnalyzer,
+                            failureResolverManager,
+                            exceptionClassifier,
+                            verificationContext,
+                            verifierConfig,
+                            typeManager,
+                            checksumValidator,
+                            executor,
+                            snapshotQueryConsumer,
+                            snapshotQueries);
+                }
             case QUERY:
-                DeterminismAnalyzer determinismAnalyzer = new DeterminismAnalyzer(
-                        sourceQuery,
-                        queryActions.getHelperAction(),
-                        queryRewriter,
-                        checksumValidator,
-                        typeManager,
-                        determinismAnalyzerConfig);
-                FailureResolverManager failureResolverManager = failureResolverManagerFactory.create(new FailureResolverFactoryContext(sqlParser, queryActions.getHelperAction()));
                 return new DataVerification(
                         queryActions,
                         sourceQuery,
@@ -116,7 +139,9 @@ public class VerificationFactory
                         verifierConfig,
                         typeManager,
                         checksumValidator,
-                        executor);
+                        executor,
+                        snapshotQueryConsumer,
+                        snapshotQueries);
             case CREATE_VIEW:
                 return new CreateViewVerification(
                         sqlParser,
@@ -126,7 +151,9 @@ public class VerificationFactory
                         exceptionClassifier,
                         verificationContext,
                         verifierConfig,
-                        executor);
+                        executor,
+                        snapshotQueryConsumer,
+                        snapshotQueries);
             case CREATE_TABLE:
                 return new CreateTableVerification(
                         sqlParser,
@@ -136,7 +163,9 @@ public class VerificationFactory
                         exceptionClassifier,
                         verificationContext,
                         verifierConfig,
-                        executor);
+                        executor,
+                        snapshotQueryConsumer,
+                        snapshotQueries);
             default:
                 throw new IllegalStateException(format("Unsupported query type: %s", queryType));
         }

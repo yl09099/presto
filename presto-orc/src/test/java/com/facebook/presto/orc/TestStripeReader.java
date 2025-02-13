@@ -61,10 +61,10 @@ public class TestStripeReader
         int numberOfEntries = 10_000;
         long numRowsInGroup = MILLION;
         IntegerStatistics integerStatistics = new IntegerStatistics(0L, 0L, 0L);
-        ColumnStatistics intColumnStatistics = new IntegerColumnStatistics(numRowsInGroup, null, integerStatistics);
-        ColumnStatistics mapColumnStatistics = new ColumnStatistics(numRowsInGroup, null);
-        ColumnStatistics mapKeyColumnStatistics = new IntegerColumnStatistics(numRowsInGroup * numberOfEntries, null, integerStatistics);
-        ColumnStatistics mapValueColumnStatistics = new IntegerColumnStatistics(numRowsInGroup * numberOfEntries, null, integerStatistics);
+        ColumnStatistics intColumnStatistics = new IntegerColumnStatistics(numRowsInGroup, null, null, null, integerStatistics);
+        ColumnStatistics mapColumnStatistics = new ColumnStatistics(numRowsInGroup, null, null, null);
+        ColumnStatistics mapKeyColumnStatistics = new IntegerColumnStatistics(numRowsInGroup * numberOfEntries, null, null, null, integerStatistics);
+        ColumnStatistics mapValueColumnStatistics = new IntegerColumnStatistics(numRowsInGroup * numberOfEntries, null, null, null, integerStatistics);
 
         StreamId intStreamId = new StreamId(1, 0, Stream.StreamKind.ROW_INDEX);
         StreamId mapStreamId = new StreamId(2, 0, Stream.StreamKind.ROW_INDEX);
@@ -84,6 +84,6 @@ public class TestStripeReader
 
     private static List<RowGroupIndex> createRowGroupIndex(ColumnStatistics columnStatistics)
     {
-        return ImmutableList.of(new RowGroupIndex(ImmutableList.of(0, 0, 0, 0), columnStatistics));
+        return ImmutableList.of(new RowGroupIndex(new int[]{0, 0, 0, 0}, columnStatistics));
     }
 }

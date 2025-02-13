@@ -13,37 +13,32 @@
  */
 package com.facebook.presto.spark;
 
-import com.facebook.airlift.log.Logger;
+import com.facebook.presto.common.RuntimeStats;
+import com.facebook.presto.common.transaction.TransactionId;
 import com.facebook.presto.server.SessionContext;
+import com.facebook.presto.spark.accesscontrol.PrestoSparkAuthenticatorProvider;
+import com.facebook.presto.spark.accesscontrol.PrestoSparkCredentialsProvider;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkSession;
-import com.facebook.presto.spark.classloader_interface.RetryExecutionStrategy;
 import com.facebook.presto.spi.function.SqlFunctionId;
 import com.facebook.presto.spi.function.SqlInvokedFunction;
 import com.facebook.presto.spi.security.Identity;
 import com.facebook.presto.spi.security.TokenAuthenticator;
 import com.facebook.presto.spi.session.ResourceEstimates;
 import com.facebook.presto.spi.tracing.Tracer;
-import com.facebook.presto.transaction.TransactionId;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 
 import javax.annotation.Nullable;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static com.facebook.presto.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
-import static com.facebook.presto.spark.classloader_interface.RetryExecutionStrategy.DISABLE_BROADCAST_JOIN;
-import static com.facebook.presto.sql.analyzer.FeaturesConfig.JoinDistributionType;
 import static java.util.Objects.requireNonNull;
 
 public class PrestoSparkSessionContext
         implements SessionContext
 {
-    private static final Logger log = Logger.get(PrestoSparkSessionContext.class);
-
     private final Identity identity;
     private final String catalog;
     private final String schema;
@@ -58,6 +53,7 @@ public class PrestoSparkSessionContext
     private final Map<String, String> systemProperties;
     private final Map<String, Map<String, String>> catalogSessionProperties;
     private final Optional<String> traceToken;
+    private final RuntimeStats runtimeStats = new RuntimeStats();
 
     public static PrestoSparkSessionContext createFromSessionInfo(
             PrestoSparkSession prestoSparkSession,
@@ -77,7 +73,9 @@ public class PrestoSparkSessionContext
                         prestoSparkSession.getPrincipal(),
                         ImmutableMap.of(),  // presto on spark does not support role management
                         extraCredentials.build(),
-                        extraTokenAuthenticators.build()),
+                        extraTokenAuthenticators.build(),
+                        Optional.empty(),
+                        Optional.empty()),
                 prestoSparkSession.getCatalog().orElse(null),
                 prestoSparkSession.getSchema().orElse(null),
                 prestoSparkSession.getSource().orElse(null),
@@ -86,23 +84,9 @@ public class PrestoSparkSessionContext
                 prestoSparkSession.getClientTags(),
                 prestoSparkSession.getTimeZoneId().orElse(null),
                 prestoSparkSession.getLanguage().orElse(null),
-                getFinalSystemProperties(prestoSparkSession.getSystemProperties(), prestoSparkSession.getRetryExecutionStrategy()),
+                prestoSparkSession.getSystemProperties(),
                 prestoSparkSession.getCatalogSessionProperties(),
                 prestoSparkSession.getTraceToken());
-    }
-
-    private static Map<String, String> getFinalSystemProperties(Map<String, String> systemProperties, Optional<RetryExecutionStrategy> retryExecutionStrategy)
-    {
-        if (!retryExecutionStrategy.isPresent()) {
-            return systemProperties;
-        }
-
-        log.info("Applying retryExecutionStrategy: " + retryExecutionStrategy.get().name());
-        Map<String, String> retrySystemProperties = new HashMap<>(systemProperties);
-        if (retryExecutionStrategy.get() == DISABLE_BROADCAST_JOIN) {
-            retrySystemProperties.put(JOIN_DISTRIBUTION_TYPE, JoinDistributionType.PARTITIONED.name());
-        }
-        return retrySystemProperties;
     }
 
     public PrestoSparkSessionContext(
@@ -256,5 +240,11 @@ public class PrestoSparkSessionContext
     {
         // presto on spark does not support session functions
         return ImmutableMap.of();
+    }
+
+    @Override
+    public RuntimeStats getRuntimeStats()
+    {
+        return runtimeStats;
     }
 }

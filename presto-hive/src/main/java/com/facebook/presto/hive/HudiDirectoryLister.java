@@ -14,6 +14,7 @@
 package com.facebook.presto.hive;
 
 import com.facebook.airlift.log.Logger;
+import com.facebook.presto.hive.cache.HiveCachingHdfsConfiguration.CachingJobConf;
 import com.facebook.presto.hive.filesystem.ExtendedFileSystem;
 import com.facebook.presto.hive.metastore.Partition;
 import com.facebook.presto.hive.metastore.Table;
@@ -55,11 +56,19 @@ public class HudiDirectoryLister
     {
         log.info("Using Hudi Directory Lister.");
         this.metadataEnabled = isHudiMetadataEnabled(session);
+        Configuration actualConfig = ((CachingJobConf) conf).getConfig();
+        /*
+        WrapperJobConf acts as a wrapper on top of the actual Configuration object. If `hive.copy-on-first-write-configuration-enabled`
+        is set to true, the wrapped object is instance of CopyOnFirstWriteConfiguration.
+         */
+        if (actualConfig instanceof CopyOnFirstWriteConfiguration) {
+            actualConfig = ((CopyOnFirstWriteConfiguration) actualConfig).getConfig();
+        }
         this.metaClient = HoodieTableMetaClient.builder()
-                .setConf(conf)
+                .setConf(actualConfig)
                 .setBasePath(table.getStorage().getLocation())
                 .build();
-        HoodieEngineContext engineContext = new HoodieLocalEngineContext(conf);
+        HoodieEngineContext engineContext = new HoodieLocalEngineContext(actualConfig);
         HoodieMetadataConfig metadataConfig = HoodieMetadataConfig.newBuilder()
                 .enable(metadataEnabled)
                 .build();
@@ -89,7 +98,8 @@ public class HudiDirectoryLister
                         table.getStorage().getLocation(),
                         p),
                 namenodeStats,
-                hiveDirectoryContext.getNestedDirectoryPolicy());
+                hiveDirectoryContext.getNestedDirectoryPolicy(),
+                hiveDirectoryContext.isSkipEmptyFilesEnabled());
     }
 
     public static class HudiFileInfoIterator
@@ -124,8 +134,8 @@ public class HudiDirectoryLister
                 throws IOException
         {
             FileStatus fileStatus = hoodieBaseFileIterator.next().getFileStatus();
-            String[] name = new String[] {"localhost:" + DFS_DATANODE_DEFAULT_PORT};
-            String[] host = new String[] {"localhost"};
+            String[] name = {"localhost:" + DFS_DATANODE_DEFAULT_PORT};
+            String[] host = {"localhost"};
             LocatedFileStatus hoodieFileStatus = new LocatedFileStatus(fileStatus,
                     new BlockLocation[] {new BlockLocation(name, host, 0L, fileStatus.getLen())});
             return createHiveFileInfo(hoodieFileStatus, Optional.empty());

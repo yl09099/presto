@@ -31,6 +31,7 @@ import javax.validation.constraints.NotNull;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.units.DataSize.Unit.PETABYTE;
+import static io.airlift.units.DataSize.Unit.TERABYTE;
 import static java.util.concurrent.TimeUnit.MINUTES;
 
 @DefunctConfig({
@@ -49,8 +50,10 @@ public class QueryManagerConfig
 
     private int hashPartitionCount = 100;
     private String partitioningProviderCatalog = GlobalSystemConnector.NAME;
+    private String ctePartitioningProviderCatalog = GlobalSystemConnector.NAME;
     private ExchangeMaterializationStrategy exchangeMaterializationStrategy = ExchangeMaterializationStrategy.NONE;
     private boolean useStreamingExchangeForMarkDistinct;
+    private boolean enableWorkerIsolation;
     private Duration minQueryExpireAge = new Duration(15, TimeUnit.MINUTES);
     private int maxQueryHistory = 100;
     private int maxQueryLength = 1_000_000;
@@ -75,6 +78,7 @@ public class QueryManagerConfig
     private Duration queryMaxCpuTime = new Duration(1_000_000_000, TimeUnit.DAYS);
 
     private DataSize queryMaxScanRawInputBytes = DataSize.succinctDataSize(1000, PETABYTE);
+    private DataSize queryMaxWrittenIntermediateBytes = DataSize.succinctDataSize(2, TERABYTE);
     private long queryMaxOutputPositions = Long.MAX_VALUE;
     private DataSize queryMaxOutputSize = DataSize.succinctDataSize(1000, PETABYTE);
 
@@ -82,6 +86,7 @@ public class QueryManagerConfig
     private Duration requiredWorkersMaxWait = new Duration(5, TimeUnit.MINUTES);
     private int requiredCoordinators = 1;
     private Duration requiredCoordinatorsMaxWait = new Duration(5, TimeUnit.MINUTES);
+    private Duration requiredCoordinatorSidecarsMaxWait = new Duration(5, TimeUnit.MINUTES);
     private int requiredResourceManagers = 1;
 
     private int querySubmissionMaxThreads = Runtime.getRuntime().availableProcessors() * 2;
@@ -94,6 +99,8 @@ public class QueryManagerConfig
     private long rateLimiterBucketMaxSize = 100;
     private int rateLimiterCacheLimit = 1000;
     private int rateLimiterCacheWindowMinutes = 5;
+
+    private int minColumnarEncodingChannelsToPreferRowWiseEncoding = 1000;
 
     @Min(1)
     public int getScheduleSplitBatchSize()
@@ -169,6 +176,20 @@ public class QueryManagerConfig
     public String getPartitioningProviderCatalog()
     {
         return partitioningProviderCatalog;
+    }
+
+    @NotNull
+    public String getCtePartitioningProviderCatalog()
+    {
+        return ctePartitioningProviderCatalog;
+    }
+
+    @Config("query.cte-partitioning-provider-catalog")
+    @ConfigDescription("Name of the catalog providing custom partitioning for cte materialization")
+    public QueryManagerConfig setCtePartitioningProviderCatalog(String ctePartitioningProviderCatalog)
+    {
+        this.ctePartitioningProviderCatalog = ctePartitioningProviderCatalog;
+        return this;
     }
 
     @Config("query.partitioning-provider-catalog")
@@ -449,6 +470,18 @@ public class QueryManagerConfig
         return this;
     }
 
+    public DataSize getQueryMaxWrittenIntermediateBytes()
+    {
+        return this.queryMaxWrittenIntermediateBytes;
+    }
+
+    @Config("query.max-written-intermediate-bytes")
+    public QueryManagerConfig setQueryMaxWrittenIntermediateBytes(DataSize queryMaxWrittenIntermediateBytes)
+    {
+        this.queryMaxWrittenIntermediateBytes = queryMaxWrittenIntermediateBytes;
+        return this;
+    }
+
     @Min(1)
     public long getQueryMaxOutputPositions()
     {
@@ -574,6 +607,21 @@ public class QueryManagerConfig
         return this;
     }
 
+    @NotNull
+    public Duration getRequiredCoordinatorSidecarsMaxWait()
+    {
+        return requiredCoordinatorSidecarsMaxWait;
+    }
+
+    @Experimental
+    @Config("query-manager.experimental.required-coordinator-sidecars-max-wait")
+    @ConfigDescription("Maximum time to wait for minimum number of coordinator sidecars before the query is failed")
+    public QueryManagerConfig setRequiredCoordinatorSidecarsMaxWait(Duration requiredCoordinatorSidecarsMaxWait)
+    {
+        this.requiredCoordinatorSidecarsMaxWait = requiredCoordinatorSidecarsMaxWait;
+        return this;
+    }
+
     @Min(1)
     public int getQuerySubmissionMaxThreads()
     {
@@ -676,6 +724,32 @@ public class QueryManagerConfig
     public QueryManagerConfig setRateLimiterCacheWindowMinutes(int rateLimiterCacheWindowMinutes)
     {
         this.rateLimiterCacheWindowMinutes = rateLimiterCacheWindowMinutes;
+        return this;
+    }
+
+    public boolean isEnableWorkerIsolation()
+    {
+        return enableWorkerIsolation;
+    }
+
+    @Config("query-manager.enable-worker-isolation")
+    @ConfigDescription("Config to enable isolating leaf and intermediate workers for query execution")
+    public QueryManagerConfig setEnableWorkerIsolation(boolean enableWorkerIsolation)
+    {
+        this.enableWorkerIsolation = enableWorkerIsolation;
+        return this;
+    }
+
+    public int getMinColumnarEncodingChannelsToPreferRowWiseEncoding()
+    {
+        return minColumnarEncodingChannelsToPreferRowWiseEncoding;
+    }
+
+    @Config("min-columnar-encoding-channels-to-prefer-row-wise-encoding")
+    @ConfigDescription("Minimum number of columnar encoding channels to consider row wise encoding for partitioned exchange. Native execution only")
+    public QueryManagerConfig setMinColumnarEncodingChannelsToPreferRowWiseEncoding(int minColumnarEncodingChannelsToPreferRowWiseEncoding)
+    {
+        this.minColumnarEncodingChannelsToPreferRowWiseEncoding = minColumnarEncodingChannelsToPreferRowWiseEncoding;
         return this;
     }
 

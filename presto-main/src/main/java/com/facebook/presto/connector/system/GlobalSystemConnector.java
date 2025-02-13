@@ -13,6 +13,8 @@
  */
 package com.facebook.presto.connector.system;
 
+import com.facebook.presto.common.RuntimeStats;
+import com.facebook.presto.common.transaction.TransactionId;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.ConnectorPageSource;
@@ -35,7 +37,6 @@ import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.facebook.presto.spi.procedure.Procedure;
 import com.facebook.presto.spi.transaction.IsolationLevel;
 import com.facebook.presto.transaction.InternalConnector;
-import com.facebook.presto.transaction.TransactionId;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -87,7 +88,11 @@ public class GlobalSystemConnector
             }
 
             @Override
-            public List<ConnectorTableLayoutResult> getTableLayouts(ConnectorSession session, ConnectorTableHandle table, Constraint<ColumnHandle> constraint, Optional<Set<ColumnHandle>> desiredColumns)
+            public ConnectorTableLayoutResult getTableLayoutForConstraint(
+                    ConnectorSession session,
+                    ConnectorTableHandle table,
+                    Constraint<ColumnHandle> constraint,
+                    Optional<Set<ColumnHandle>> desiredColumns)
             {
                 throw new UnsupportedOperationException();
             }
@@ -143,7 +148,7 @@ public class GlobalSystemConnector
     {
         return new ConnectorPageSourceProvider() {
             @Override
-            public ConnectorPageSource createPageSource(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorSplit split, ConnectorTableLayoutHandle layout, List<ColumnHandle> columns, SplitContext splitContext)
+            public ConnectorPageSource createPageSource(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorSplit split, ConnectorTableLayoutHandle layout, List<ColumnHandle> columns, SplitContext splitContext, RuntimeStats runtimeStats)
             {
                 throw new UnsupportedOperationException();
             }

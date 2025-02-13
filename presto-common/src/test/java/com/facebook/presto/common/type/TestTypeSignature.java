@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.facebook.presto.common.type.ParameterKind.LONG;
 import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.common.type.VarcharType.createUnboundedVarcharType;
@@ -45,6 +46,24 @@ public class TestTypeSignature
         assertEquals(result.getParameters().size(), 2);
         assertEquals(result.getParameters().get(0).isVariable(), true);
         assertEquals(result.getParameters().get(1).isLongLiteral(), true);
+    }
+
+    @Test
+    public void parseNamedTypeSignature()
+    {
+        assertRowSignature(
+                "cat.sch.pair:row(a bigint,b array(bigint),c row(a bigint))",
+                namedRowSignature("cat.sch.pair",
+                        namedParameter("a", false, signature("bigint")),
+                        namedParameter("b", false, array(signature("bigint"))),
+                        namedParameter("c", false, rowSignature(namedParameter("a", false, signature("bigint"))))));
+
+        // the UDT's name would be translated to lower case, and it's base type name case would be preserve
+        assertSignature(
+                "CAT.SCH.TROW:ROW(a CAT.SCH.TV:VARCHAR,b ARRAY(BIGINT),c ROW(a BIGINT))",
+                "cat.sch.trow:ROW",
+                ImmutableList.of("a cat.sch.tv:VARCHAR", "b ARRAY(BIGINT)", "c ROW(a BIGINT)"),
+                "cat.sch.trow:ROW(a cat.sch.tv:VARCHAR,b ARRAY(BIGINT),c ROW(a BIGINT))");
     }
 
     @Test
@@ -197,6 +216,11 @@ public class TestTypeSignature
         return new TypeSignature("row", transform(asList(columns), TypeSignatureParameter::of));
     }
 
+    private static TypeSignature namedRowSignature(String distinctTypeName, NamedTypeSignature... columns)
+    {
+        return new TypeSignature(distinctTypeName + ":row", transform(asList(columns), TypeSignatureParameter::of));
+    }
+
     private static NamedTypeSignature namedParameter(String name, boolean delimited, TypeSignature value)
     {
         return new NamedTypeSignature(Optional.of(new RowFieldName(name, delimited)), value);
@@ -290,6 +314,17 @@ public class TestTypeSignature
         assertFalse(parseTypeSignature("map(decimal(2, 1),decimal(3, 1))").isCalculated());
         assertTrue(parseTypeSignature("row(a decimal(p1,s1),b decimal(p2,s2))", ImmutableSet.of("p1", "s1", "p2", "s2")).isCalculated());
         assertFalse(parseTypeSignature("row(a decimal(2,1),b decimal(3,2))").isCalculated());
+    }
+
+    @Test
+    public void testParseTypeSignatureWithNumericParameters()
+    {
+        TypeSignature typeSignature = parseTypeSignature("DECIMAL(1, 0)");
+        assertEquals(typeSignature.getParameters().size(), 2);
+        assertEquals(typeSignature.getParameters().get(0).getLongLiteral(), 1L);
+        assertEquals(typeSignature.getParameters().get(0).getKind(), LONG);
+        assertEquals(typeSignature.getParameters().get(1).getLongLiteral(), 0L);
+        assertEquals(typeSignature.getParameters().get(1).getKind(), LONG);
     }
 
     @Test

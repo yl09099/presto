@@ -80,7 +80,7 @@ public class TestSubfieldExtractor
         }
 
         @Override
-        public Object optimize(RowExpression expression, Level level, ConnectorSession session, Function<VariableReferenceExpression, Object> variableResolver)
+        public RowExpression optimize(RowExpression expression, Level level, ConnectorSession session, Function<VariableReferenceExpression, Object> variableResolver)
         {
             throw new UnsupportedOperationException();
         }
@@ -94,7 +94,7 @@ public class TestSubfieldExtractor
     {
         functionAndTypeManager = createTestMetadataManager().getFunctionAndTypeManager();
         subfieldExtractor = new SubfieldExtractor(
-                new FunctionResolution(functionAndTypeManager),
+                new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver()),
                 TEST_EXPRESSION_OPTIMIZER,
                 TestingSession.SESSION);
     }

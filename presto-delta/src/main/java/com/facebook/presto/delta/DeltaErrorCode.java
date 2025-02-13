@@ -13,13 +13,13 @@
  */
 package com.facebook.presto.delta;
 
-import com.facebook.presto.spi.ErrorCode;
+import com.facebook.presto.common.ErrorCode;
+import com.facebook.presto.common.ErrorType;
 import com.facebook.presto.spi.ErrorCodeSupplier;
-import com.facebook.presto.spi.ErrorType;
 
-import static com.facebook.presto.spi.ErrorType.EXTERNAL;
-import static com.facebook.presto.spi.ErrorType.INTERNAL_ERROR;
-import static com.facebook.presto.spi.ErrorType.USER_ERROR;
+import static com.facebook.presto.common.ErrorType.EXTERNAL;
+import static com.facebook.presto.common.ErrorType.INTERNAL_ERROR;
+import static com.facebook.presto.common.ErrorType.USER_ERROR;
 
 public enum DeltaErrorCode
         implements ErrorCodeSupplier
@@ -31,7 +31,9 @@ public enum DeltaErrorCode
     DELTA_CANNOT_OPEN_SPLIT(4, EXTERNAL),
     DELTA_MISSING_DATA(5, EXTERNAL),
     DELTA_READ_DATA_ERROR(6, INTERNAL_ERROR),
-    DELTA_INVALID_PARTITION_VALUE(7, EXTERNAL);
+    DELTA_INVALID_PARTITION_VALUE(7, EXTERNAL),
+    DELTA_ERROR_LOADING_METADATA(8, EXTERNAL),
+    DELTA_ERROR_LOADING_SNAPSHOT(9, EXTERNAL);
 
     private final ErrorCode errorCode;
 

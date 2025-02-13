@@ -37,8 +37,10 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+import static com.facebook.presto.SystemSessionProperties.REWRITE_EXPRESSION_WITH_CONSTANT_EXPRESSION;
 import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.CONNECTOR;
-import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.REMOVE_SAFE_CONSTANTS;
+import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.IGNORE_SAFE_CONSTANTS;
+import static com.facebook.presto.common.plan.PlanCanonicalizationStrategy.IGNORE_SCAN_CONSTANTS;
 import static com.facebook.presto.hive.HiveQueryRunner.HIVE_CATALOG;
 import static com.facebook.presto.hive.HiveSessionProperties.PUSHDOWN_FILTER_ENABLED;
 import static com.facebook.presto.sql.planner.CanonicalPlanGenerator.generateCanonicalPlan;
@@ -111,13 +113,37 @@ public class TestHiveCanonicalPlanGenerator
                     pushdownFilterEnabled(),
                     "SELECT orderkey from test_orders where ds = '2020-09-01' AND orderkey < 10",
                     "SELECT orderkey from test_orders where ds = '2020-09-02' AND orderkey < 20",
-                    REMOVE_SAFE_CONSTANTS);
+                    IGNORE_SAFE_CONSTANTS);
 
             assertSameCanonicalLeafPlan(
                     pushdownFilterEnabled(),
                     "SELECT orderkey, CAST('1' AS VARCHAR) from test_orders where ds = '2020-09-01' AND orderkey < 10 AND ts >= '00:01'",
                     "SELECT orderkey, CAST('11' AS VARCHAR) from test_orders where ds = '2020-09-02' AND orderkey < 10 AND ts >= '00:02'",
-                    REMOVE_SAFE_CONSTANTS);
+                    IGNORE_SAFE_CONSTANTS);
+
+            assertDifferentCanonicalLeafPlan(
+                    pushdownFilterEnabled(),
+                    "SELECT orderkey, CAST('1' AS VARCHAR) from test_orders where ds = '2020-09-01' AND orderkey = 10",
+                    "SELECT orderkey, CAST('11' AS VARCHAR) from test_orders where ds = '2020-09-02' AND orderkey = 20",
+                    IGNORE_SAFE_CONSTANTS);
+
+            assertDifferentCanonicalLeafPlan(
+                    pushdownFilterEnabled(),
+                    "SELECT orderkey from test_orders where ds = '2020-09-01' AND orderkey < 10",
+                    "SELECT orderkey from test_orders where ds = '2020-09-02' AND orderkey < 20",
+                    IGNORE_SCAN_CONSTANTS);
+
+            assertSameCanonicalLeafPlan(
+                    pushdownFilterEnabled(),
+                    "SELECT orderkey, CAST('1' AS VARCHAR) from test_orders where ds = '2020-09-01' AND orderkey < 10 AND ts >= '00:01'",
+                    "SELECT orderkey, CAST('11' AS VARCHAR) from test_orders where ds = '2020-09-02' AND orderkey < 10 AND ts >= '00:02'",
+                    IGNORE_SCAN_CONSTANTS);
+
+            assertSameCanonicalLeafPlan(
+                    pushdownFilterEnabled(),
+                    "SELECT orderkey, CAST('1' AS VARCHAR) from test_orders where ds = '2020-09-01' AND orderkey = 10",
+                    "SELECT orderkey, CAST('11' AS VARCHAR) from test_orders where ds = '2020-09-02' AND orderkey = 20",
+                    IGNORE_SCAN_CONSTANTS);
         }
         finally {
             queryRunner.execute("DROP TABLE IF EXISTS test_orders");
@@ -148,7 +174,7 @@ public class TestHiveCanonicalPlanGenerator
                     "SELECT * FROM test_column_predicates WHERE ds IN ('2020-09-01', '2020-09-02')",
                     "SELECT * FROM test_column_predicates");
             assertSameCanonicalLeafSubPlan(
-                    pushdownFilterEnabled(),
+                    pushdownFilterEnabledConstantPullUpDisabled(),
                     "SELECT * FROM test_column_predicates WHERE ds = '2020-09-01'",
                     "SELECT * FROM test_column_predicates WHERE ds = '2020-09-02'");
             assertSameCanonicalLeafSubPlan(
@@ -206,6 +232,14 @@ public class TestHiveCanonicalPlanGenerator
                 .build();
     }
 
+    private Session pushdownFilterEnabledConstantPullUpDisabled()
+    {
+        return Session.builder(getQueryRunner().getDefaultSession())
+                .setCatalogSessionProperty(HIVE_CATALOG, PUSHDOWN_FILTER_ENABLED, "true")
+                .setSystemProperty(REWRITE_EXPRESSION_WITH_CONSTANT_EXPRESSION, "false")
+                .build();
+    }
+
     private static List<SubPlan> getLeafSubPlans(SubPlan subPlan)
     {
         if (subPlan.getChildren().isEmpty()) {
@@ -231,7 +265,7 @@ public class TestHiveCanonicalPlanGenerator
         SubPlan subplan = subplan(format("( %s ) UNION ALL ( %s )", sql1, sql2), session);
         List<CanonicalPlanFragment> leafCanonicalPlans = getLeafSubPlans(subplan).stream()
                 .map(SubPlan::getFragment)
-                .map(fragment -> generateCanonicalPlanFragment(fragment.getRoot(), fragment.getPartitioningScheme()))
+                .map(fragment -> generateCanonicalPlanFragment(fragment.getRoot(), fragment.getPartitioningScheme(), objectMapper, session))
                 .map(Optional::get)
                 .collect(Collectors.toList());
         assertEquals(leafCanonicalPlans.size(), 2);
@@ -245,8 +279,8 @@ public class TestHiveCanonicalPlanGenerator
     {
         PlanFragment fragment1 = getOnlyElement(getLeafSubPlans(subplan(sql1, session))).getFragment();
         PlanFragment fragment2 = getOnlyElement(getLeafSubPlans(subplan(sql2, session))).getFragment();
-        Optional<CanonicalPlanFragment> canonicalPlan1 = generateCanonicalPlanFragment(fragment1.getRoot(), fragment1.getPartitioningScheme());
-        Optional<CanonicalPlanFragment> canonicalPlan2 = generateCanonicalPlanFragment(fragment2.getRoot(), fragment2.getPartitioningScheme());
+        Optional<CanonicalPlanFragment> canonicalPlan1 = generateCanonicalPlanFragment(fragment1.getRoot(), fragment1.getPartitioningScheme(), objectMapper, session);
+        Optional<CanonicalPlanFragment> canonicalPlan2 = generateCanonicalPlanFragment(fragment2.getRoot(), fragment2.getPartitioningScheme(), objectMapper, session);
         assertTrue(canonicalPlan1.isPresent());
         assertTrue(canonicalPlan2.isPresent());
         assertNotEquals(objectMapper.writeValueAsString(canonicalPlan1), objectMapper.writeValueAsString(canonicalPlan2));
@@ -257,8 +291,8 @@ public class TestHiveCanonicalPlanGenerator
     {
         PlanFragment fragment1 = getOnlyElement(getLeafSubPlans(subplan(sql1, session))).getFragment();
         PlanFragment fragment2 = getOnlyElement(getLeafSubPlans(subplan(sql2, session))).getFragment();
-        Optional<CanonicalPlan> canonicalPlan1 = generateCanonicalPlan(fragment1.getRoot(), strategy);
-        Optional<CanonicalPlan> canonicalPlan2 = generateCanonicalPlan(fragment2.getRoot(), strategy);
+        Optional<CanonicalPlan> canonicalPlan1 = generateCanonicalPlan(fragment1.getRoot(), strategy, objectMapper, session);
+        Optional<CanonicalPlan> canonicalPlan2 = generateCanonicalPlan(fragment2.getRoot(), strategy, objectMapper, session);
         assertTrue(canonicalPlan1.isPresent());
         assertTrue(canonicalPlan2.isPresent());
         assertNotEquals(objectMapper.writeValueAsString(canonicalPlan1), objectMapper.writeValueAsString(canonicalPlan2));
@@ -269,8 +303,8 @@ public class TestHiveCanonicalPlanGenerator
     {
         PlanFragment fragment1 = getOnlyElement(getLeafSubPlans(subplan(sql1, session))).getFragment();
         PlanFragment fragment2 = getOnlyElement(getLeafSubPlans(subplan(sql2, session))).getFragment();
-        Optional<CanonicalPlan> canonicalPlan1 = generateCanonicalPlan(fragment1.getRoot(), strategy);
-        Optional<CanonicalPlan> canonicalPlan2 = generateCanonicalPlan(fragment2.getRoot(), strategy);
+        Optional<CanonicalPlan> canonicalPlan1 = generateCanonicalPlan(fragment1.getRoot(), strategy, objectMapper, session);
+        Optional<CanonicalPlan> canonicalPlan2 = generateCanonicalPlan(fragment2.getRoot(), strategy, objectMapper, session);
         assertTrue(canonicalPlan1.isPresent());
         assertTrue(canonicalPlan2.isPresent());
         assertEquals(objectMapper.writeValueAsString(canonicalPlan1), objectMapper.writeValueAsString(canonicalPlan2));

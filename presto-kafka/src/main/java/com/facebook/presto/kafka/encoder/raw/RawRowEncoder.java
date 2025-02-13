@@ -20,6 +20,7 @@ import com.facebook.presto.spi.ConnectorSession;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableSet;
 
+import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -168,7 +169,7 @@ public class RawRowEncoder
         private static FieldType parseFieldType(String dataFormat, String columnName)
         {
             try {
-                if (!dataFormat.equals("")) {
+                if (!dataFormat.isEmpty()) {
                     return FieldType.valueOf(dataFormat.toUpperCase(Locale.ENGLISH));
                 }
                 return FieldType.BYTE;
@@ -195,7 +196,7 @@ public class RawRowEncoder
             else if (columnType == BOOLEAN) {
                 checkFieldTypeOneOf(fieldType, columnName, columnType, FieldType.BYTE, FieldType.SHORT, FieldType.INT, FieldType.LONG);
             }
-            else if (columnType == DOUBLE) {
+            else if (columnType.equals(DOUBLE)) {
                 checkFieldTypeOneOf(fieldType, columnName, columnType, FieldType.DOUBLE, FieldType.FLOAT);
             }
             else if (isVarcharType(columnType)) {
@@ -323,7 +324,7 @@ public class RawRowEncoder
         checkArgument(currentColumnIndex == columnHandles.size(), format("Missing %d columns", columnHandles.size() - currentColumnIndex + 1));
 
         resetColumnIndex(); // reset currentColumnIndex to prepare for next row
-        buffer.clear(); // set buffer position back to 0 to prepare for next row, this method does not affect the backing byte array
+        ((Buffer) buffer).clear(); // set buffer position back to 0 to prepare for next row, this method does not affect the backing byte array
         return buffer.array();
     }
 }

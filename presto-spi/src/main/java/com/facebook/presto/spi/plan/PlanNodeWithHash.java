@@ -22,7 +22,7 @@ import static java.util.Objects.requireNonNull;
 public class PlanNodeWithHash
 {
     private final PlanNode planNode;
-    // An optional canonical hash of the corresponding plan node
+    // An optional canonical hash of the corresponding plan node. Hash strategy is part of `CanonicalPlan` which gets hashed, hence different strategies gives different hash
     private final Optional<String> hash;
 
     public PlanNodeWithHash(PlanNode planNode, Optional<String> hash)
@@ -51,13 +51,15 @@ public class PlanNodeWithHash
             return false;
         }
         PlanNodeWithHash that = (PlanNodeWithHash) o;
-        return Objects.equals(planNode, that.planNode) && Objects.equals(hash, that.hash);
+        // We compare object equality for Plan nodes. It is necessary because plan nodes can be expensive to compare,
+        // and its also sufficient because we only hash stats equivalent plan nodes, which don't change while planning.
+        return planNode == that.planNode && Objects.equals(hash, that.hash);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(planNode, hash);
+        return Objects.hash(System.identityHashCode(planNode), hash);
     }
 
     @Override

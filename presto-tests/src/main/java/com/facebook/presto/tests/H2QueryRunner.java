@@ -16,6 +16,7 @@ package com.facebook.presto.tests;
 import com.facebook.presto.Session;
 import com.facebook.presto.common.type.ArrayType;
 import com.facebook.presto.common.type.CharType;
+import com.facebook.presto.common.type.DateType;
 import com.facebook.presto.common.type.DecimalType;
 import com.facebook.presto.common.type.DistinctType;
 import com.facebook.presto.common.type.RowType;
@@ -88,12 +89,14 @@ import static com.google.common.base.Strings.padEnd;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Lists.newArrayList;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.airlift.tpch.TpchTable.CUSTOMER;
 import static io.airlift.tpch.TpchTable.LINE_ITEM;
 import static io.airlift.tpch.TpchTable.NATION;
 import static io.airlift.tpch.TpchTable.ORDERS;
 import static io.airlift.tpch.TpchTable.PART;
 import static io.airlift.tpch.TpchTable.PART_SUPPLIER;
 import static io.airlift.tpch.TpchTable.REGION;
+import static io.airlift.tpch.TpchTable.SUPPLIER;
 import static java.lang.String.format;
 import static java.util.Collections.nCopies;
 
@@ -179,6 +182,29 @@ public class H2QueryRunner
                 "  comment VARCHAR(23) NOT NULL\n" +
                 ")");
         insertRows(tpchMetadata, PART);
+
+        handle.execute(" CREATE TABLE customer (     \n" +
+                "    custkey BIGINT NOT NULL,         \n" +
+                "    name VARCHAR(25) NOT NULL,       \n" +
+                "    address VARCHAR(40) NOT NULL,    \n" +
+                "    nationkey BIGINT NOT NULL,       \n" +
+                "    phone VARCHAR(15) NOT NULL,      \n" +
+                "    acctbal DOUBLE NOT NULL,         \n" +
+                "    mktsegment VARCHAR(10) NOT NULL, \n" +
+                "    comment VARCHAR(117) NOT NULL    \n" +
+                " ) ");
+        insertRows(tpchMetadata, CUSTOMER);
+
+        handle.execute(" CREATE TABLE supplier ( \n" +
+                "    suppkey bigint NOT NULL,         \n" +
+                "    name varchar(25) NOT NULL,       \n" +
+                "    address varchar(40) NOT NULL,    \n" +
+                "    nationkey bigint NOT NULL,       \n" +
+                "    phone varchar(15) NOT NULL,      \n" +
+                "    acctbal double NOT NULL,         \n" +
+                "    comment varchar(101) NOT NULL    \n" +
+                " ) ");
+        insertRows(tpchMetadata, SUPPLIER);
     }
 
     private void insertRows(TpchMetadata tpchMetadata, TpchTable tpchTable)
@@ -372,6 +398,10 @@ public class H2QueryRunner
             return Arrays.stream(values)
                     .map(v -> v == null ? null : ((Timestamp) v).toLocalDateTime())
                     .toArray();
+        }
+
+        if (elementType instanceof DateType) {
+            return Arrays.stream(values).map(v -> v == null ? null : ((Date) v).toLocalDate()).toArray();
         }
 
         return values;

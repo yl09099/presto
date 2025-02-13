@@ -48,10 +48,10 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.primitives.Primitives;
 import io.airlift.slice.Slice;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.facebook.presto.bytecode.Access.PRIVATE;
 import static com.facebook.presto.bytecode.Access.PUBLIC;
@@ -101,6 +101,7 @@ public class CursorProcessorCompiler
                 .add(filter)
                 .build();
 
+        AtomicInteger lambdaCounter = new AtomicInteger(0);
         Map<VariableReferenceExpression, CommonSubExpressionFields> cseFields = ImmutableMap.of();
         RowExpressionCompiler compiler = new RowExpressionCompiler(
                 classDefinition,
@@ -110,7 +111,8 @@ public class CursorProcessorCompiler
                 metadata,
                 sqlFunctionProperties,
                 sessionFunctions,
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                lambdaCounter);
 
         if (isOptimizeCommonSubExpressions) {
             Map<Integer, Map<RowExpression, VariableReferenceExpression>> commonSubExpressionsByLevel = collectCSEByLevel(rowExpressions);
@@ -125,7 +127,8 @@ public class CursorProcessorCompiler
                         metadata,
                         sqlFunctionProperties,
                         sessionFunctions,
-                        ImmutableMap.of());
+                        ImmutableMap.of(),
+                        lambdaCounter);
                 generateCommonSubExpressionMethods(classDefinition, compiler, commonSubExpressionsByLevel, cseFields);
 
                 Map<RowExpression, VariableReferenceExpression> commonSubExpressions = commonSubExpressionsByLevel.values().stream()
@@ -252,7 +255,7 @@ public class CursorProcessorCompiler
                 .getVariable(pageBuilder)
                 .invokeVirtual(PageBuilder.class, "declarePosition", void.class);
 
-        // this.project_43(session, cursor, pageBuilder.getBlockBuilder(42)));
+        // this.project_43(properties, cursor, pageBuilder.getBlockBuilder(42)));
         for (int projectionIndex = 0; projectionIndex < projections; projectionIndex++) {
             ifStatement.ifTrue()
                     .append(method.getThis())
@@ -341,7 +344,6 @@ public class CursorProcessorCompiler
         Parameter cursor = arg("cursor", RecordCursor.class);
 
         ImmutableList.Builder<MethodDefinition> methods = ImmutableList.builder();
-        Map<VariableReferenceExpression, CommonSubExpressionFields> cseMap = new HashMap<>();
         int startLevel = commonSubExpressionsByLevel.keySet().stream().reduce(Math::min).get();
         int maxLevel = commonSubExpressionsByLevel.keySet().stream().reduce(Math::max).get();
         for (int i = startLevel; i <= maxLevel; i++) {
@@ -381,7 +383,6 @@ public class CursorProcessorCompiler
                             .retObject();
 
                     methods.add(method);
-                    cseMap.put(cseVariable, cseFields);
                 }
             }
         }

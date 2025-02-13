@@ -31,19 +31,9 @@ public class TestPinotExpressionConverters
     private final Function<VariableReferenceExpression, PinotQueryGeneratorContext.Selection> testInputFunction = testInput::get;
 
     @Test
-    public void testProjectExpressionConverterPql()
+    public void testProjectExpressionConverter()
     {
-        testProjectExpressionConverter(new SessionHolder(false, false));
-    }
-
-    @Test
-    public void testProjectExpressionConverterSql()
-    {
-        testProjectExpressionConverter(new SessionHolder(false, true));
-    }
-
-    public void testProjectExpressionConverter(SessionHolder sessionHolder)
-    {
+        SessionHolder sessionHolder = new SessionHolder(false);
         testProject("secondssinceepoch", "\"secondsSinceEpoch\"", sessionHolder);
         testProject("secondssinceepoch > 1559978258", "(\"secondsSinceEpoch\" > 1559978258)", sessionHolder);
         testProject("secondssinceepoch != 0", "(\"secondsSinceEpoch\" <> 0)", sessionHolder);
@@ -95,39 +85,18 @@ public class TestPinotExpressionConverters
     }
 
     @Test
-    public void testAdhocPql()
-    {
-        testAdhoc(new SessionHolder(false, false));
-    }
-
-    @Test
-    public void testAdhocSql()
-    {
-        testAdhoc(new SessionHolder(false, true));
-    }
-
-    public void testAdhoc(SessionHolder sessionHolder)
+    public void testAdhoc()
     {
         testAggregationProject(
                 "secondssinceepoch + 1559978258.674",
                 "ADD(\"secondsSinceEpoch\", 1559978258.674)",
-                sessionHolder);
+                new SessionHolder(false));
     }
 
     @Test
-    public void testDateTruncationConversionPql()
+    public void testDateTruncationConversion()
     {
-        testDateTruncationConversion(new SessionHolder(true, false));
-    }
-
-    @Test
-    public void testDateTruncationConversionSql()
-    {
-        testDateTruncationConversion(new SessionHolder(true, true));
-    }
-
-    public void testDateTruncationConversion(SessionHolder sessionHolder)
-    {
+        SessionHolder sessionHolder = new SessionHolder(true);
         testAggregationProject(
                 "date_trunc('hour', from_unixtime(secondssinceepoch + 2))",
                 "dateTrunc(ADD(\"secondsSinceEpoch\", 2),seconds, UTC, hour)",
@@ -140,19 +109,9 @@ public class TestPinotExpressionConverters
     }
 
     @Test
-    public void testFilterExpressionConverterPql()
+    public void testFilterExpressionConverter()
     {
-        testFilterExpressionConverter(new SessionHolder(false, false));
-    }
-
-    @Test
-    public void testFilterExpressionConverterSql()
-    {
-        testFilterExpressionConverter(new SessionHolder(false, true));
-    }
-
-    public void testFilterExpressionConverter(SessionHolder sessionHolder)
-    {
+        SessionHolder sessionHolder = new SessionHolder(false);
         // Simple comparisons
         testFilter("regionid = 20", "(\"regionId\" = 20)", sessionHolder);
         testFilter("regionid >= 20", "(\"regionId\" >= 20)", sessionHolder);
@@ -164,12 +123,29 @@ public class TestPinotExpressionConverters
         // in, not in
         testFilter("regionid in (20, 30, 40)", "(\"regionId\" IN (20, 30, 40))", sessionHolder);
         testFilter("regionid not in (20, 30, 40)", "(\"regionId\" NOT IN (20, 30, 40))", sessionHolder);
-        testFilter("city in ('San Jose', 'Campbell', 'Union City')", "(\"city\" IN ('San Jose', 'Campbell', 'Union City'))", sessionHolder);
+        testFilter("city in ('San Jose', 'Campbell', 'Union City', 'L''Aquila')", "(\"city\" IN ('San Jose', 'Campbell', 'Union City', 'L''Aquila'))", sessionHolder);
         testFilter("city not in ('San Jose', 'Campbell', 'Union City')", "(\"city\" NOT IN ('San Jose', 'Campbell', 'Union City'))", sessionHolder);
         testFilterUnsupported("secondssinceepoch + 1 in (234, 24324)", sessionHolder);
         testFilterUnsupported("NOT (secondssinceepoch = 2323)", sessionHolder);
         testFilter("city is null", "(\"city\" IS NULL)", sessionHolder);
         testFilter("city is not null", "(\"city\" IS NOT NULL)", sessionHolder);
+
+        // functions
+        testFilter("LOWER(TRIM(city)) = 'campbell'", "(lower(trim(\"city\")) = 'campbell')", sessionHolder);
+        testFilter("CONCAT(city, ', CA', city) IN ('San Jose', 'Campbell')",
+                "(concat(concat(\"city\", ', CA', ''), \"city\", '') IN ('San Jose', 'Campbell'))", sessionHolder);
+
+        // strpos
+        testFilter("STRPOS(\"city\", 'Seattle') = 1", "(strpos(\"city\",'Seattle') + 1 = 1)", sessionHolder);
+
+        // case, coalesce, if
+        testFilter("CASE WHEN city = 'Campbell' THEN regionid ELSE 0 END",
+                "CASE true WHEN (\"city\" = 'Campbell') THEN \"regionId\" ELSE 0 END", sessionHolder);
+        testFilter("COALESCE(regionid, regionid, secondssinceepoch)",
+                "CASE TRUE WHEN \"regionId\" IS NOT NULL THEN \"regionId\" WHEN \"regionId\" IS NOT NULL THEN \"regionId\" ELSE \"secondsSinceEpoch\" END", sessionHolder);
+        testFilter("IF(city is null, secondssinceepoch, 0) > 1500000000",
+                "(CASE TRUE WHEN (\"city\" IS NULL) THEN \"secondsSinceEpoch\" ELSE 0 END > 1500000000)", sessionHolder);
+        testFilterUnsupported("COALESCE(trim_city, LOWER(city))", sessionHolder);
 
         // combinations
         testFilter("totalfare between 20 and 30 AND regionid > 20 OR city = 'Campbell'",
@@ -179,6 +155,8 @@ public class TestPinotExpressionConverters
 
         testFilter("secondssinceepoch > 1559978258", "(\"secondsSinceEpoch\" > 1559978258)", sessionHolder);
         testFilter("DATE '2019-11-15'", "18215", sessionHolder);
+        testFilter("COALESCE(LOWER(city), trim_city) = 'San Francisco, CA'",
+                "(CASE TRUE WHEN \"city\" IS NOT NULL THEN lower(\"city\") ELSE trim(city) END = 'San Francisco, CA')", sessionHolder);
     }
 
     private void testAggregationProject(String sqlExpression, String expectedPinotExpression, SessionHolder sessionHolder)

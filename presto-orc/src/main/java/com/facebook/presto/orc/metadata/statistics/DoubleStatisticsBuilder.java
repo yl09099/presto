@@ -26,6 +26,8 @@ public class DoubleStatisticsBuilder
         implements StatisticsBuilder
 {
     private long nonNullValueCount;
+    private long storageSize;
+    private long rawSize;
     private boolean hasNan;
     private double minimum = Double.POSITIVE_INFINITY;
     private double maximum = Double.NEGATIVE_INFINITY;
@@ -36,7 +38,7 @@ public class DoubleStatisticsBuilder
         for (int position = 0; position < block.getPositionCount(); position++) {
             if (!block.isNull(position)) {
                 double value;
-                if (type == RealType.REAL) {
+                if (type.equals(RealType.REAL)) {
                     value = Float.intBitsToFloat((int) type.getLong(block, position));
                 }
                 else {
@@ -82,9 +84,21 @@ public class DoubleStatisticsBuilder
     {
         Optional<DoubleStatistics> doubleStatistics = buildDoubleStatistics();
         if (doubleStatistics.isPresent()) {
-            return new DoubleColumnStatistics(nonNullValueCount, null, doubleStatistics.get());
+            return new DoubleColumnStatistics(nonNullValueCount, null, rawSize, storageSize, doubleStatistics.get());
         }
-        return new ColumnStatistics(nonNullValueCount, null);
+        return new ColumnStatistics(nonNullValueCount, null, rawSize, storageSize);
+    }
+
+    @Override
+    public void incrementRawSize(long rawSize)
+    {
+        this.rawSize += rawSize;
+    }
+
+    @Override
+    public void incrementSize(long storageSize)
+    {
+        this.storageSize += storageSize;
     }
 
     public static Optional<DoubleStatistics> mergeDoubleStatistics(List<ColumnStatistics> stats)

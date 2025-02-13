@@ -22,15 +22,18 @@ import com.facebook.presto.common.type.TypeSignatureParameter;
 import com.facebook.presto.metadata.BoundVariables;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.SqlScalarFunction;
+import com.facebook.presto.spi.function.ComplexTypeFunctionDescriptor;
 import com.facebook.presto.spi.function.FunctionKind;
 import com.facebook.presto.spi.function.Signature;
 import com.facebook.presto.spi.function.SqlFunctionVisibility;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 
 import java.lang.invoke.MethodHandle;
+import java.util.Optional;
 
 import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
-import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.DEFAULT_NAMESPACE;
+import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.JAVA_BUILTIN_NAMESPACE;
 import static com.facebook.presto.operator.scalar.ScalarFunctionImplementationChoice.ArgumentProperty.valueTypeArgumentProperty;
 import static com.facebook.presto.operator.scalar.ScalarFunctionImplementationChoice.NullConvention.RETURN_NULL_ON_NULL;
 import static com.facebook.presto.spi.function.Signature.typeVariable;
@@ -44,16 +47,23 @@ public class ArrayFlattenFunction
     public static final ArrayFlattenFunction ARRAY_FLATTEN_FUNCTION = new ArrayFlattenFunction();
     private static final String FUNCTION_NAME = "flatten";
     private static final MethodHandle METHOD_HANDLE = methodHandle(ArrayFlattenFunction.class, FUNCTION_NAME, Type.class, Type.class, Block.class);
+    private final ComplexTypeFunctionDescriptor descriptor;
 
     private ArrayFlattenFunction()
     {
-        super(new Signature(QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, FUNCTION_NAME),
+        super(new Signature(QualifiedObjectName.valueOf(JAVA_BUILTIN_NAMESPACE, FUNCTION_NAME),
                 FunctionKind.SCALAR,
                 ImmutableList.of(typeVariable("E")),
                 ImmutableList.of(),
                 parseTypeSignature("array(E)"),
                 ImmutableList.of(parseTypeSignature("array(array(E))")),
                 false));
+        descriptor = new ComplexTypeFunctionDescriptor(
+                false,
+                ImmutableList.of(),
+                Optional.of(ImmutableSet.of(0)),
+                Optional.of(ComplexTypeFunctionDescriptor::prependAllSubscripts),
+                getSignature());
     }
 
     @Override
@@ -72,6 +82,12 @@ public class ArrayFlattenFunction
     public String getDescription()
     {
         return "Flattens the given array";
+    }
+
+    @Override
+    public ComplexTypeFunctionDescriptor getComplexTypeFunctionDescriptor()
+    {
+        return descriptor;
     }
 
     @Override

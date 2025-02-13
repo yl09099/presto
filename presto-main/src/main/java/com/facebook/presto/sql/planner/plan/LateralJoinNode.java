@@ -14,6 +14,7 @@
 package com.facebook.presto.sql.planner.plan;
 
 import com.facebook.presto.spi.SourceLocation;
+import com.facebook.presto.spi.plan.JoinType;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
@@ -42,17 +43,17 @@ public class LateralJoinNode
 {
     public enum Type
     {
-        INNER(JoinNode.Type.INNER),
-        LEFT(JoinNode.Type.LEFT);
+        INNER(JoinType.INNER),
+        LEFT(JoinType.LEFT);
 
-        Type(JoinNode.Type joinNodeType)
+        Type(JoinType joinNodeType)
         {
             this.joinNodeType = joinNodeType;
         }
 
-        private final JoinNode.Type joinNodeType;
+        private final JoinType joinNodeType;
 
-        public JoinNode.Type toJoinNodeType()
+        public JoinType toJoinNodeType()
         {
             return joinNodeType;
         }
@@ -82,7 +83,20 @@ public class LateralJoinNode
             @JsonProperty("type") Type type,
             @JsonProperty("originSubqueryError") String originSubqueryError)
     {
-        super(sourceLocation, id);
+        this(sourceLocation, id, Optional.empty(), input, subquery, correlation, type, originSubqueryError);
+    }
+
+    public LateralJoinNode(
+            Optional<SourceLocation> sourceLocation,
+            PlanNodeId id,
+            Optional<PlanNode> statsEquivalentPlanNode,
+            PlanNode input,
+            PlanNode subquery,
+            List<VariableReferenceExpression> correlation,
+            Type type,
+            String originSubqueryError)
+    {
+        super(sourceLocation, id, statsEquivalentPlanNode);
         requireNonNull(input, "input is null");
         requireNonNull(subquery, "right is null");
         requireNonNull(correlation, "correlation is null");
@@ -146,7 +160,13 @@ public class LateralJoinNode
     public PlanNode replaceChildren(List<PlanNode> newChildren)
     {
         checkArgument(newChildren.size() == 2, "expected newChildren to contain 2 nodes");
-        return new LateralJoinNode(getSourceLocation(), getId(), newChildren.get(0), newChildren.get(1), correlation, type, originSubqueryError);
+        return new LateralJoinNode(getSourceLocation(), getId(), getStatsEquivalentPlanNode(), newChildren.get(0), newChildren.get(1), correlation, type, originSubqueryError);
+    }
+
+    @Override
+    public PlanNode assignStatsEquivalentPlanNode(Optional<PlanNode> statsEquivalentPlanNode)
+    {
+        return new LateralJoinNode(getSourceLocation(), getId(), statsEquivalentPlanNode, input, subquery, correlation, type, originSubqueryError);
     }
 
     @Override

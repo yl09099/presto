@@ -9,7 +9,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-.PHONY: all cmake build clean debug release unit submodules velox-submodule
+.PHONY: all cmake build cmake-and-build clean debug release unittest submodules velox-submodule
 
 BUILD_BASE_DIR=_build
 BUILD_DIR=release
@@ -19,14 +19,39 @@ ENABLE_WALL ?= 1
 NUM_THREADS ?= $(shell getconf _NPROCESSORS_CONF 2>/dev/null || echo 1)
 CPU_TARGET ?= "avx"
 CMAKE_PREFIX_PATH ?= "/usr/local"
+PRESTOCPP_ROOT_DIR="$(shell pwd)"
+PYTHON_VENV ?= .venv
 
-PRESTO_ENABLE_PARQUET ?= "OFF"
+EXTRA_CMAKE_FLAGS ?= ""
+
+ifeq ($(PRESTO_ENABLE_PARQUET), ON)
+  EXTRA_CMAKE_FLAGS += -DPRESTO_ENABLE_PARQUET=ON
+endif
+ifeq ($(PRESTO_ENABLE_S3), ON)
+  EXTRA_CMAKE_FLAGS += -DPRESTO_ENABLE_S3=ON
+endif
+ifeq ($(PRESTO_ENABLE_HDFS), ON)
+  EXTRA_CMAKE_FLAGS += -DPRESTO_ENABLE_HDFS=ON
+endif
+ifeq ($(PRESTO_ENABLE_REMOTE_FUNCTIONS), ON)
+  EXTRA_CMAKE_FLAGS += -DPRESTO_ENABLE_REMOTE_FUNCTIONS=ON
+endif
+ifeq ($(PRESTO_ENABLE_JWT), ON)
+  EXTRA_CMAKE_FLAGS += -DPRESTO_ENABLE_JWT=ON
+endif
+ifneq ($(PRESTO_STATS_REPORTER_TYPE),)
+  EXTRA_CMAKE_FLAGS += -DPRESTO_STATS_REPORTER_TYPE=$(PRESTO_STATS_REPORTER_TYPE)
+endif
+ifneq ($(PRESTO_MEMORY_CHECKER_TYPE),)
+  EXTRA_CMAKE_FLAGS += -DPRESTO_MEMORY_CHECKER_TYPE=$(PRESTO_MEMORY_CHECKER_TYPE)
+endif
 
 CMAKE_FLAGS := -DTREAT_WARNINGS_AS_ERRORS=${TREAT_WARNINGS_AS_ERRORS}
 CMAKE_FLAGS += -DENABLE_ALL_WARNINGS=${ENABLE_WALL}
 CMAKE_FLAGS += -DCMAKE_PREFIX_PATH=$(CMAKE_PREFIX_PATH)
 CMAKE_FLAGS += -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
-CMAKE_FLAGS += -DPRESTO_ENABLE_PARQUET=$(PRESTO_ENABLE_PARQUET)
+
+SHELL := /bin/bash
 
 # Use Ninja if available. If Ninja is used, pass through parallelism control flags.
 USE_NINJA ?= 1
@@ -54,7 +79,7 @@ velox-submodule:		#: Check out code for velox submodule
 submodules: velox-submodule
 
 cmake: submodules		#: Use CMake to create a Makefile build system
-	cmake -B "$(BUILD_BASE_DIR)/$(BUILD_DIR)" $(FORCE_COLOR) $(CMAKE_FLAGS)
+	cmake -B "$(BUILD_BASE_DIR)/$(BUILD_DIR)" $(FORCE_COLOR) $(CMAKE_FLAGS) $(EXTRA_CMAKE_FLAGS)
 
 build:					#: Build the software based in BUILD_DIR and BUILD_TYPE variables
 	cmake --build $(BUILD_BASE_DIR)/$(BUILD_DIR) -j $(NUM_THREADS)
@@ -67,6 +92,10 @@ release:				#: Build the release version
 	$(MAKE) cmake BUILD_DIR=release BUILD_TYPE=Release && \
 	$(MAKE) build BUILD_DIR=release
 
+cmake-and-build:			#: cmake and build without updating submodules which requires git
+	cmake -B "$(BUILD_BASE_DIR)/$(BUILD_DIR)" $(FORCE_COLOR) $(CMAKE_FLAGS) $(EXTRA_CMAKE_FLAGS)
+	cmake --build $(BUILD_BASE_DIR)/$(BUILD_DIR) -j $(NUM_THREADS)
+
 unittest: debug			#: Build with debugging and run unit tests
 	cd $(BUILD_BASE_DIR)/debug && ctest -j $(NUM_THREADS) -VV --output-on-failure --exclude-regex velox.*
 
@@ -76,39 +105,36 @@ presto_protocol:		#: Build the presto_protocol serde library
 TypeSignature:		#: Build the Presto TypeSignature parser
 	cd presto_cpp/main/types; $(MAKE) TypeSignature
 
-format-fix: 			#: Fix formatting issues in the main branch
-	velox/scripts/check.py format main --fix
+format-fix: 			#: Fix formatting issues in the presto-native-execution directory
+ifneq ("$(wildcard ${PYTHON_VENV}/pyvenv.cfg)","")
+	source ${PYTHON_VENV}/bin/activate; scripts/check.py format master --fix
+else
+	scripts/check.py format master --fix
+endif
 
-format-check: 			#: Check for formatting issues on the main branch
+format-check: 			#: Check for formatting issues in the presto-native-execution directory
 	clang-format --version
-	velox/scripts/check.py format main
+ifneq ("$(wildcard ${PYTHON_VENV}/pyvenv.cfg)","")
+	source ${PYTHON_VENV}/bin/activate; scripts/check.py format master
+else
+	scripts/check.py format master
+endif
 
-header-fix:				#: Fix license header issues in the main branch
-	velox/scripts/check.py header main --fix
+header-fix:			#: Fix license header issues in the presto-native-execution directory
+ifneq ("$(wildcard ${PYTHON_VENV}/pyvenv.cfg)","")
+	source ${PYTHON_VENV}/bin/activate; scripts/check.py header master --fix
+else
+	scripts/check.py header master --fix
+endif
 
-header-check:			#: Check for license header issues on the man branch
-	velox/scripts/check.py header main
-
-tidy-fix: cmake			#: Fix clang-tidy issues in the main branch
-	velox/scripts/check.py tidy main --fix
-
-tidy-check: cmake		#: Check clang-tidy issues in the main branch
-	velox/scripts/check.py tidy main
-
-circleci-container:			#: Build the linux container for CircleCi
-	$(MAKE) linux-container CONTAINER_NAME=circleci
-
-linux-container:
-	rm -rf /tmp/docker && \
-	mkdir -p /tmp/docker && \
-	cp scripts/setup-$(CONTAINER_NAME).sh scripts/$(CONTAINER_NAME)-container.dockfile velox/scripts/setup-helper-functions.sh /tmp/docker && \
-	cd /tmp/docker && \
-	docker build --build-arg cpu_target=$(CPU_TARGET) --tag "prestocpp/prestocpp-$(CPU_TARGET)-$(CONTAINER_NAME):$(USER)-$(shell date +%Y%m%d)" -f $(CONTAINER_NAME)-container.dockfile .
+header-check:			#: Check for license header issues in the presto-native-execution directory
+ifneq ("$(wildcard ${PYTHON_VENV}/pyvenv.cfg)","")
+	source ${PYTHON_VENV}/bin/activate; scripts/check.py header master
+else
+	scripts/check.py header master
+endif
 
 help:					#: Show the help messages
 	@cat $(firstword $(MAKEFILE_LIST)) | \
 	awk '/^[-a-z]+:/' | \
 	awk -F: '{ printf("%-20s   %s\n", $$1, $$NF) }'
-
-gen-pom-xml:
-	scripts/gen-pom-xml.sh

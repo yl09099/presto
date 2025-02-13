@@ -21,7 +21,6 @@ import com.facebook.presto.common.type.Type;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.MetadataManager;
-import com.facebook.presto.metadata.SessionPropertyManager;
 import com.facebook.presto.pinot.query.PinotQueryGeneratorContext;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorId;
@@ -72,6 +71,7 @@ import static com.facebook.presto.common.type.IntegerType.INTEGER;
 import static com.facebook.presto.common.type.TimestampType.TIMESTAMP;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.metadata.FunctionAndTypeManager.createTestFunctionAndTypeManager;
+import static com.facebook.presto.metadata.SessionPropertyManager.createTestingSessionPropertyManager;
 import static com.facebook.presto.pinot.PinotColumnHandle.PinotColumnType.REGULAR;
 import static com.facebook.presto.pinot.query.PinotQueryGeneratorContext.Origin.DERIVED;
 import static com.facebook.presto.pinot.query.PinotQueryGeneratorContext.Origin.TABLE_COLUMN;
@@ -86,7 +86,7 @@ import static java.util.stream.Collectors.toMap;
 public class TestPinotQueryBase
 {
     protected static final FunctionAndTypeManager functionAndTypeManager = createTestFunctionAndTypeManager();
-    protected static final StandardFunctionResolution standardFunctionResolution = new FunctionResolution(functionAndTypeManager);
+    protected static final StandardFunctionResolution standardFunctionResolution = new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver());
 
     protected static ConnectorId pinotConnectorId = new ConnectorId("id");
     protected static PinotTableHandle realtimeOnlyTable = new PinotTableHandle(pinotConnectorId.getCatalogName(), "schema", "realtimeOnly");
@@ -104,10 +104,7 @@ public class TestPinotQueryBase
 
     protected static final Metadata metadata = MetadataManager.createTestMetadataManager();
 
-    protected final PinotConfig pinotConfig = new PinotConfig()
-            .setMinConnectionsPerServer(1)
-            .setMaxConnectionsPerServer(2)
-            .setThreadPoolSize(2);
+    protected final PinotConfig pinotConfig = new PinotConfig();
 
     protected static final Map<VariableReferenceExpression, PinotQueryGeneratorContext.Selection> testInput =
             ImmutableMap.<VariableReferenceExpression, PinotQueryGeneratorContext.Selection>builder()
@@ -126,6 +123,7 @@ public class TestPinotQueryBase
                     .put(new VariableReferenceExpression(Optional.empty(), "array_max_0", DOUBLE), new PinotQueryGeneratorContext.Selection("array_max(scores)", DERIVED)) // derived column
                     .put(new VariableReferenceExpression(Optional.empty(), "array_sum_0", DOUBLE), new PinotQueryGeneratorContext.Selection("reduce(scores, cast(0 as double), (s, x) -> s + x, s -> s)", DERIVED)) // derived column
                     .put(new VariableReferenceExpression(Optional.empty(), "array_average_0", DOUBLE), new PinotQueryGeneratorContext.Selection("reduce(scores, CAST(ROW(0.0, 0) AS ROW(sum DOUBLE, count INTEGER)), (s,x) -> CAST(ROW(x + s.sum, s.count + 1) AS ROW(sum DOUBLE, count INTEGER)), s -> IF(s.count = 0, NULL, s.sum / s.count))", DERIVED)) // derived column
+                    .put(new VariableReferenceExpression(Optional.empty(), "trim_city", VARCHAR), new PinotQueryGeneratorContext.Selection("trim(city)", DERIVED)) //derived column
                     .put(new VariableReferenceExpression(Optional.empty(), "secondssinceepoch", BIGINT), new PinotQueryGeneratorContext.Selection("secondsSinceEpoch", TABLE_COLUMN)) // column for datetime functions
                     .put(new VariableReferenceExpression(Optional.empty(), "dayssinceepoch", DATE), new PinotQueryGeneratorContext.Selection("daysSinceEpoch", TABLE_COLUMN)) // column for date functions
                     .put(new VariableReferenceExpression(Optional.empty(), "millissinceepoch", TIMESTAMP), new PinotQueryGeneratorContext.Selection("millisSinceEpoch", TABLE_COLUMN)) // column for timestamp functions
@@ -141,12 +139,12 @@ public class TestPinotQueryBase
         public SessionHolder(PinotConfig pinotConfig)
         {
             connectorSession = new TestingConnectorSession(new PinotSessionProperties(pinotConfig).getSessionProperties());
-            session = TestingSession.testSessionBuilder(new SessionPropertyManager(new SystemSessionProperties().getSessionProperties())).build();
+            session = TestingSession.testSessionBuilder(createTestingSessionPropertyManager(new SystemSessionProperties().getSessionProperties())).build();
         }
 
-        public SessionHolder(boolean useDateTrunc, boolean useSqlSyntax)
+        public SessionHolder(boolean useDateTrunc)
         {
-            this(new PinotConfig().setUseDateTrunc(useDateTrunc).setUsePinotSqlForBrokerQueries(useSqlSyntax));
+            this(new PinotConfig().setUseDateTrunc(useDateTrunc));
         }
 
         public ConnectorSession getConnectorSession()
@@ -247,7 +245,7 @@ public class TestPinotQueryBase
 
     protected DistinctLimitNode distinctLimit(PlanBuilder pb, List<VariableReferenceExpression> distinctVariables, long count, PlanNode source)
     {
-        return new DistinctLimitNode(source.getSourceLocation(), pb.getIdAllocator().getNextId(), source, count, false, distinctVariables, Optional.empty());
+        return new DistinctLimitNode(source.getSourceLocation(), pb.getIdAllocator().getNextId(), source, count, false, distinctVariables, Optional.empty(), 0);
     }
 
     protected TopNNode topN(PlanBuilder pb, long count, List<String> orderingColumns, List<Boolean> ascending, PlanNode source)
@@ -279,11 +277,6 @@ public class TestPinotQueryBase
     protected static PinotColumnHandle bigint(String name)
     {
         return new PinotColumnHandle(name, BIGINT, PinotColumnHandle.PinotColumnType.REGULAR);
-    }
-
-    protected static PinotColumnHandle fraction(String name)
-    {
-        return new PinotColumnHandle(name, DOUBLE, PinotColumnHandle.PinotColumnType.REGULAR);
     }
 
     protected static PinotColumnHandle varchar(String name)

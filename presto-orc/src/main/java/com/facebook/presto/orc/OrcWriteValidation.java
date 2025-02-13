@@ -754,7 +754,7 @@ public class OrcWriteValidation
             ImmutableList.Builder<ColumnStatistics> statisticsBuilders = ImmutableList.builder();
             // if there are no rows, there will be no stats
             if (rowCount > 0) {
-                statisticsBuilders.add(new ColumnStatistics(rowCount, null));
+                statisticsBuilders.add(new ColumnStatistics(rowCount, null, null, null));
                 columnStatisticsValidations.forEach(validation -> validation.build(statisticsBuilders));
             }
             return statisticsBuilders.build();
@@ -778,7 +778,7 @@ public class OrcWriteValidation
                 fieldBuilders = ImmutableList.of();
             }
             else if (TINYINT.equals(type)) {
-                statisticsBuilder = new CountStatisticsBuilder();
+                statisticsBuilder = new IntegerStatisticsBuilder();
                 fieldExtractor = ignored -> ImmutableList.of();
                 fieldBuilders = ImmutableList.of();
             }

@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.connector.system.jdbc;
 
+import com.facebook.presto.FullConnectorSession;
 import com.facebook.presto.Session;
 import com.facebook.presto.common.predicate.TupleDomain;
 import com.facebook.presto.common.type.ArrayType;
@@ -22,7 +23,6 @@ import com.facebook.presto.common.type.Type;
 import com.facebook.presto.common.type.VarcharType;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.metadata.QualifiedTablePrefix;
-import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.ConnectorTableMetadata;
@@ -31,6 +31,7 @@ import com.facebook.presto.spi.InMemoryRecordSet.Builder;
 import com.facebook.presto.spi.RecordCursor;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
+import com.facebook.presto.spi.security.AccessControl;
 
 import javax.inject.Inject;
 
@@ -56,7 +57,6 @@ import static com.facebook.presto.common.type.TinyintType.TINYINT;
 import static com.facebook.presto.common.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.common.type.VarcharType.createUnboundedVarcharType;
 import static com.facebook.presto.common.type.Varchars.isVarcharType;
-import static com.facebook.presto.connector.system.SystemConnectorSessionUtil.toSession;
 import static com.facebook.presto.connector.system.jdbc.FilterUtil.filter;
 import static com.facebook.presto.connector.system.jdbc.FilterUtil.stringFilter;
 import static com.facebook.presto.metadata.MetadataListing.listCatalogs;
@@ -115,7 +115,7 @@ public class ColumnJdbcTable
     @Override
     public RecordCursor cursor(ConnectorTransactionHandle transactionHandle, ConnectorSession connectorSession, TupleDomain<Integer> constraint)
     {
-        Session session = toSession(transactionHandle, connectorSession);
+        Session session = ((FullConnectorSession) connectorSession).getSession();
         Optional<String> catalogFilter = stringFilter(constraint, 0);
         Optional<String> schemaFilter = stringFilter(constraint, 1);
         Optional<String> tableFilter = stringFilter(constraint, 2);
@@ -148,14 +148,14 @@ public class ColumnJdbcTable
                     0,
                     decimalDigits(column.getType()),
                     numPrecRadix(column.getType()),
-                    DatabaseMetaData.columnNullableUnknown,
+                    column.isNullable() ? DatabaseMetaData.columnNullable : DatabaseMetaData.columnNoNulls,
                     column.getComment(),
                     null,
                     null,
                     null,
                     charOctetLength(column.getType()),
                     ordinalPosition,
-                    "",
+                    column.isNullable() ? "YES" : "NO",
                     null,
                     null,
                     null,

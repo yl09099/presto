@@ -40,10 +40,15 @@ public class OrcWriterOptions
     public static final DataSize DEFAULT_DICTIONARY_USEFUL_CHECK_COLUMN_SIZE = new DataSize(6, MEGABYTE);
     public static final DataSize DEFAULT_MAX_STRING_STATISTICS_LIMIT = new DataSize(64, BYTE);
     public static final DataSize DEFAULT_MAX_COMPRESSION_BUFFER_SIZE = new DataSize(256, KILOBYTE);
+    public static final DataSize DEFAULT_MIN_OUTPUT_BUFFER_CHUNK_SIZE = new DataSize(8, KILOBYTE);
+    public static final DataSize DEFAULT_MAX_OUTPUT_BUFFER_CHUNK_SIZE = new DataSize(1024, KILOBYTE);
     public static final DataSize DEFAULT_DWRF_STRIPE_CACHE_MAX_SIZE = new DataSize(8, MEGABYTE);
     public static final DwrfStripeCacheMode DEFAULT_DWRF_STRIPE_CACHE_MODE = INDEX_AND_FOOTER;
     public static final int DEFAULT_PRESERVE_DIRECT_ENCODING_STRIPE_COUNT = 0;
-    public static final int DEFAULT_MAX_FLATTENED_MAP_KEY_COUNT = 20000;
+    public static final int DEFAULT_MAX_FLATTENED_MAP_KEY_COUNT = 25000;
+    public static final boolean DEFAULT_INTEGER_DICTIONARY_ENCODING_ENABLED = false;
+    public static final boolean DEFAULT_STRING_DICTIONARY_ENCODING_ENABLED = true;
+    public static final boolean DEFAULT_STRING_DICTIONARY_SORTING_ENABLED = true;
 
     private final OrcWriterFlushPolicy flushPolicy;
     private final int rowGroupMaxRowCount;
@@ -53,6 +58,8 @@ public class OrcWriterOptions
     private final DataSize dictionaryUsefulCheckColumnSize;
     private final DataSize maxStringStatisticsLimit;
     private final DataSize maxCompressionBufferSize;
+    private final DataSize minOutputBufferChunkSize;
+    private final DataSize maxOutputBufferChunkSize;
     private final OptionalInt compressionLevel;
     private final StreamLayoutFactory streamLayoutFactory;
     private final boolean integerDictionaryEncodingEnabled;
@@ -82,6 +89,8 @@ public class OrcWriterOptions
             DataSize dictionaryUsefulCheckColumnSize,
             DataSize maxStringStatisticsLimit,
             DataSize maxCompressionBufferSize,
+            DataSize minOutputBufferChunkSize,
+            DataSize maxOutputBufferChunkSize,
             OptionalInt compressionLevel,
             StreamLayoutFactory streamLayoutFactory,
             boolean integerDictionaryEncodingEnabled,
@@ -101,6 +110,8 @@ public class OrcWriterOptions
         requireNonNull(dictionaryUsefulCheckColumnSize, "dictionaryUsefulCheckColumnSize is null");
         requireNonNull(maxStringStatisticsLimit, "maxStringStatisticsLimit is null");
         requireNonNull(maxCompressionBufferSize, "maxCompressionBufferSize is null");
+        requireNonNull(minOutputBufferChunkSize, "minOutputBufferChunkSize is null");
+        requireNonNull(maxOutputBufferChunkSize, "maxOutputBufferChunkSize is null");
         requireNonNull(compressionLevel, "compressionLevel is null");
         requireNonNull(streamLayoutFactory, "streamLayoutFactory is null");
         requireNonNull(dwrfWriterOptions, "dwrfWriterOptions is null");
@@ -115,6 +126,8 @@ public class OrcWriterOptions
         this.dictionaryUsefulCheckColumnSize = dictionaryUsefulCheckColumnSize;
         this.maxStringStatisticsLimit = maxStringStatisticsLimit;
         this.maxCompressionBufferSize = maxCompressionBufferSize;
+        this.minOutputBufferChunkSize = minOutputBufferChunkSize;
+        this.maxOutputBufferChunkSize = maxOutputBufferChunkSize;
         this.compressionLevel = compressionLevel;
         this.streamLayoutFactory = streamLayoutFactory;
         this.integerDictionaryEncodingEnabled = integerDictionaryEncodingEnabled;
@@ -166,6 +179,16 @@ public class OrcWriterOptions
     public DataSize getMaxCompressionBufferSize()
     {
         return maxCompressionBufferSize;
+    }
+
+    public DataSize getMinOutputBufferChunkSize()
+    {
+        return minOutputBufferChunkSize;
+    }
+
+    public DataSize getMaxOutputBufferChunkSize()
+    {
+        return maxOutputBufferChunkSize;
     }
 
     public OptionalInt getCompressionLevel()
@@ -269,11 +292,13 @@ public class OrcWriterOptions
         private DataSize dictionaryUsefulCheckColumnSize = DEFAULT_DICTIONARY_USEFUL_CHECK_COLUMN_SIZE;
         private DataSize maxStringStatisticsLimit = DEFAULT_MAX_STRING_STATISTICS_LIMIT;
         private DataSize maxCompressionBufferSize = DEFAULT_MAX_COMPRESSION_BUFFER_SIZE;
+        private DataSize minOutputBufferChunkSize = DEFAULT_MIN_OUTPUT_BUFFER_CHUNK_SIZE;
+        private DataSize maxOutputBufferChunkSize = DEFAULT_MAX_OUTPUT_BUFFER_CHUNK_SIZE;
         private OptionalInt compressionLevel = OptionalInt.empty();
         private StreamLayoutFactory streamLayoutFactory = new ColumnSizeLayoutFactory();
-        private boolean integerDictionaryEncodingEnabled;
-        private boolean stringDictionarySortingEnabled = true;
-        private boolean stringDictionaryEncodingEnabled = true;
+        private boolean integerDictionaryEncodingEnabled = DEFAULT_INTEGER_DICTIONARY_ENCODING_ENABLED;
+        private boolean stringDictionarySortingEnabled = DEFAULT_STRING_DICTIONARY_SORTING_ENABLED;
+        private boolean stringDictionaryEncodingEnabled = DEFAULT_STRING_DICTIONARY_ENCODING_ENABLED;
         private boolean dwrfStripeCacheEnabled;
         private DwrfStripeCacheMode dwrfStripeCacheMode = DEFAULT_DWRF_STRIPE_CACHE_MODE;
         private DataSize dwrfStripeCacheMaxSize = DEFAULT_DWRF_STRIPE_CACHE_MAX_SIZE;
@@ -330,6 +355,18 @@ public class OrcWriterOptions
         public Builder withMaxCompressionBufferSize(DataSize maxCompressionBufferSize)
         {
             this.maxCompressionBufferSize = requireNonNull(maxCompressionBufferSize, "maxCompressionBufferSize is null");
+            return this;
+        }
+
+        public Builder withMinOutputBufferChunkSize(DataSize minOutputBufferChunkSize)
+        {
+            this.minOutputBufferChunkSize = requireNonNull(minOutputBufferChunkSize, "minOutputBufferChunkSize is null");
+            return this;
+        }
+
+        public Builder withMaxOutputBufferChunkSize(DataSize maxOutputBufferChunkSize)
+        {
+            this.maxOutputBufferChunkSize = requireNonNull(maxOutputBufferChunkSize, "maxOutputBufferChunkSize is null");
             return this;
         }
 
@@ -430,6 +467,8 @@ public class OrcWriterOptions
                     dictionaryUsefulCheckColumnSize,
                     maxStringStatisticsLimit,
                     maxCompressionBufferSize,
+                    minOutputBufferChunkSize,
+                    maxOutputBufferChunkSize,
                     compressionLevel,
                     streamLayoutFactory,
                     integerDictionaryEncodingEnabled,

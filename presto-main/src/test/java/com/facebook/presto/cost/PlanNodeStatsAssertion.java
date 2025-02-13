@@ -21,6 +21,7 @@ import java.util.function.Consumer;
 
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.cost.EstimateAssertion.assertEstimateEquals;
+import static com.facebook.presto.spi.statistics.SourceInfo.ConfidenceLevel;
 import static com.google.common.collect.Sets.union;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
@@ -51,15 +52,21 @@ public class PlanNodeStatsAssertion
         return this;
     }
 
-    public PlanNodeStatsAssertion confident(boolean expected)
+    public PlanNodeStatsAssertion confident(ConfidenceLevel expected)
     {
-        assertEquals(actual.isConfident(), expected);
+        assertEquals(actual.confidenceLevel(), expected);
         return this;
     }
 
     public PlanNodeStatsAssertion outputRowsCountUnknown()
     {
         assertTrue(Double.isNaN(actual.getOutputRowCount()), "expected unknown outputRowsCount but got " + actual.getOutputRowCount());
+        return this;
+    }
+
+    public PlanNodeStatsAssertion totalSizeUnknown()
+    {
+        assertTrue(Double.isNaN(actual.getTotalSize()), "expected unknown totalSize but got " + actual.getTotalSize());
         return this;
     }
 
@@ -94,7 +101,7 @@ public class PlanNodeStatsAssertion
     public PlanNodeStatsAssertion equalTo(PlanNodeStatsEstimate expected)
     {
         assertEstimateEquals(actual.getOutputRowCount(), expected.getOutputRowCount(), "outputRowCount mismatch");
-        assertEquals(actual.isConfident(), expected.isConfident());
+        assertEquals(actual.confidenceLevel(), expected.confidenceLevel());
 
         for (VariableReferenceExpression variable : union(expected.getVariablesWithKnownStatistics(), actual.getVariablesWithKnownStatistics())) {
             assertVariableStatsEqual(variable, actual.getVariableStatistics(variable), expected.getVariableStatistics(variable));

@@ -24,22 +24,24 @@ import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.plan.AggregationNode;
+import com.facebook.presto.spi.plan.EquiJoinClause;
 import com.facebook.presto.spi.plan.FilterNode;
+import com.facebook.presto.spi.plan.JoinNode;
+import com.facebook.presto.spi.plan.JoinType;
 import com.facebook.presto.spi.plan.LimitNode;
 import com.facebook.presto.spi.plan.Ordering;
 import com.facebook.presto.spi.plan.OrderingScheme;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.spi.plan.SemiJoinNode;
+import com.facebook.presto.spi.plan.SortNode;
 import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.plan.TopNNode;
 import com.facebook.presto.spi.plan.UnionNode;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.sql.planner.plan.SemiJoinNode;
-import com.facebook.presto.sql.planner.plan.SortNode;
-import com.facebook.presto.sql.planner.plan.WindowNode;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.facebook.presto.sql.relational.RowExpressionDeterminismEvaluator;
 import com.facebook.presto.sql.relational.RowExpressionDomainTranslator;
@@ -113,7 +115,7 @@ public class TestEffectivePredicateExtractor
     private final Metadata metadata = MetadataManager.createTestMetadataManager();
     private final LogicalRowExpressions logicalRowExpressions = new LogicalRowExpressions(
             new RowExpressionDeterminismEvaluator(metadata.getFunctionAndTypeManager()),
-            new FunctionResolution(metadata.getFunctionAndTypeManager()),
+            new FunctionResolution(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver()),
             metadata.getFunctionAndTypeManager());
     private final EffectivePredicateExtractor effectivePredicateExtractor = new EffectivePredicateExtractor(
             new RowExpressionDomainTranslator(metadata),
@@ -142,7 +144,7 @@ public class TestEffectivePredicateExtractor
                 ImmutableList.copyOf(assignments.keySet()),
                 assignments,
                 TupleDomain.all(),
-                TupleDomain.all());
+                TupleDomain.all(), Optional.empty());
     }
 
     @Test
@@ -166,6 +168,7 @@ public class TestEffectivePredicateExtractor
                 singleGroupingSet(ImmutableList.of(AV, BV, CV)),
                 ImmutableList.of(),
                 AggregationNode.Step.FINAL,
+                Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
 
@@ -191,6 +194,7 @@ public class TestEffectivePredicateExtractor
                 globalAggregation(),
                 ImmutableList.of(),
                 AggregationNode.Step.FINAL,
+                Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
 
@@ -232,6 +236,26 @@ public class TestEffectivePredicateExtractor
                 normalizeConjuncts(
                         lessThan(DV, bigintLiteral(10)),
                         equals(DV, EV)));
+    }
+
+    @Test
+    public void testProjectOverFilterWithNoReferencedAssignments()
+    {
+        PlanNode node = new ProjectNode(newId(),
+                filter(baseTableScan,
+                        and(
+                                equals(call("mod",
+                                        metadata.getFunctionAndTypeManager().lookupFunction("mod", fromTypes(BIGINT, BIGINT)),
+                                        BIGINT,
+                                        ImmutableList.of(CV, bigintLiteral(5L))), bigintLiteral(-1L)),
+                                equals(CV, bigintLiteral(10L)))),
+                assignment(DV, AV));
+
+        RowExpression effectivePredicate = effectivePredicateExtractor.extract(node);
+
+        // The filter predicate is reduced to `CV = 10 AND mod(10,5) = -1`
+        // Since we have no references to `CV` in the assignments however, neither of these conjuncts is pulled up through the Project
+        assertEquals(effectivePredicate, TRUE_CONSTANT);
     }
 
     @Test
@@ -294,7 +318,8 @@ public class TestEffectivePredicateExtractor
                                 equals(BV, CV),
                                 lessThan(CV, bigintLiteral(10)))),
                 new OrderingScheme(ImmutableList.of(new Ordering(AV, SortOrder.ASC_NULLS_LAST))),
-                false);
+                false,
+                ImmutableList.of());
 
         RowExpression effectivePredicate = effectivePredicateExtractor.extract(node);
 
@@ -348,7 +373,7 @@ public class TestEffectivePredicateExtractor
                 ImmutableList.copyOf(assignments.keySet()),
                 assignments,
                 TupleDomain.all(),
-                TupleDomain.all());
+                TupleDomain.all(), Optional.empty());
         RowExpression effectivePredicate = effectivePredicateExtractor.extract(node);
         assertEquals(effectivePredicate, TRUE_CONSTANT);
 
@@ -359,7 +384,7 @@ public class TestEffectivePredicateExtractor
                 ImmutableList.copyOf(assignments.keySet()),
                 assignments,
                 TupleDomain.none(),
-                TupleDomain.all());
+                TupleDomain.all(), Optional.empty());
         effectivePredicate = effectivePredicateExtractor.extract(node);
         assertEquals(effectivePredicate, FALSE_CONSTANT);
 
@@ -370,7 +395,7 @@ public class TestEffectivePredicateExtractor
                 ImmutableList.copyOf(assignments.keySet()),
                 assignments,
                 TupleDomain.withColumnDomains(ImmutableMap.of(scanAssignments.get(AV), Domain.singleValue(BIGINT, 1L))),
-                TupleDomain.all());
+                TupleDomain.all(), Optional.empty());
         effectivePredicate = effectivePredicateExtractor.extract(node);
         assertEquals(normalizeConjuncts(effectivePredicate), normalizeConjuncts(equals(bigintLiteral(1L), AV)));
 
@@ -383,7 +408,7 @@ public class TestEffectivePredicateExtractor
                 TupleDomain.withColumnDomains(ImmutableMap.of(
                         scanAssignments.get(AV), Domain.singleValue(BIGINT, 1L),
                         scanAssignments.get(BV), Domain.singleValue(BIGINT, 2L))),
-                TupleDomain.all());
+                TupleDomain.all(), Optional.empty());
         effectivePredicate = effectivePredicateExtractor.extract(node);
         assertEquals(normalizeConjuncts(effectivePredicate), normalizeConjuncts(equals(bigintLiteral(2L), BV), equals(bigintLiteral(1L), AV)));
 
@@ -394,7 +419,7 @@ public class TestEffectivePredicateExtractor
                 ImmutableList.copyOf(assignments.keySet()),
                 assignments,
                 TupleDomain.all(),
-                TupleDomain.all());
+                TupleDomain.all(), Optional.empty());
         effectivePredicate = effectivePredicateExtractor.extract(node);
         assertEquals(effectivePredicate, TRUE_CONSTANT);
     }
@@ -422,10 +447,10 @@ public class TestEffectivePredicateExtractor
     @Test
     public void testInnerJoin()
     {
-        ImmutableList.Builder<JoinNode.EquiJoinClause> criteriaBuilder = ImmutableList.builder();
-        criteriaBuilder.add(new JoinNode.EquiJoinClause(AV, DV));
-        criteriaBuilder.add(new JoinNode.EquiJoinClause(BV, EV));
-        List<JoinNode.EquiJoinClause> criteria = criteriaBuilder.build();
+        ImmutableList.Builder<EquiJoinClause> criteriaBuilder = ImmutableList.builder();
+        criteriaBuilder.add(new EquiJoinClause(AV, DV));
+        criteriaBuilder.add(new EquiJoinClause(BV, EV));
+        List<EquiJoinClause> criteria = criteriaBuilder.build();
 
         Map<VariableReferenceExpression, ColumnHandle> leftAssignments = Maps.filterKeys(scanAssignments, Predicates.in(ImmutableList.of(AV, BV, CV)));
         TableScanNode leftScan = tableScanNode(leftAssignments);
@@ -446,7 +471,7 @@ public class TestEffectivePredicateExtractor
         PlanNode node = new JoinNode(
                 Optional.empty(),
                 newId(),
-                JoinNode.Type.INNER,
+                JoinType.INNER,
                 left,
                 right,
                 criteria,
@@ -488,10 +513,10 @@ public class TestEffectivePredicateExtractor
         PlanNode node = new JoinNode(
                 Optional.empty(),
                 newId(),
-                JoinNode.Type.INNER,
+                JoinType.INNER,
                 left,
                 rightScan,
-                ImmutableList.of(new JoinNode.EquiJoinClause(AV, DV)),
+                ImmutableList.of(new EquiJoinClause(AV, DV)),
                 ImmutableList.<VariableReferenceExpression>builder()
                         .addAll(rightScan.getOutputVariables())
                         .build(),
@@ -520,10 +545,10 @@ public class TestEffectivePredicateExtractor
         PlanNode node = new JoinNode(
                 Optional.empty(),
                 newId(),
-                JoinNode.Type.INNER,
+                JoinType.INNER,
                 leftScan,
                 rightScan,
-                ImmutableList.of(new JoinNode.EquiJoinClause(AV, DV)),
+                ImmutableList.of(new EquiJoinClause(AV, DV)),
                 ImmutableList.<VariableReferenceExpression>builder()
                         .addAll(leftScan.getOutputVariables())
                         .addAll(rightScan.getOutputVariables())
@@ -542,10 +567,10 @@ public class TestEffectivePredicateExtractor
     @Test
     public void testLeftJoin()
     {
-        ImmutableList.Builder<JoinNode.EquiJoinClause> criteriaBuilder = ImmutableList.builder();
-        criteriaBuilder.add(new JoinNode.EquiJoinClause(AV, DV));
-        criteriaBuilder.add(new JoinNode.EquiJoinClause(BV, EV));
-        List<JoinNode.EquiJoinClause> criteria = criteriaBuilder.build();
+        ImmutableList.Builder<EquiJoinClause> criteriaBuilder = ImmutableList.builder();
+        criteriaBuilder.add(new EquiJoinClause(AV, DV));
+        criteriaBuilder.add(new EquiJoinClause(BV, EV));
+        List<EquiJoinClause> criteria = criteriaBuilder.build();
 
         Map<VariableReferenceExpression, ColumnHandle> leftAssignments = Maps.filterKeys(scanAssignments, Predicates.in(ImmutableList.of(AV, BV, CV)));
         TableScanNode leftScan = tableScanNode(leftAssignments);
@@ -565,7 +590,7 @@ public class TestEffectivePredicateExtractor
         PlanNode node = new JoinNode(
                 Optional.empty(),
                 newId(),
-                JoinNode.Type.LEFT,
+                JoinType.LEFT,
                 left,
                 right,
                 criteria,
@@ -594,7 +619,7 @@ public class TestEffectivePredicateExtractor
     @Test
     public void testLeftJoinWithFalseInner()
     {
-        List<JoinNode.EquiJoinClause> criteria = ImmutableList.of(new JoinNode.EquiJoinClause(AV, DV));
+        List<EquiJoinClause> criteria = ImmutableList.of(new EquiJoinClause(AV, DV));
 
         Map<VariableReferenceExpression, ColumnHandle> leftAssignments = Maps.filterKeys(scanAssignments, Predicates.in(ImmutableList.of(AV, BV, CV)));
         TableScanNode leftScan = tableScanNode(leftAssignments);
@@ -611,7 +636,7 @@ public class TestEffectivePredicateExtractor
         PlanNode node = new JoinNode(
                 Optional.empty(),
                 newId(),
-                JoinNode.Type.LEFT,
+                JoinType.LEFT,
                 left,
                 right,
                 criteria,
@@ -637,10 +662,10 @@ public class TestEffectivePredicateExtractor
     @Test
     public void testRightJoin()
     {
-        ImmutableList.Builder<JoinNode.EquiJoinClause> criteriaBuilder = ImmutableList.builder();
-        criteriaBuilder.add(new JoinNode.EquiJoinClause(AV, DV));
-        criteriaBuilder.add(new JoinNode.EquiJoinClause(BV, EV));
-        List<JoinNode.EquiJoinClause> criteria = criteriaBuilder.build();
+        ImmutableList.Builder<EquiJoinClause> criteriaBuilder = ImmutableList.builder();
+        criteriaBuilder.add(new EquiJoinClause(AV, DV));
+        criteriaBuilder.add(new EquiJoinClause(BV, EV));
+        List<EquiJoinClause> criteria = criteriaBuilder.build();
 
         Map<VariableReferenceExpression, ColumnHandle> leftAssignments = Maps.filterKeys(scanAssignments, Predicates.in(ImmutableList.of(AV, BV, CV)));
         TableScanNode leftScan = tableScanNode(leftAssignments);
@@ -660,7 +685,7 @@ public class TestEffectivePredicateExtractor
         PlanNode node = new JoinNode(
                 Optional.empty(),
                 newId(),
-                JoinNode.Type.RIGHT,
+                JoinType.RIGHT,
                 left,
                 right,
                 criteria,
@@ -689,7 +714,7 @@ public class TestEffectivePredicateExtractor
     @Test
     public void testRightJoinWithFalseInner()
     {
-        List<JoinNode.EquiJoinClause> criteria = ImmutableList.of(new JoinNode.EquiJoinClause(AV, DV));
+        List<EquiJoinClause> criteria = ImmutableList.of(new EquiJoinClause(AV, DV));
 
         Map<VariableReferenceExpression, ColumnHandle> leftAssignments = Maps.filterKeys(scanAssignments, Predicates.in(ImmutableList.of(AV, BV, CV)));
         TableScanNode leftScan = tableScanNode(leftAssignments);
@@ -705,7 +730,7 @@ public class TestEffectivePredicateExtractor
         PlanNode node = new JoinNode(
                 Optional.empty(),
                 newId(),
-                JoinNode.Type.RIGHT,
+                JoinType.RIGHT,
                 left,
                 right,
                 criteria,
@@ -758,7 +783,7 @@ public class TestEffectivePredicateExtractor
                 ImmutableList.copyOf(scanAssignments.keySet()),
                 scanAssignments,
                 TupleDomain.all(),
-                TupleDomain.all());
+                TupleDomain.all(), Optional.empty());
     }
 
     private static PlanNodeId newId()

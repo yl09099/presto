@@ -13,13 +13,13 @@
  */
 package com.facebook.presto.iceberg;
 
-import com.facebook.presto.spi.ErrorCode;
+import com.facebook.presto.common.ErrorCode;
+import com.facebook.presto.common.ErrorType;
 import com.facebook.presto.spi.ErrorCodeSupplier;
-import com.facebook.presto.spi.ErrorType;
 
-import static com.facebook.presto.spi.ErrorType.EXTERNAL;
-import static com.facebook.presto.spi.ErrorType.INTERNAL_ERROR;
-import static com.facebook.presto.spi.ErrorType.USER_ERROR;
+import static com.facebook.presto.common.ErrorType.EXTERNAL;
+import static com.facebook.presto.common.ErrorType.INTERNAL_ERROR;
+import static com.facebook.presto.common.ErrorType.USER_ERROR;
 
 public enum IcebergErrorCode
         implements ErrorCodeSupplier
@@ -33,9 +33,14 @@ public enum IcebergErrorCode
     ICEBERG_CANNOT_OPEN_SPLIT(6, EXTERNAL),
     ICEBERG_WRITER_OPEN_ERROR(7, EXTERNAL),
     ICEBERG_FILESYSTEM_ERROR(8, EXTERNAL),
-    ICEBERG_CURSOR_ERROR(9, EXTERNAL),
     ICEBERG_WRITE_VALIDATION_FAILED(10, INTERNAL_ERROR),
-    ICEBERG_INVALID_SNAPSHOT_ID(11, USER_ERROR);
+    ICEBERG_INVALID_SNAPSHOT_ID(11, USER_ERROR),
+    ICEBERG_INVALID_TABLE_TIMESTAMP(12, USER_ERROR),
+    ICEBERG_ROLLBACK_ERROR(13, EXTERNAL),
+    ICEBERG_INVALID_FORMAT_VERSION(14, USER_ERROR),
+    ICEBERG_UNKNOWN_MANIFEST_TYPE(15, EXTERNAL),
+    ICEBERG_COMMIT_ERROR(16, EXTERNAL),
+    ICEBERG_MISSING_COLUMN(17, EXTERNAL);
 
     private final ErrorCode errorCode;
 

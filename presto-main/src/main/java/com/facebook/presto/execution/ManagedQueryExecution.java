@@ -14,9 +14,9 @@
 package com.facebook.presto.execution;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.common.ErrorCode;
 import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.server.BasicQueryInfo;
-import com.facebook.presto.spi.ErrorCode;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupQueryLimits;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
@@ -47,6 +47,11 @@ public interface ManagedQueryExecution
     Duration getTotalCpuTime();
 
     BasicQueryInfo getBasicQueryInfo();
+
+    default int getRunningTaskCount()
+    {
+        return 0;
+    }
 
     void setResourceGroupQueryLimits(ResourceGroupQueryLimits resourceGroupQueryLimits);
 

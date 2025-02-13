@@ -21,15 +21,16 @@ import com.facebook.presto.common.type.Type;
 import com.facebook.presto.expressions.LogicalRowExpressions;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
-import com.facebook.presto.spi.ConnectorMaterializedViewDefinition;
+import com.facebook.presto.spi.MaterializedViewDefinition;
 import com.facebook.presto.spi.MaterializedViewStatus;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.WarningCollector;
+import com.facebook.presto.spi.analyzer.MetadataResolver;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.spi.security.AccessControl;
 import com.facebook.presto.sql.MaterializedViewUtils;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.relational.FunctionResolution;
@@ -78,6 +79,7 @@ import com.google.common.collect.ImmutableSet;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -94,13 +96,15 @@ import static com.facebook.presto.sql.ExpressionUtils.removeExpressionPrefix;
 import static com.facebook.presto.sql.ExpressionUtils.removeGroupingElementPrefix;
 import static com.facebook.presto.sql.ExpressionUtils.removeSingleColumnPrefix;
 import static com.facebook.presto.sql.ExpressionUtils.removeSortItemPrefix;
+import static com.facebook.presto.sql.MaterializedViewUtils.ASSOCIATIVE_REWRITE_FUNCTIONS;
 import static com.facebook.presto.sql.MaterializedViewUtils.COUNT;
+import static com.facebook.presto.sql.MaterializedViewUtils.NON_ASSOCIATIVE_REWRITE_FUNCTIONS;
 import static com.facebook.presto.sql.MaterializedViewUtils.SUM;
-import static com.facebook.presto.sql.ParsingUtil.createParsingOptions;
 import static com.facebook.presto.sql.analyzer.MaterializedViewInformationExtractor.MaterializedViewInfo;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.MISSING_TABLE;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.sql.relational.Expressions.call;
+import static com.facebook.presto.util.AnalyzerUtil.createParsingOptions;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -122,6 +126,7 @@ public class MaterializedViewQueryOptimizer
     private final AccessControl accessControl;
     private final RowExpressionDomainTranslator domainTranslator;
     private final LogicalRowExpressions logicalRowExpressions;
+    private final MetadataResolver metadataResolver;
 
     public MaterializedViewQueryOptimizer(
             Metadata metadata,
@@ -135,10 +140,11 @@ public class MaterializedViewQueryOptimizer
         this.sqlParser = requireNonNull(sqlParser, "sql parser is null");
         this.accessControl = requireNonNull(accessControl, "access control is null");
         this.domainTranslator = requireNonNull(domainTranslator, "row expression domain translator is null");
+        this.metadataResolver = requireNonNull(metadata.getMetadataResolver(session), "metadataResolver is null");
         FunctionAndTypeManager functionAndTypeManager = metadata.getFunctionAndTypeManager();
         logicalRowExpressions = new LogicalRowExpressions(
                 new RowExpressionDeterminismEvaluator(functionAndTypeManager),
-                new FunctionResolution(functionAndTypeManager),
+                new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver()),
                 functionAndTypeManager);
     }
 
@@ -344,7 +350,7 @@ public class MaterializedViewQueryOptimizer
         // TODO: Refactor query optimization code https://github.com/prestodb/presto/issues/16759
 
         for (QualifiedObjectName materializedViewName : referencedMaterializedViews) {
-            QuerySpecification rewrittenQuerySpecification = getRewrittenQuerySpecification(metadata, materializedViewName, querySpecification);
+            QuerySpecification rewrittenQuerySpecification = getRewrittenQuerySpecification(materializedViewName, querySpecification);
             if (rewrittenQuerySpecification != querySpecification) {
                 return rewrittenQuerySpecification;
             }
@@ -352,9 +358,9 @@ public class MaterializedViewQueryOptimizer
         return querySpecification;
     }
 
-    private QuerySpecification getRewrittenQuerySpecification(Metadata metadata, QualifiedObjectName materializedViewName, QuerySpecification originalQuerySpecification)
+    private QuerySpecification getRewrittenQuerySpecification(QualifiedObjectName materializedViewName, QuerySpecification originalQuerySpecification)
     {
-        ConnectorMaterializedViewDefinition materializedViewDefinition = metadata.getMaterializedView(session, materializedViewName).orElseThrow(() ->
+        MaterializedViewDefinition materializedViewDefinition = metadataResolver.getMaterializedView(materializedViewName).orElseThrow(() ->
                 new IllegalStateException("Materialized view definition not present in metadata as expected."));
         Table materializedViewTable = new Table(QualifiedName.of(materializedViewDefinition.getTable()));
         Query materializedViewQuery = (Query) sqlParser.createStatement(materializedViewDefinition.getOriginalSql(), createParsingOptions(session));
@@ -492,7 +498,7 @@ public class MaterializedViewQueryOptimizer
                 RowExpression rewriteLogicExpression = and(baseQueryWhereCondition,
                         call(baseQueryWhereCondition.getSourceLocation(),
                                 "not",
-                                new FunctionResolution(metadata.getFunctionAndTypeManager()).notFunction(),
+                                new FunctionResolution(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver()).notFunction(),
                                 materializedViewWhereCondition.getType(),
                                 materializedViewWhereCondition));
                 RowExpression disjunctiveNormalForm = logicalRowExpressions.convertToDisjunctiveNormalForm(rewriteLogicExpression);
@@ -590,12 +596,23 @@ public class MaterializedViewQueryOptimizer
         {
             ImmutableList.Builder<Expression> rewrittenArguments = ImmutableList.builder();
 
-            if (materializedViewInfo.getBaseToViewColumnMap().containsKey(node)) {
-                Identifier derivedColumn = materializedViewInfo.getBaseToViewColumnMap().get(node);
+            Map<Expression, Identifier> baseToViewColumnMap = materializedViewInfo.getBaseToViewColumnMap();
+
+            if (NON_ASSOCIATIVE_REWRITE_FUNCTIONS.containsKey(node.getName())) {
+                return MaterializedViewUtils.rewriteNonAssociativeFunction(node, baseToViewColumnMap);
+            }
+
+            if (!ASSOCIATIVE_REWRITE_FUNCTIONS.contains(node.getName())) {
+                throw new SemanticException(NOT_SUPPORTED, node, "Was unable to rewrite non-associative function call with materialized view");
+            }
+
+            if (baseToViewColumnMap.containsKey(node)) {
+                Identifier derivedColumn = baseToViewColumnMap.get(node);
 
                 if (node.getName().equals(COUNT)) {
                     return rewriteCountAsSum(node, derivedColumn);
                 }
+                // TODO: We should be able to add more functions (e.g. BOOL_AND, BOOL_OR) to simple associative case
                 rewrittenArguments.add(derivedColumn);
             }
             else {
@@ -689,9 +706,13 @@ public class MaterializedViewQueryOptimizer
 
         private boolean validateExpressionForGroupBy(Set<Expression> groupByOfMaterializedView, Expression expression)
         {
+            boolean canRewrite = expression instanceof FunctionCall
+                    && (ASSOCIATIVE_REWRITE_FUNCTIONS.contains(((FunctionCall) expression).getName())
+                    || MaterializedViewUtils.validateNonAssociativeFunctionRewrite((FunctionCall) expression, materializedViewInfo.getBaseToViewColumnMap()));
+
             // If a selected column is not present in GROUP BY node of the query.
             // It must be 1) be selected in the materialized view and 2) not present in GROUP BY node of the materialized view
-            return groupByOfMaterializedView.contains(expression) || !materializedViewInfo.getBaseToViewColumnMap().containsKey(expression);
+            return groupByOfMaterializedView.contains(expression) || !(materializedViewInfo.getBaseToViewColumnMap().containsKey(expression) || canRewrite);
         }
 
         /**
@@ -796,7 +817,7 @@ public class MaterializedViewQueryOptimizer
         {
             QualifiedObjectName baseTableName = createQualifiedObjectName(session, table, table.getName());
 
-            Optional<TableHandle> tableHandle = metadata.getTableHandle(session, baseTableName);
+            Optional<TableHandle> tableHandle = metadata.getMetadataResolver(session).getTableHandle(baseTableName);
             if (!tableHandle.isPresent()) {
                 throw new SemanticException(MISSING_TABLE, node, "Table does not exist");
             }
@@ -839,7 +860,7 @@ public class MaterializedViewQueryOptimizer
                 baseQueryDomain = MaterializedViewUtils.getDomainFromFilter(session, domainTranslator, rowExpression);
             }
 
-            return metadata.getMaterializedViewStatus(session, materializedViewName, baseQueryDomain);
+            return metadataResolver.getMaterializedViewStatus(materializedViewName, baseQueryDomain);
         }
     }
 }

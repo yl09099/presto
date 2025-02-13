@@ -130,10 +130,11 @@ public class Memo
         PlanNode old = getGroup(group).membership;
 
         checkArgument(new HashSet<>(old.getOutputVariables()).equals(new HashSet<>(node.getOutputVariables())),
-                "%s: transformed expression doesn't produce same outputs: %s vs %s",
+                "%s: transformed expression doesn't produce same outputs: %s vs %s for node: %s",
                 reason,
                 old.getOutputVariables(),
-                node.getOutputVariables());
+                node.getOutputVariables(),
+                node);
 
         if (node instanceof GroupReference) {
             node = getNode(((GroupReference) node).getGroupId());
@@ -156,6 +157,11 @@ public class Memo
         evictStatisticsAndCost(group);
 
         return node;
+    }
+
+    public void assignStatsEquivalentPlanNode(GroupReference reference, Optional<PlanNode> statsEquivalentPlanNode)
+    {
+        getGroup(reference.getGroupId()).assignStatsEquivalentPlanNode(statsEquivalentPlanNode);
     }
 
     private void evictStatisticsAndCost(int group)
@@ -286,6 +292,11 @@ public class Memo
         {
             this.membership = requireNonNull(member, "member is null");
             this.logicalProperties = logicalProperties;
+        }
+
+        private void assignStatsEquivalentPlanNode(Optional<PlanNode> statsEquivalentPlanNode)
+        {
+            membership = membership.assignStatsEquivalentPlanNode(statsEquivalentPlanNode);
         }
     }
 }

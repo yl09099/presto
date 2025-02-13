@@ -14,55 +14,59 @@
 
 #include <stdexcept>
 #include <vector>
-#include "presto_cpp/presto_protocol/presto_protocol.h"
+#include "presto_cpp/main/operators/ShuffleInterface.h"
+#include "presto_cpp/presto_protocol/core/presto_protocol_core.h"
 #include "velox/core/Expressions.h"
 #include "velox/core/PlanFragment.h"
 #include "velox/core/PlanNode.h"
 #include "velox/type/Variant.h"
 
 #include "presto_cpp/main/types/PrestoTaskId.h"
-// TypeSignatureTypeConverter.h must be included after presto_protocol.h
-// because it changes the macro EOF in some way (maybe deleting it?) which
-// is used in third_party/json/json.hpp
-//
 #include "presto_cpp/main/types/PrestoToVeloxExpr.h"
+#include "presto_cpp/main/types/TypeParser.h"
 
 namespace facebook::presto {
 
-class VeloxQueryPlanConverter {
+class VeloxQueryPlanConverterBase {
  public:
-  explicit VeloxQueryPlanConverter(velox::memory::MemoryPool* pool)
-      : pool_(pool), exprConverter_(pool) {}
+  VeloxQueryPlanConverterBase(
+      velox::core::QueryCtx* queryCtx,
+      velox::memory::MemoryPool* pool)
+      : pool_(pool), queryCtx_{queryCtx}, exprConverter_(pool, &typeParser_) {}
 
-  velox::core::PlanFragment toVeloxQueryPlan(
+  virtual ~VeloxQueryPlanConverterBase() = default;
+
+  virtual velox::core::PlanFragment toVeloxQueryPlan(
       const protocol::PlanFragment& fragment,
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
   // visible for testing
-  std::shared_ptr<const velox::core::PlanNode> toVeloxQueryPlan(
+  velox::core::PlanNodePtr toVeloxQueryPlan(
       const std::shared_ptr<const protocol::PlanNode>& node,
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
- private:
-  std::shared_ptr<const velox::core::PlanNode> toVeloxQueryPlan(
+ protected:
+  virtual velox::core::PlanNodePtr toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::RemoteSourceNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId) = 0;
+
+  virtual velox::connector::CommitStrategy getCommitStrategy() const = 0;
+
+  velox::core::PlanNodePtr toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::OutputNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId);
+
+  velox::core::PlanNodePtr toVeloxQueryPlan(
       const std::shared_ptr<const protocol::ExchangeNode>& node,
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
-  std::shared_ptr<const velox::core::ExchangeNode> toVeloxQueryPlan(
-      const std::shared_ptr<const protocol::RemoteSourceNode>& node,
-      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
-      const protocol::TaskId& taskId);
-
-  std::shared_ptr<const velox::core::PlanNode> toVeloxQueryPlan(
+  velox::core::PlanNodePtr toVeloxQueryPlan(
       const std::shared_ptr<const protocol::FilterNode>& node,
-      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
-      const protocol::TaskId& taskId);
-
-  std::shared_ptr<const velox::core::PlanNode> toVeloxQueryPlan(
-      const std::shared_ptr<const protocol::OutputNode>& node,
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
@@ -91,17 +95,27 @@ class VeloxQueryPlanConverter {
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
-  std::shared_ptr<const velox::core::PlanNode> toVeloxQueryPlan(
+  velox::core::PlanNodePtr toVeloxQueryPlan(
       const std::shared_ptr<const protocol::DistinctLimitNode>& node,
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
-  std::shared_ptr<const velox::core::PlanNode> toVeloxQueryPlan(
+  velox::core::PlanNodePtr toVeloxQueryPlan(
       const std::shared_ptr<const protocol::JoinNode>& node,
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
-  std::shared_ptr<const velox::core::PlanNode> toVeloxQueryPlan(
+  velox::core::PlanNodePtr toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::SemiJoinNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId);
+
+  velox::core::PlanNodePtr toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::MarkDistinctNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId);
+
+  velox::core::PlanNodePtr toVeloxQueryPlan(
       const std::shared_ptr<const protocol::MergeJoinNode>& node,
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
@@ -126,6 +140,11 @@ class VeloxQueryPlanConverter {
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
+  std::shared_ptr<const velox::core::TableWriteMergeNode> toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::TableWriterMergeNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId);
+
   std::shared_ptr<const velox::core::UnnestNode> toVeloxQueryPlan(
       const std::shared_ptr<const protocol::UnnestNode>& node,
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
@@ -141,7 +160,22 @@ class VeloxQueryPlanConverter {
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
-  std::vector<std::shared_ptr<const FieldAccessTypedExpr>> toVeloxExprs(
+  std::shared_ptr<const velox::core::WindowNode> toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::WindowNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId);
+
+  std::shared_ptr<const velox::core::RowNumberNode> toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::RowNumberNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId);
+
+  std::shared_ptr<const velox::core::PlanNode> toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::TopNRowNumberNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId);
+
+  std::vector<velox::core::FieldAccessTypedExprPtr> toVeloxExprs(
       const std::vector<protocol::VariableReferenceExpression>& variables);
 
   std::shared_ptr<const velox::core::ProjectNode> tryConvertOffsetLimit(
@@ -149,8 +183,97 @@ class VeloxQueryPlanConverter {
       const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
       const protocol::TaskId& taskId);
 
-  velox::memory::MemoryPool* pool_;
+  velox::core::WindowNode::Function toVeloxWindowFunction(
+      const protocol::Function& func);
+
+  velox::VectorPtr evaluateConstantExpression(
+      const velox::core::TypedExprPtr& expression);
+
+  std::shared_ptr<velox::core::AggregationNode> generateAggregationNode(
+      const std::shared_ptr<protocol::StatisticAggregations>&
+          statisticsAggregation,
+      velox::core::AggregationNode::Step step,
+      const protocol::PlanNodeId& id,
+      const velox::core::PlanNodePtr& sourceVeloxPlan,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId);
+
+  std::vector<protocol::VariableReferenceExpression> generateOutputVariables(
+      const std::vector<protocol::VariableReferenceExpression>&
+          nonStatisticsOutputVariables,
+      const std::shared_ptr<protocol::StatisticAggregations>&
+          statisticsAggregation);
+
+  void toAggregations(
+      const std::vector<protocol::VariableReferenceExpression>& outputVariables,
+      const std::map<
+          protocol::VariableReferenceExpression,
+          protocol::Aggregation>& aggregationMap,
+      std::vector<velox::core::AggregationNode::Aggregate>& aggregates,
+      std::vector<std::string>& aggregateNames);
+
+  velox::memory::MemoryPool* const pool_;
+  velox::core::QueryCtx* const queryCtx_;
   VeloxExprConverter exprConverter_;
+  TypeParser typeParser_;
 };
 
+class VeloxInteractiveQueryPlanConverter : public VeloxQueryPlanConverterBase {
+ public:
+  using VeloxQueryPlanConverterBase::toVeloxQueryPlan;
+
+  explicit VeloxInteractiveQueryPlanConverter(
+      velox::core::QueryCtx* queryCtx,
+      velox::memory::MemoryPool* pool)
+      : VeloxQueryPlanConverterBase(queryCtx, pool) {}
+
+ protected:
+  velox::core::PlanNodePtr toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::RemoteSourceNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId) override;
+
+  velox::connector::CommitStrategy getCommitStrategy() const override;
+};
+
+class VeloxBatchQueryPlanConverter : public VeloxQueryPlanConverterBase {
+ public:
+  using VeloxQueryPlanConverterBase::toVeloxQueryPlan;
+
+  VeloxBatchQueryPlanConverter(
+      const std::string& shuffleName,
+      std::shared_ptr<std::string>&& serializedShuffleWriteInfo,
+      std::shared_ptr<std::string>&& broadcastBasePath,
+      velox::core::QueryCtx* queryCtx,
+      velox::memory::MemoryPool* pool)
+      : VeloxQueryPlanConverterBase(queryCtx, pool),
+        shuffleName_(shuffleName),
+        serializedShuffleWriteInfo_(std::move(serializedShuffleWriteInfo)),
+        broadcastBasePath_(std::move(broadcastBasePath)) {}
+
+  velox::core::PlanFragment toVeloxQueryPlan(
+      const protocol::PlanFragment& fragment,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId) override;
+
+ protected:
+  velox::core::PlanNodePtr toVeloxQueryPlan(
+      const std::shared_ptr<const protocol::RemoteSourceNode>& node,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId) override;
+
+  velox::connector::CommitStrategy getCommitStrategy() const override;
+
+ private:
+  const std::string shuffleName_;
+  const std::shared_ptr<std::string> serializedShuffleWriteInfo_;
+  const std::shared_ptr<std::string> broadcastBasePath_;
+};
+
+void registerPrestoPlanNodeSerDe();
+
+void parseSqlFunctionHandle(
+    const std::shared_ptr<protocol::SqlFunctionHandle>& sqlFunction,
+    std::vector<velox::TypePtr>& rawInputTypes,
+    TypeParser& typeParser);
 } // namespace facebook::presto

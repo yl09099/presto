@@ -13,12 +13,12 @@
  */
 package com.facebook.presto.plugin.prometheus;
 
-import com.facebook.presto.spi.ErrorCode;
+import com.facebook.presto.common.ErrorCode;
+import com.facebook.presto.common.ErrorType;
 import com.facebook.presto.spi.ErrorCodeSupplier;
-import com.facebook.presto.spi.ErrorType;
 
-import static com.facebook.presto.spi.ErrorType.EXTERNAL;
-import static com.facebook.presto.spi.ErrorType.USER_ERROR;
+import static com.facebook.presto.common.ErrorType.EXTERNAL;
+import static com.facebook.presto.common.ErrorType.USER_ERROR;
 
 public enum PrometheusErrorCode
         implements ErrorCodeSupplier
@@ -26,7 +26,8 @@ public enum PrometheusErrorCode
     PROMETHEUS_UNKNOWN_ERROR(0, EXTERNAL),
     PROMETHEUS_TABLES_METRICS_RETRIEVE_ERROR(1, USER_ERROR),
     PROMETHEUS_PARSE_ERROR(2, EXTERNAL),
-    PROMETHEUS_OUTPUT_ERROR(3, EXTERNAL);
+    PROMETHEUS_OUTPUT_ERROR(3, EXTERNAL),
+    PROMETHEUS_SECURE_COMMUNICATION_ERROR(4, EXTERNAL);
 
     private final ErrorCode errorCode;
 

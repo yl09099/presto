@@ -14,18 +14,15 @@
 package com.facebook.presto.sql.planner.plan;
 
 import com.facebook.presto.spi.plan.PlanVisitor;
+import com.facebook.presto.sql.planner.CanonicalJoinNode;
 import com.facebook.presto.sql.planner.CanonicalTableScanNode;
+import com.facebook.presto.sql.planner.StatsEquivalentPlanNodeWithLimit;
 import com.facebook.presto.sql.planner.iterative.GroupReference;
 
 public abstract class InternalPlanVisitor<R, C>
         extends PlanVisitor<R, C>
 {
     public R visitRemoteSource(RemoteSourceNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
-    public R visitOutput(OutputNode node, C context)
     {
         return visitPlan(node, context);
     }
@@ -45,27 +42,7 @@ public abstract class InternalPlanVisitor<R, C>
         return visitPlan(node, context);
     }
 
-    public R visitJoin(JoinNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
-    public R visitSemiJoin(SemiJoinNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
-    public R visitSpatialJoin(SpatialJoinNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
     public R visitIndexJoin(IndexJoinNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
-    public R visitMergeJoin(MergeJoinNode node, C context)
     {
         return visitPlan(node, context);
     }
@@ -75,27 +52,7 @@ public abstract class InternalPlanVisitor<R, C>
         return visitPlan(node, context);
     }
 
-    public R visitSort(SortNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
-    public R visitWindow(WindowNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
-    public R visitTableWriter(TableWriterNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
     public R visitTableWriteMerge(TableWriterMergeNode node, C context)
-    {
-        return visitPlan(node, context);
-    }
-
-    public R visitDelete(DeleteNode node, C context)
     {
         return visitPlan(node, context);
     }
@@ -105,7 +62,7 @@ public abstract class InternalPlanVisitor<R, C>
         return visitPlan(node, context);
     }
 
-    public R visitTableFinish(TableFinishNode node, C context)
+    public R visitUpdate(UpdateNode node, C context)
     {
         return visitPlan(node, context);
     }
@@ -166,6 +123,21 @@ public abstract class InternalPlanVisitor<R, C>
     }
 
     public R visitCanonicalTableScan(CanonicalTableScanNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitCanonicalJoinNode(CanonicalJoinNode node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitStatsEquivalentPlanNodeWithLimit(StatsEquivalentPlanNodeWithLimit node, C context)
+    {
+        return visitPlan(node, context);
+    }
+
+    public R visitSequence(SequenceNode node, C context)
     {
         return visitPlan(node, context);
     }

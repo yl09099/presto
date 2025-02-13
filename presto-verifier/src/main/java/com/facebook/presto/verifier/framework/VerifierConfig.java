@@ -15,8 +15,11 @@ package com.facebook.presto.verifier.framework;
 
 import com.facebook.airlift.configuration.Config;
 import com.facebook.airlift.configuration.ConfigDescription;
+import com.facebook.presto.verifier.rewrite.FunctionCallRewriter;
 import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Multimap;
 
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
@@ -24,10 +27,14 @@ import javax.validation.constraints.NotNull;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.facebook.presto.verifier.rewrite.FunctionCallRewriter.FunctionCallSubstitute;
 import static com.facebook.presto.verifier.source.MySqlSourceQuerySupplier.MYSQL_SOURCE_QUERY_SUPPLIER;
+import static java.util.Locale.ENGLISH;
 
 public class VerifierConfig
 {
+    public static final String CONTROL_TEST_MODE = "control-test";
+    public static final String QUERY_BANK_MODE = "query-bank";
     private Optional<Set<String>> whitelist = Optional.empty();
     private Optional<Set<String>> blacklist = Optional.empty();
 
@@ -45,6 +52,8 @@ public class VerifierConfig
 
     private double relativeErrorMargin = 1e-4;
     private double absoluteErrorMargin = 1e-12;
+    private boolean useErrorMarginForFloatingPointArrays = true;
+    private boolean validateStringAsDouble;
     private boolean smartTeardown;
     private int verificationResubmissionLimit = 6;
 
@@ -55,6 +64,12 @@ public class VerifierConfig
     private boolean concurrentControlAndTest;
 
     private boolean explain;
+    private boolean saveSnapshot;
+
+    private boolean extendedVerification;
+    private String runningMode = CONTROL_TEST_MODE;
+
+    private Multimap<String, FunctionCallSubstitute> functionSubstitutes = ImmutableMultimap.of();
 
     @NotNull
     public Optional<Set<String>> getWhitelist()
@@ -241,6 +256,32 @@ public class VerifierConfig
         return this;
     }
 
+    public boolean isUseErrorMarginForFloatingPointArrays()
+    {
+        return useErrorMarginForFloatingPointArrays;
+    }
+
+    @ConfigDescription("When set to true, arrays of floating point numbers are validated like floating point columns, using error margins. False by default.")
+    @Config("use-error-margin-for-floating-point-arrays")
+    public VerifierConfig setUseErrorMarginForFloatingPointArrays(boolean useErrorMarginForFloatingPointArrays)
+    {
+        this.useErrorMarginForFloatingPointArrays = useErrorMarginForFloatingPointArrays;
+        return this;
+    }
+
+    public boolean isValidateStringAsDouble()
+    {
+        return validateStringAsDouble;
+    }
+
+    @ConfigDescription("When set to true, validate string column as double if the values are all in the floating point format.")
+    @Config("validate-string-as-double")
+    public VerifierConfig setValidateStringAsDouble(boolean validateStringAsDouble)
+    {
+        this.validateStringAsDouble = validateStringAsDouble;
+        return this;
+    }
+
     public boolean isSmartTeardown()
     {
         return smartTeardown;
@@ -343,6 +384,63 @@ public class VerifierConfig
     public VerifierConfig setConcurrentControlAndTest(boolean concurrentControlAndTest)
     {
         this.concurrentControlAndTest = concurrentControlAndTest;
+        return this;
+    }
+
+    public boolean isSaveSnapshot()
+    {
+        return saveSnapshot;
+    }
+    @ConfigDescription("Save control query results to database as snapshots.")
+    @Config("save-snapshot")
+    public VerifierConfig setSaveSnapshot(boolean saveSnapshot)
+    {
+        this.saveSnapshot = saveSnapshot;
+        return this;
+    }
+
+    public boolean isExtendedVerification()
+    {
+        return extendedVerification;
+    }
+
+    @ConfigDescription("Run extended verification logic in verifier.")
+    @Config("extended-verification")
+    public VerifierConfig setExtendedVerification(boolean extendedVerification)
+    {
+        this.extendedVerification = extendedVerification;
+        return this;
+    }
+
+    public String getRunningMode()
+    {
+        return runningMode;
+    }
+
+    @ConfigDescription("Set running mode to 'control-test' or 'query-bank'.")
+    @Config("running-mode")
+    public VerifierConfig setRunningMode(String runningMode)
+    {
+        this.runningMode = runningMode;
+        if (QUERY_BANK_MODE.toLowerCase(ENGLISH).equals(runningMode)) {
+            skipControl = true;
+        }
+        return this;
+    }
+
+    public Multimap<String, FunctionCallSubstitute> getFunctionSubstitutes()
+    {
+        return functionSubstitutes;
+    }
+
+    @ConfigDescription("Specification of function substitutions, in the format of" +
+            " /foo(c0,_)/bar(c0)/,/fred(c0,c1)/baz(qux(c1,c0))/,/foobar(c0)/if(qux(c1),bar(c0),baz(c1))/,...," +
+            " where foo(c0, _) would be substituted by bar(c0), with the declared arguments applied" +
+            " to the corresponding positions. Concatenate function substitutions with comma.")
+    @Config("function-substitutes")
+    public VerifierConfig setFunctionSubstitutes(String functionSubstitutes)
+    {
+        this.functionSubstitutes = FunctionCallRewriter.validateAndConstructFunctionCallSubstituteMap(functionSubstitutes);
         return this;
     }
 }

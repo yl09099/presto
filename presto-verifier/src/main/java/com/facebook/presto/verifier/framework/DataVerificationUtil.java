@@ -40,6 +40,7 @@ import static com.facebook.presto.verifier.framework.QueryStage.DESCRIBE;
 import static com.facebook.presto.verifier.framework.QueryStage.forTeardown;
 import static com.facebook.presto.verifier.framework.VerifierUtil.runAndConsume;
 import static java.util.Locale.ENGLISH;
+import static java.util.Objects.requireNonNull;
 
 public class DataVerificationUtil
 {
@@ -71,14 +72,17 @@ public class DataVerificationUtil
     }
 
     public static DataMatchResult match(
+            DataMatchResult.DataType dataType,
             ChecksumValidator checksumValidator,
             List<Column> controlColumns,
             List<Column> testColumns,
             ChecksumResult controlChecksum,
             ChecksumResult testChecksum)
     {
+        requireNonNull(controlColumns, "controlColumns is null.");
         if (!controlColumns.equals(testColumns)) {
             return new DataMatchResult(
+                    dataType,
                     SCHEMA_MISMATCH,
                     Optional.empty(),
                     OptionalLong.empty(),
@@ -100,6 +104,7 @@ public class DataVerificationUtil
             matchType = mismatchedColumns.isEmpty() ? MATCH : COLUMN_MISMATCH;
         }
         return new DataMatchResult(
+                dataType,
                 matchType,
                 Optional.of(controlChecksum),
                 controlRowCount,

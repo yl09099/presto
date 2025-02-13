@@ -21,11 +21,11 @@ import com.facebook.presto.spi.plan.Assignments;
 import com.facebook.presto.spi.plan.OrderingScheme;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.VariablesExtractor;
 import com.facebook.presto.sql.planner.iterative.Rule;
-import com.facebook.presto.sql.planner.plan.WindowNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -108,7 +108,7 @@ public class GatherAndMergeWindows
             return pullWindowNodeAboveProjects(captures.get(childCapture), projects)
                     .flatMap(newChild -> manipulateAdjacentWindowNodes(parent, newChild, context))
                     .map(Result::ofPlanNode)
-                    .orElse(Result.empty());
+                    .orElseGet(Result::empty);
         }
 
         protected abstract Optional<PlanNode> manipulateAdjacentWindowNodes(WindowNode parent, WindowNode child, Context context);
@@ -184,7 +184,12 @@ public class GatherAndMergeWindows
                 || parent.getWindowFunctions().values().stream()
                 .map(function -> VariablesExtractor.extractUnique(function.getFunctionCall().getArguments()))
                 .flatMap(Collection::stream)
-                .anyMatch(child.getCreatedVariable()::contains);
+                .anyMatch(child.getCreatedVariable()::contains)
+                || parent.getWindowFunctions().values().stream()
+                .map(function -> function.getFrame())
+                .map(frame -> ImmutableList.of(frame.getStartValue(), frame.getEndValue(), frame.getSortKeyCoercedForFrameStartComparison(), frame.getSortKeyCoercedForFrameEndComparison()))
+                .flatMap(Collection::stream)
+                .anyMatch(x -> x.isPresent() && child.getCreatedVariable().contains(x.get()));
     }
 
     public static class MergeAdjacentWindowsOverProjects
@@ -217,7 +222,7 @@ public class GatherAndMergeWindows
                     parent.getPreSortedOrderPrefix());
 
             return Optional.of(
-                    restrictOutputs(context.getIdAllocator(), mergedWindowNode, ImmutableSet.copyOf(parent.getOutputVariables()), true)
+                    restrictOutputs(context.getIdAllocator(), mergedWindowNode, ImmutableSet.copyOf(parent.getOutputVariables()))
                             .orElse(mergedWindowNode));
         }
     }
@@ -236,7 +241,7 @@ public class GatherAndMergeWindows
             if ((compare(parent, child) < 0) && (!dependsOn(parent, child))) {
                 PlanNode transposedWindows = transpose(parent, child);
                 return Optional.of(
-                        restrictOutputs(context.getIdAllocator(), transposedWindows, ImmutableSet.copyOf(parent.getOutputVariables()), true)
+                        restrictOutputs(context.getIdAllocator(), transposedWindows, ImmutableSet.copyOf(parent.getOutputVariables()))
                                 .orElse(transposedWindows));
             }
             else {

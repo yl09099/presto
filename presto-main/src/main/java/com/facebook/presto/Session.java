@@ -15,9 +15,12 @@ package com.facebook.presto;
 
 import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.function.SqlFunctionProperties;
+import com.facebook.presto.common.resourceGroups.QueryType;
+import com.facebook.presto.common.transaction.TransactionId;
 import com.facebook.presto.common.type.TimeZoneKey;
+import com.facebook.presto.cost.PlanCostEstimate;
+import com.facebook.presto.cost.PlanNodeStatsEstimate;
 import com.facebook.presto.metadata.SessionPropertyManager;
-import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.PrestoException;
@@ -25,16 +28,18 @@ import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.function.SqlFunctionId;
 import com.facebook.presto.spi.function.SqlInvokedFunction;
+import com.facebook.presto.spi.plan.PlanNodeId;
+import com.facebook.presto.spi.security.AccessControl;
 import com.facebook.presto.spi.security.AccessControlContext;
 import com.facebook.presto.spi.security.Identity;
 import com.facebook.presto.spi.security.SelectedRole;
 import com.facebook.presto.spi.session.ResourceEstimates;
 import com.facebook.presto.spi.session.SessionPropertyConfigurationManager.SystemSessionPropertyConfiguration;
 import com.facebook.presto.spi.tracing.Tracer;
-import com.facebook.presto.sql.tree.Execute;
-import com.facebook.presto.transaction.TransactionId;
+import com.facebook.presto.sql.analyzer.CTEInformationCollector;
+import com.facebook.presto.sql.planner.optimizations.OptimizerInformationCollector;
+import com.facebook.presto.sql.planner.optimizations.OptimizerResultCollector;
 import com.facebook.presto.transaction.TransactionManager;
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
@@ -51,11 +56,13 @@ import java.util.Set;
 import java.util.TimeZone;
 import java.util.stream.Collectors;
 
+import static com.facebook.presto.SystemSessionProperties.LEGACY_JSON_CAST;
+import static com.facebook.presto.SystemSessionProperties.isFieldNameInJsonCastEnabled;
 import static com.facebook.presto.SystemSessionProperties.isLegacyMapSubscript;
 import static com.facebook.presto.SystemSessionProperties.isLegacyRowFieldOrdinalAccessEnabled;
 import static com.facebook.presto.SystemSessionProperties.isLegacyTimestamp;
-import static com.facebook.presto.SystemSessionProperties.isLegacyTypeCoercionWarningEnabled;
 import static com.facebook.presto.SystemSessionProperties.isParseDecimalLiteralsAsDouble;
+import static com.facebook.presto.SystemSessionProperties.warnOnCommonNanPatterns;
 import static com.facebook.presto.spi.ConnectorId.createInformationSchemaConnectorId;
 import static com.facebook.presto.spi.ConnectorId.createSystemTablesConnectorId;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_FOUND;
@@ -92,8 +99,14 @@ public final class Session
     private final AccessControlContext context;
     private final Optional<Tracer> tracer;
     private final WarningCollector warningCollector;
+    private final RuntimeStats runtimeStats;
+    private final Optional<QueryType> queryType;
 
-    private final RuntimeStats runtimeStats = new RuntimeStats();
+    private final OptimizerInformationCollector optimizerInformationCollector = new OptimizerInformationCollector();
+    private final OptimizerResultCollector optimizerResultCollector = new OptimizerResultCollector();
+    private final CTEInformationCollector cteInformationCollector = new CTEInformationCollector();
+    private final Map<PlanNodeId, PlanNodeStatsEstimate> planNodeStatsMap = new HashMap<>();
+    private final Map<PlanNodeId, PlanCostEstimate> planNodeCostMap = new HashMap<>();
 
     public Session(
             QueryId queryId,
@@ -119,7 +132,9 @@ public final class Session
             Map<String, String> preparedStatements,
             Map<SqlFunctionId, SqlInvokedFunction> sessionFunctions,
             Optional<Tracer> tracer,
-            WarningCollector warningCollector)
+            WarningCollector warningCollector,
+            RuntimeStats runtimeStats,
+            Optional<QueryType> queryType)
     {
         this.queryId = requireNonNull(queryId, "queryId is null");
         this.transactionId = requireNonNull(transactionId, "transactionId is null");
@@ -157,9 +172,11 @@ public final class Session
         checkArgument(!transactionId.isPresent() || unprocessedCatalogProperties.isEmpty(), "Catalog session properties cannot be set if there is an open transaction");
 
         checkArgument(catalog.isPresent() || !schema.isPresent(), "schema is set but catalog is not");
-        this.context = new AccessControlContext(queryId, clientInfo, source);
         this.tracer = requireNonNull(tracer, "tracer is null");
         this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
+        this.runtimeStats = requireNonNull(runtimeStats, "runtimeStats is null");
+        this.queryType = requireNonNull(queryType, "queryType is null");
+        this.context = new AccessControlContext(queryId, clientInfo, clientTags, source, warningCollector, runtimeStats, queryType);
     }
 
     public QueryId getQueryId()
@@ -283,11 +300,6 @@ public final class Session
         return preparedStatements;
     }
 
-    public String getPreparedStatementFromExecute(Execute execute)
-    {
-        return getPreparedStatement(execute.getName().getValue());
-    }
-
     public String getPreparedStatement(String name)
     {
         String sql = preparedStatements.get(name);
@@ -318,6 +330,36 @@ public final class Session
     public WarningCollector getWarningCollector()
     {
         return warningCollector;
+    }
+
+    public OptimizerInformationCollector getOptimizerInformationCollector()
+    {
+        return optimizerInformationCollector;
+    }
+
+    public OptimizerResultCollector getOptimizerResultCollector()
+    {
+        return optimizerResultCollector;
+    }
+
+    public CTEInformationCollector getCteInformationCollector()
+    {
+        return cteInformationCollector;
+    }
+
+    public Map<PlanNodeId, PlanNodeStatsEstimate> getPlanNodeStatsMap()
+    {
+        return planNodeStatsMap;
+    }
+
+    public Map<PlanNodeId, PlanCostEstimate> getPlanNodeCostMap()
+    {
+        return planNodeCostMap;
+    }
+
+    public Optional<QueryType> getQueryType()
+    {
+        return queryType;
     }
 
     public Session beginTransactionId(TransactionId transactionId, TransactionManager transactionManager, AccessControl accessControl)
@@ -391,7 +433,9 @@ public final class Session
                         identity.getPrincipal(),
                         roles.build(),
                         identity.getExtraCredentials(),
-                        identity.getExtraAuthenticators()),
+                        identity.getExtraAuthenticators(),
+                        identity.getSelectedUser(),
+                        identity.getReasonForSelect()),
                 source,
                 catalog,
                 schema,
@@ -411,62 +455,9 @@ public final class Session
                 preparedStatements,
                 sessionFunctions,
                 tracer,
-                warningCollector);
-    }
-
-    public Session withDefaultProperties(
-            SystemSessionPropertyConfiguration systemPropertyConfiguration,
-            Map<String, Map<String, String>> catalogPropertyDefaults)
-    {
-        requireNonNull(systemPropertyConfiguration, "systemPropertyConfiguration is null");
-        requireNonNull(catalogPropertyDefaults, "catalogPropertyDefaults is null");
-
-        // to remove this check properties must be authenticated and validated as in beginTransactionId
-        checkState(
-                !this.transactionId.isPresent() && this.connectorProperties.isEmpty(),
-                "Session properties cannot be overridden once a transaction is active");
-
-        Map<String, String> systemProperties = new HashMap<>();
-        systemProperties.putAll(systemPropertyConfiguration.systemPropertyDefaults);
-        systemProperties.putAll(this.systemProperties);
-        systemProperties.putAll(systemPropertyConfiguration.systemPropertyOverrides);
-
-        Map<String, Map<String, String>> connectorProperties = catalogPropertyDefaults.entrySet().stream()
-                .map(entry -> Maps.immutableEntry(entry.getKey(), new HashMap<>(entry.getValue())))
-                .collect(Collectors.toMap(Entry::getKey, Entry::getValue));
-        for (Entry<String, Map<String, String>> catalogProperties : this.unprocessedCatalogProperties.entrySet()) {
-            String catalog = catalogProperties.getKey();
-            for (Entry<String, String> entry : catalogProperties.getValue().entrySet()) {
-                connectorProperties.computeIfAbsent(catalog, id -> new HashMap<>())
-                        .put(entry.getKey(), entry.getValue());
-            }
-        }
-
-        return new Session(
-                queryId,
-                transactionId,
-                clientTransactionSupport,
-                identity,
-                source,
-                catalog,
-                schema,
-                traceToken,
-                timeZoneKey,
-                locale,
-                remoteUserAddress,
-                userAgent,
-                clientInfo,
-                clientTags,
-                resourceEstimates,
-                startTime,
-                systemProperties,
-                ImmutableMap.of(),
-                connectorProperties,
-                sessionPropertyManager,
-                preparedStatements,
-                sessionFunctions,
-                tracer,
-                warningCollector);
+                warningCollector,
+                runtimeStats,
+                queryType);
     }
 
     public ConnectorSession toConnectorSession()
@@ -476,17 +467,20 @@ public final class Session
 
     public SqlFunctionProperties getSqlFunctionProperties()
     {
+        boolean legacyJsonCast = this.sessionPropertyManager.decodeSystemPropertyValue(LEGACY_JSON_CAST, null, Boolean.class);
         return SqlFunctionProperties.builder()
                 .setTimeZoneKey(timeZoneKey)
                 .setLegacyRowFieldOrdinalAccessEnabled(isLegacyRowFieldOrdinalAccessEnabled(this))
-                .setLegacyTypeCoercionWarningEnabled(isLegacyTypeCoercionWarningEnabled(this))
                 .setLegacyTimestamp(isLegacyTimestamp(this))
                 .setLegacyMapSubscript(isLegacyMapSubscript(this))
                 .setParseDecimalLiteralAsDouble(isParseDecimalLiteralsAsDouble(this))
                 .setSessionStartTime(getStartTime())
                 .setSessionLocale(getLocale())
                 .setSessionUser(getUser())
+                .setFieldNamesInJsonCastEnabled(isFieldNameInJsonCastEnabled(this))
+                .setLegacyJsonCast(legacyJsonCast)
                 .setExtraCredentials(identity.getExtraCredentials())
+                .setWarnOnCommonNanPatterns(warnOnCommonNanPatterns(this))
                 .build();
     }
 
@@ -560,7 +554,6 @@ public final class Session
         return new SessionBuilder(sessionPropertyManager);
     }
 
-    @VisibleForTesting
     public static SessionBuilder builder(Session session)
     {
         return new SessionBuilder(session);
@@ -591,7 +584,9 @@ public final class Session
         private final SessionPropertyManager sessionPropertyManager;
         private final Map<String, String> preparedStatements = new HashMap<>();
         private final Map<SqlFunctionId, SqlInvokedFunction> sessionFunctions = new HashMap<>();
+        private Optional<QueryType> queryType = Optional.empty();
         private WarningCollector warningCollector = WarningCollector.NOOP;
+        private RuntimeStats runtimeStats = new RuntimeStats();
 
         private SessionBuilder(SessionPropertyManager sessionPropertyManager)
         {
@@ -624,6 +619,8 @@ public final class Session
             this.sessionFunctions.putAll(session.sessionFunctions);
             this.tracer = requireNonNull(session.tracer, "tracer is null");
             this.warningCollector = requireNonNull(session.warningCollector, "warningCollector is null");
+            this.runtimeStats = requireNonNull(session.runtimeStats, "runtimeStats is null");
+            this.queryType = requireNonNull(session.queryType, "queryType is null");
         }
 
         public SessionBuilder setQueryId(QueryId queryId)
@@ -774,9 +771,66 @@ public final class Session
             return this;
         }
 
+        public SessionBuilder setRuntimeStats(RuntimeStats runtimeStats)
+        {
+            this.runtimeStats = runtimeStats;
+            return this;
+        }
+
+        public SessionBuilder setQueryType(Optional<QueryType> queryType)
+        {
+            this.queryType = requireNonNull(queryType, "queryType is null");
+            return this;
+        }
+
         public <T> T getSystemProperty(String name, Class<T> type)
         {
             return sessionPropertyManager.decodeSystemPropertyValue(name, systemProperties.get(name), type);
+        }
+
+        public WarningCollector getWarningCollector()
+        {
+            return this.warningCollector;
+        }
+
+        public Map<String, String> getPreparedStatements()
+        {
+            return this.preparedStatements;
+        }
+
+        public Identity getIdentity()
+        {
+            return this.identity;
+        }
+
+        public Optional getSchema()
+        {
+            return Optional.ofNullable(this.schema);
+        }
+
+        public Optional<String> getSource()
+        {
+            return Optional.ofNullable(this.source);
+        }
+
+        public Set<String> getClientTags()
+        {
+            return this.clientTags;
+        }
+
+        public Optional<String> getClientInfo()
+        {
+            return Optional.ofNullable(this.clientInfo);
+        }
+
+        public Map<String, String> getSystemProperties()
+        {
+            return this.systemProperties;
+        }
+
+        public Map<String, Map<String, String>> getUnprocessedCatalogProperties()
+        {
+            return this.catalogSessionProperties;
         }
 
         public Session build()
@@ -796,7 +850,8 @@ public final class Session
                     Optional.ofNullable(userAgent),
                     Optional.ofNullable(clientInfo),
                     clientTags,
-                    Optional.ofNullable(resourceEstimates).orElse(new ResourceEstimateBuilder().build()),
+                    Optional.ofNullable(resourceEstimates)
+                            .orElseGet(new ResourceEstimateBuilder()::build),
                     startTime,
                     systemProperties,
                     connectorProperties,
@@ -805,7 +860,43 @@ public final class Session
                     preparedStatements,
                     sessionFunctions,
                     tracer,
-                    warningCollector);
+                    warningCollector,
+                    runtimeStats,
+                    queryType);
+        }
+
+        public void applyDefaultProperties(SystemSessionPropertyConfiguration systemPropertyConfiguration, Map<String, Map<String, String>> catalogPropertyDefaults)
+        {
+            requireNonNull(systemPropertyConfiguration, "systemPropertyConfiguration is null");
+            requireNonNull(catalogPropertyDefaults, "catalogPropertyDefaults is null");
+
+            // to remove this check properties must be authenticated and validated as in beginTransactionId
+            checkState(
+                    this.transactionId == null && this.connectorProperties.isEmpty(),
+                    "Session properties cannot be overridden once a transaction is active");
+
+            Map<String, String> systemProperties = new HashMap<>();
+            systemProperties.putAll(systemPropertyConfiguration.systemPropertyDefaults);
+            systemProperties.putAll(this.systemProperties);
+            systemProperties.putAll(systemPropertyConfiguration.systemPropertyOverrides);
+            this.systemProperties.putAll(systemProperties);
+
+            Map<String, Map<String, String>> connectorProperties = catalogPropertyDefaults.entrySet().stream()
+                    .map(entry -> Maps.immutableEntry(entry.getKey(), new HashMap<>(entry.getValue())))
+                    .collect(Collectors.toMap(Entry::getKey, Entry::getValue));
+            for (Entry<String, Map<String, String>> catalogProperties : this.catalogSessionProperties.entrySet()) {
+                String catalog = catalogProperties.getKey();
+                for (Entry<String, String> entry : catalogProperties.getValue().entrySet()) {
+                    connectorProperties.computeIfAbsent(catalog, id -> new HashMap<>()).put(entry.getKey(), entry.getValue());
+                }
+            }
+
+            for (Entry<String, Map<String, String>> catalogProperties : connectorProperties.entrySet()) {
+                String catalog = catalogProperties.getKey();
+                for (Entry<String, String> entry : catalogProperties.getValue().entrySet()) {
+                    setCatalogSessionProperty(catalog, entry.getKey(), entry.getValue());
+                }
+            }
         }
     }
 

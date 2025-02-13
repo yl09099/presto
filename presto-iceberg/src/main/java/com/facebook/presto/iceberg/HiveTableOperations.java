@@ -16,11 +16,10 @@ package com.facebook.presto.iceberg;
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.hive.HdfsContext;
 import com.facebook.presto.hive.HdfsEnvironment;
-import com.facebook.presto.hive.HiveType;
-import com.facebook.presto.hive.metastore.Column;
 import com.facebook.presto.hive.metastore.ExtendedHiveMetastore;
 import com.facebook.presto.hive.metastore.HivePrivilegeInfo;
 import com.facebook.presto.hive.metastore.MetastoreContext;
+import com.facebook.presto.hive.metastore.PartitionStatistics;
 import com.facebook.presto.hive.metastore.PrestoTableType;
 import com.facebook.presto.hive.metastore.PrincipalPrivileges;
 import com.facebook.presto.hive.metastore.StorageFormat;
@@ -33,45 +32,49 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableMultimap;
+import com.google.common.collect.Sets;
 import org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe;
 import org.apache.hadoop.mapred.FileInputFormat;
 import org.apache.hadoop.mapred.FileOutputFormat;
 import org.apache.iceberg.LocationProviders;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableMetadata.MetadataLogEntry;
 import org.apache.iceberg.TableMetadataParser;
 import org.apache.iceberg.TableOperations;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.exceptions.CommitFailedException;
-import org.apache.iceberg.hive.HiveSchemaUtil;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.io.OutputFile;
-import org.apache.iceberg.types.Types.NestedField;
 import org.apache.iceberg.util.Tasks;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
+import java.io.FileNotFoundException;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static com.facebook.presto.hive.HiveMetadata.TABLE_COMMENT;
 import static com.facebook.presto.hive.metastore.HivePrivilegeInfo.HivePrivilege.DELETE;
 import static com.facebook.presto.hive.metastore.HivePrivilegeInfo.HivePrivilege.INSERT;
 import static com.facebook.presto.hive.metastore.HivePrivilegeInfo.HivePrivilege.SELECT;
 import static com.facebook.presto.hive.metastore.HivePrivilegeInfo.HivePrivilege.UPDATE;
+import static com.facebook.presto.hive.metastore.MetastoreUtil.TABLE_COMMENT;
+import static com.facebook.presto.hive.metastore.MetastoreUtil.isPrestoView;
 import static com.facebook.presto.iceberg.IcebergErrorCode.ICEBERG_INVALID_METADATA;
 import static com.facebook.presto.iceberg.IcebergUtil.isIcebergTable;
+import static com.facebook.presto.iceberg.IcebergUtil.toHiveColumns;
 import static com.facebook.presto.spi.security.PrincipalType.USER;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.Integer.parseInt;
 import static java.lang.String.format;
+import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
 import static org.apache.iceberg.BaseMetastoreTableOperations.ICEBERG_TABLE_TYPE_VALUE;
@@ -91,7 +94,7 @@ public class HiveTableOperations
     public static final String PREVIOUS_METADATA_LOCATION = "previous_metadata_location";
     private static final String METADATA_FOLDER_NAME = "metadata";
 
-    private static final StorageFormat STORAGE_FORMAT = StorageFormat.create(
+    public static final StorageFormat STORAGE_FORMAT = StorageFormat.create(
             LazySimpleSerDe.class.getName(),
             FileInputFormat.class.getName(),
             FileOutputFormat.class.getName());
@@ -103,6 +106,7 @@ public class HiveTableOperations
     private final Optional<String> owner;
     private final Optional<String> location;
     private final FileIO fileIO;
+    private final IcebergHiveTableOperationsConfig config;
 
     private TableMetadata currentMetadata;
     private String currentMetadataLocation;
@@ -116,12 +120,14 @@ public class HiveTableOperations
             MetastoreContext metastoreContext,
             HdfsEnvironment hdfsEnvironment,
             HdfsContext hdfsContext,
+            IcebergHiveTableOperationsConfig config,
             String database,
             String table)
     {
         this(new HdfsFileIO(hdfsEnvironment, hdfsContext),
                 metastore,
                 metastoreContext,
+                config,
                 database,
                 table,
                 Optional.empty(),
@@ -133,6 +139,7 @@ public class HiveTableOperations
             MetastoreContext metastoreContext,
             HdfsEnvironment hdfsEnvironment,
             HdfsContext hdfsContext,
+            IcebergHiveTableOperationsConfig config,
             String database,
             String table,
             String owner,
@@ -141,6 +148,7 @@ public class HiveTableOperations
         this(new HdfsFileIO(hdfsEnvironment, hdfsContext),
                 metastore,
                 metastoreContext,
+                config,
                 database,
                 table,
                 Optional.of(requireNonNull(owner, "owner is null")),
@@ -151,6 +159,7 @@ public class HiveTableOperations
             FileIO fileIO,
             ExtendedHiveMetastore metastore,
             MetastoreContext metastoreContext,
+            IcebergHiveTableOperationsConfig config,
             String database,
             String table,
             Optional<String> owner,
@@ -163,6 +172,7 @@ public class HiveTableOperations
         this.tableName = requireNonNull(table, "table is null");
         this.owner = requireNonNull(owner, "owner is null");
         this.location = requireNonNull(location, "location is null");
+        this.config = requireNonNull(config, "config is null");
         //TODO: duration from config
         initTableLevelLockCache(TimeUnit.MINUTES.toMillis(10));
     }
@@ -171,15 +181,16 @@ public class HiveTableOperations
     {
         if (commitLockCache == null) {
             commitLockCache = CacheBuilder.newBuilder()
-                .expireAfterAccess(evictionTimeout, TimeUnit.MILLISECONDS)
-                .build(
-                    new CacheLoader<String, ReentrantLock>() {
-                        @Override
-                        public ReentrantLock load(String fullName)
-                        {
-                            return new ReentrantLock();
-                        }
-                    });
+                    .expireAfterAccess(evictionTimeout, TimeUnit.MILLISECONDS)
+                    .build(
+                            new CacheLoader<String, ReentrantLock>()
+                            {
+                                @Override
+                                public ReentrantLock load(String fullName)
+                                {
+                                    return new ReentrantLock();
+                                }
+                            });
         }
     }
 
@@ -204,6 +215,10 @@ public class HiveTableOperations
 
         if (!isIcebergTable(table)) {
             throw new UnknownTableTypeException(getSchemaTableName());
+        }
+
+        if (isPrestoView(table)) {
+            throw new TableNotFoundException(new SchemaTableName(database, tableName));
         }
 
         String metadataLocation = table.getParameters().get(METADATA_LOCATION);
@@ -241,7 +256,7 @@ public class HiveTableOperations
         tableLevelMutex.lock();
         try {
             try {
-                lockId = Optional.of(metastore.lock(metastoreContext, database, tableName));
+                lockId = metastore.lock(metastoreContext, database, tableName);
                 if (base == null) {
                     String tableComment = metadata.properties().get(TABLE_COMMENT);
                     Map<String, String> parameters = new HashMap<>();
@@ -290,18 +305,23 @@ public class HiveTableOperations
             PrestoPrincipal owner = new PrestoPrincipal(USER, table.getOwner());
             PrincipalPrivileges privileges = new PrincipalPrivileges(
                     ImmutableMultimap.<String, HivePrivilegeInfo>builder()
-                        .put(table.getOwner(), new HivePrivilegeInfo(SELECT, true, owner, owner))
-                        .put(table.getOwner(), new HivePrivilegeInfo(INSERT, true, owner, owner))
-                        .put(table.getOwner(), new HivePrivilegeInfo(UPDATE, true, owner, owner))
-                        .put(table.getOwner(), new HivePrivilegeInfo(DELETE, true, owner, owner))
-                        .build(),
+                            .put(table.getOwner(), new HivePrivilegeInfo(SELECT, true, owner, owner))
+                            .put(table.getOwner(), new HivePrivilegeInfo(INSERT, true, owner, owner))
+                            .put(table.getOwner(), new HivePrivilegeInfo(UPDATE, true, owner, owner))
+                            .put(table.getOwner(), new HivePrivilegeInfo(DELETE, true, owner, owner))
+                            .build(),
                     ImmutableMultimap.of());
             if (base == null) {
-                metastore.createTable(metastoreContext, table, privileges);
+                metastore.createTable(metastoreContext, table, privileges, emptyList());
             }
             else {
+                PartitionStatistics tableStats = metastore.getTableStatistics(metastoreContext, database, tableName);
                 metastore.replaceTable(metastoreContext, database, tableName, table, privileges);
+
+                // attempt to put back previous table statistics
+                metastore.updateTableStatistics(metastoreContext, database, tableName, oldStats -> tableStats);
             }
+            deleteRemovedMetadataFiles(base, metadata);
         }
         finally {
             shouldRefresh = true;
@@ -379,15 +399,24 @@ public class HiveTableOperations
         }
 
         AtomicReference<TableMetadata> newMetadata = new AtomicReference<>();
-        Tasks.foreach(newLocation)
-                .retry(20)
-                .exponentialBackoff(100, 5000, 600000, 4.0)
-                .suppressFailureWhenFinished()
-                .run(metadataLocation -> newMetadata.set(
-                        TableMetadataParser.read(fileIO, io().newInputFile(metadataLocation))));
+        try {
+            Tasks.foreach(newLocation)
+                    .retry(config.getTableRefreshRetries())
+                    .shouldRetryTest(this::shouldRetry)
+                    .exponentialBackoff(
+                            config.getTableRefreshBackoffMinSleepTime().toMillis(),
+                            config.getTableRefreshBackoffMaxSleepTime().toMillis(),
+                            config.getTableRefreshMaxRetryTime().toMillis(),
+                            config.getTableRefreshBackoffScaleFactor())
+                    .run(metadataLocation -> newMetadata.set(
+                            TableMetadataParser.read(fileIO, io().newInputFile(metadataLocation))));
+        }
+        catch (RuntimeException e) {
+            throw new TableNotFoundException(getSchemaTableName(), "Table metadata is missing", e);
+        }
 
         if (newMetadata.get() == null) {
-            throw new TableNotFoundException(getSchemaTableName(), "Table metadata is missing.");
+            throw new TableNotFoundException(getSchemaTableName(), "failed to retrieve table metadata from " + newLocation);
         }
 
         String newUUID = newMetadata.get().uuid();
@@ -400,6 +429,11 @@ public class HiveTableOperations
         currentMetadataLocation = newLocation;
         version = parseVersion(newLocation);
         shouldRefresh = false;
+    }
+
+    private boolean shouldRetry(Exception exception)
+    {
+        return !(exception.getCause() instanceof FileNotFoundException);
     }
 
     private static String newTableMetadataFilePath(TableMetadata meta, int newVersion)
@@ -430,14 +464,38 @@ public class HiveTableOperations
         }
     }
 
-    private static List<Column> toHiveColumns(List<NestedField> columns)
+    /**
+     * Deletes metadata files that are no longer needed, except for the most recent ones
+     * specified by `TableProperties.METADATA_PREVIOUS_VERSIONS_MAX`.
+     *
+     * @param base the base TableMetadata
+     * @param metadata the current TableMetadata
+     */
+    private void deleteRemovedMetadataFiles(TableMetadata base, TableMetadata metadata)
     {
-        return columns.stream()
-                .map(column -> new Column(
-                        column.name(),
-                        HiveType.toHiveType(HiveSchemaUtil.convert(column.type())),
-                        Optional.empty(),
-                        Optional.empty()))
-                .collect(toImmutableList());
+        if (base == null) {
+            return;
+        }
+
+        boolean deleteAfterCommit =
+                metadata.propertyAsBoolean(
+                        TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED,
+                        TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED_DEFAULT);
+
+        if (deleteAfterCommit) {
+            Set<MetadataLogEntry> metadataFilesToRemove =
+                    Sets.newHashSet(base.previousFiles());
+            // TableMetadata#addPreviousFile builds up the metadata log and uses
+            // TableProperties.METADATA_PREVIOUS_VERSIONS_MAX to determine how many files should stay in
+            // the log, thus we don't include metadata.previousFiles() for deletion - everything else can
+            // be removed
+            metadataFilesToRemove.removeAll(metadata.previousFiles());
+            Tasks.foreach(metadataFilesToRemove)
+                    .noRetry()
+                    .suppressFailureWhenFinished()
+                    .onFailure((previousMetadataFile, exc) ->
+                            log.warn("Delete failed for previous metadata file: %s", previousMetadataFile, exc))
+                    .run(previousMetadataFile -> io().deleteFile(previousMetadataFile.file()));
+        }
     }
 }

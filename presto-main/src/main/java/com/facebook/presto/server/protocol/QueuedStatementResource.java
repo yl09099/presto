@@ -17,22 +17,19 @@ import com.facebook.airlift.log.Logger;
 import com.facebook.airlift.stats.TimeStat;
 import com.facebook.presto.client.QueryError;
 import com.facebook.presto.client.QueryResults;
-import com.facebook.presto.client.StatementStats;
+import com.facebook.presto.common.ErrorCode;
 import com.facebook.presto.dispatcher.DispatchExecutor;
 import com.facebook.presto.dispatcher.DispatchInfo;
 import com.facebook.presto.dispatcher.DispatchManager;
 import com.facebook.presto.execution.ExecutionFailureInfo;
-import com.facebook.presto.execution.QueryState;
 import com.facebook.presto.metadata.SessionPropertyManager;
 import com.facebook.presto.server.HttpRequestSessionContext;
 import com.facebook.presto.server.ServerConfig;
 import com.facebook.presto.server.SessionContext;
-import com.facebook.presto.spi.ErrorCode;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.QueryId;
-import com.facebook.presto.spi.tracing.TracerProvider;
 import com.facebook.presto.sql.parser.SqlParserOptions;
-import com.google.common.collect.ImmutableList;
+import com.facebook.presto.tracing.TracerProviderManager;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Ordering;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -47,9 +44,11 @@ import javax.annotation.security.RolesAllowed;
 import javax.inject.Inject;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.DELETE;
+import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
 import javax.ws.rs.HeaderParam;
 import javax.ws.rs.POST;
+import javax.ws.rs.PUT;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
@@ -74,9 +73,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import static com.facebook.airlift.concurrent.MoreFutures.addTimeout;
 import static com.facebook.airlift.concurrent.Threads.threadsNamed;
 import static com.facebook.airlift.http.server.AsyncResponseHandler.bindAsyncResponse;
-import static com.facebook.presto.execution.QueryState.FAILED;
-import static com.facebook.presto.execution.QueryState.QUEUED;
-import static com.facebook.presto.execution.QueryState.WAITING_FOR_PREREQUISITES;
+import static com.facebook.presto.client.PrestoHeaders.PRESTO_PREFIX_URL;
+import static com.facebook.presto.server.protocol.QueryResourceUtil.NO_DURATION;
+import static com.facebook.presto.server.protocol.QueryResourceUtil.abortIfPrefixUrlInvalid;
+import static com.facebook.presto.server.protocol.QueryResourceUtil.createQueuedQueryResults;
+import static com.facebook.presto.server.protocol.QueryResourceUtil.getQueuedUri;
+import static com.facebook.presto.server.protocol.QueryResourceUtil.getScheme;
 import static com.facebook.presto.server.security.RoleType.USER;
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static com.facebook.presto.spi.StandardErrorCode.RETRY_QUERY_NOT_FOUND;
@@ -86,7 +88,6 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.net.HttpHeaders.X_FORWARDED_PROTO;
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
-import static com.google.common.util.concurrent.Futures.transform;
 import static com.google.common.util.concurrent.Futures.transformAsync;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
@@ -99,6 +100,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static javax.ws.rs.core.MediaType.APPLICATION_JSON;
 import static javax.ws.rs.core.MediaType.TEXT_PLAIN_TYPE;
 import static javax.ws.rs.core.Response.Status.BAD_REQUEST;
+import static javax.ws.rs.core.Response.Status.CONFLICT;
 import static javax.ws.rs.core.Response.Status.NOT_FOUND;
 
 @Path("/")
@@ -109,10 +111,9 @@ public class QueuedStatementResource
     private static final Duration MAX_WAIT_TIME = new Duration(1, SECONDS);
     private static final DataSize TARGET_RESULT_SIZE = new DataSize(1, MEGABYTE);
     private static final Ordering<Comparable<Duration>> WAIT_ORDERING = Ordering.natural().nullsLast();
-    private static final Duration NO_DURATION = new Duration(0, MILLISECONDS);
 
     private final DispatchManager dispatchManager;
-    private final LocalQueryProvider queryResultsProvider;
+    private final ExecutingQueryResponseProvider executingQueryResponseProvider;
 
     private final Executor responseExecutor;
     private final ScheduledExecutorService timeoutExecutor;
@@ -121,33 +122,34 @@ public class QueuedStatementResource
     private final Map<QueryId, Query> retriedQueries = new ConcurrentHashMap<>();   // a mapping from old to-be-retried query id to the current retry query
     private final ScheduledExecutorService queryPurger = newSingleThreadScheduledExecutor(threadsNamed("dispatch-query-purger"));
     private final boolean compressionEnabled;
+    private final boolean nestedDataSerializationEnabled;
 
     private final SqlParserOptions sqlParserOptions;
-    private final TracerProvider tracerProvider;
+    private final TracerProviderManager tracerProviderManager;
     private final SessionPropertyManager sessionPropertyManager;     // We may need some system default session property values at early query stage even before session is created.
 
     private final QueryBlockingRateLimiter queryRateLimiter;
-    private final TimeStat queuedRateLimiterBlockTime = new TimeStat();
 
     @Inject
     public QueuedStatementResource(
             DispatchManager dispatchManager,
             DispatchExecutor executor,
-            LocalQueryProvider queryResultsProvider,
+            ExecutingQueryResponseProvider executingQueryResponseProvider,
             SqlParserOptions sqlParserOptions,
             ServerConfig serverConfig,
-            TracerProvider tracerProvider,
+            TracerProviderManager tracerProviderManager,
             SessionPropertyManager sessionPropertyManager,
             QueryBlockingRateLimiter queryRateLimiter)
     {
         this.dispatchManager = requireNonNull(dispatchManager, "dispatchManager is null");
-        this.queryResultsProvider = queryResultsProvider;
+        this.executingQueryResponseProvider = requireNonNull(executingQueryResponseProvider, "executingQueryResponseProvider is null");
         this.sqlParserOptions = requireNonNull(sqlParserOptions, "sqlParserOptions is null");
         this.compressionEnabled = requireNonNull(serverConfig, "serverConfig is null").isQueryResultsCompressionEnabled();
+        this.nestedDataSerializationEnabled = requireNonNull(serverConfig, "serverConfig is null").isNestedDataSerializationEnabled();
 
         this.responseExecutor = requireNonNull(executor, "responseExecutor is null").getExecutor();
         this.timeoutExecutor = requireNonNull(executor, "timeoutExecutor is null").getScheduledExecutor();
-        this.tracerProvider = requireNonNull(tracerProvider, "tracerProvider is null");
+        this.tracerProviderManager = requireNonNull(tracerProviderManager, "tracerProviderManager is null");
         this.sessionPropertyManager = sessionPropertyManager;
 
         this.queryRateLimiter = requireNonNull(queryRateLimiter, "queryRateLimiter is null");
@@ -181,12 +183,25 @@ public class QueuedStatementResource
         queryPurger.shutdownNow();
     }
 
+    /**
+     * HTTP endpoint for submitting queries to the Presto Coordinator
+     * Presto performs lazy execution. The submission of a query returns
+     * a placeholder for the result set, but the query gets
+     * scheduled/dispatched only when the client polls for results
+     * @param statement The statement or sql query string submitted
+     * @param xForwardedProto Forwarded protocol (http or https)
+     * @param servletRequest The http request
+     * @param uriInfo {@link javax.ws.rs.core.UriInfo}
+     * @return {@link javax.ws.rs.core.Response} HTTP response code
+     */
     @POST
     @Path("/v1/statement")
     @Produces(APPLICATION_JSON)
     public Response postStatement(
             String statement,
+            @DefaultValue("false") @QueryParam("binaryResults") boolean binaryResults,
             @HeaderParam(X_FORWARDED_PROTO) String xForwardedProto,
+            @HeaderParam(PRESTO_PREFIX_URL) String xPrestoPrefixUrl,
             @Context HttpServletRequest servletRequest,
             @Context UriInfo uriInfo)
     {
@@ -194,27 +209,92 @@ public class QueuedStatementResource
             throw badRequest(BAD_REQUEST, "SQL statement is empty");
         }
 
+        abortIfPrefixUrlInvalid(xPrestoPrefixUrl);
+
         // TODO: For future cases we may want to start tracing from client. Then continuation of tracing
         //       will be needed instead of creating a new trace here.
         SessionContext sessionContext = new HttpRequestSessionContext(
                 servletRequest,
                 sqlParserOptions,
-                tracerProvider,
+                tracerProviderManager.getTracerProvider(),
                 Optional.of(sessionPropertyManager));
-        Query query = new Query(statement, sessionContext, dispatchManager, queryResultsProvider, 0);
+        Query query = new Query(statement, sessionContext, dispatchManager, executingQueryResponseProvider, 0);
         queries.put(query.getQueryId(), query);
 
-        return withCompressionConfiguration(Response.ok(query.getInitialQueryResults(uriInfo, xForwardedProto)), compressionEnabled).build();
+        return withCompressionConfiguration(Response.ok(query.getInitialQueryResults(uriInfo, xForwardedProto, xPrestoPrefixUrl, binaryResults)), compressionEnabled).build();
     }
 
+    /**
+     * HTTP endpoint for submitting queries to the Presto Coordinator.
+     * Presto performs lazy execution. The submission of a query returns
+     * a placeholder for the result set, but the query gets
+     * scheduled/dispatched only when the client polls for results.
+     * This endpoint accepts a pre-minted queryId and slug, instead of
+     * generating it.
+     *
+     * @param statement The statement or sql query string submitted
+     * @param queryId Pre-minted query ID to associate with this query
+     * @param slug Pre-minted slug to protect this query
+     * @param xForwardedProto Forwarded protocol (http or https)
+     * @param servletRequest The http request
+     * @param uriInfo {@link javax.ws.rs.core.UriInfo}
+     * @return {@link javax.ws.rs.core.Response} HTTP response code
+     */
+    @PUT
+    @Path("/v1/statement/{queryId}")
+    @Produces(APPLICATION_JSON)
+    public Response putStatement(
+            String statement,
+            @PathParam("queryId") QueryId queryId,
+            @QueryParam("slug") String slug,
+            @DefaultValue("false") @QueryParam("binaryResults") boolean binaryResults,
+            @HeaderParam(X_FORWARDED_PROTO) String xForwardedProto,
+            @HeaderParam(PRESTO_PREFIX_URL) String xPrestoPrefixUrl,
+            @Context HttpServletRequest servletRequest,
+            @Context UriInfo uriInfo)
+    {
+        if (isNullOrEmpty(statement)) {
+            throw badRequest(BAD_REQUEST, "SQL statement is empty");
+        }
+
+        abortIfPrefixUrlInvalid(xPrestoPrefixUrl);
+
+        // TODO: For future cases we may want to start tracing from client. Then continuation of tracing
+        //       will be needed instead of creating a new trace here.
+        SessionContext sessionContext = new HttpRequestSessionContext(
+                servletRequest,
+                sqlParserOptions,
+                tracerProviderManager.getTracerProvider(),
+                Optional.of(sessionPropertyManager));
+        Query attemptedQuery = new Query(statement, sessionContext, dispatchManager, executingQueryResponseProvider, 0, queryId, slug);
+        Query query = queries.computeIfAbsent(queryId, unused -> attemptedQuery);
+
+        if (attemptedQuery != query && !attemptedQuery.getSlug().equals(query.getSlug()) || query.getLastToken() != 0) {
+            throw badRequest(CONFLICT, "Query already exists");
+        }
+
+        return withCompressionConfiguration(Response.ok(query.getInitialQueryResults(uriInfo, xForwardedProto, xPrestoPrefixUrl, binaryResults)), compressionEnabled).build();
+    }
+
+    /**
+     * HTTP endpoint for re-processing a failed query
+     * @param queryId Query Identifier of the query to be retried
+     * @param xForwardedProto Forwarded protocol (http or https)
+     * @param uriInfo {@link javax.ws.rs.core.UriInfo}
+     * @return {@link javax.ws.rs.core.Response} HTTP response code
+     */
     @GET
     @Path("/v1/statement/queued/retry/{queryId}")
     @Produces(APPLICATION_JSON)
     public Response retryFailedQuery(
             @PathParam("queryId") QueryId queryId,
+            @DefaultValue("false") @QueryParam("binaryResults") boolean binaryResults,
             @HeaderParam(X_FORWARDED_PROTO) String xForwardedProto,
+            @HeaderParam(PRESTO_PREFIX_URL) String xPrestoPrefixUrl,
             @Context UriInfo uriInfo)
     {
+        abortIfPrefixUrlInvalid(xPrestoPrefixUrl);
+
         Query failedQuery = queries.get(queryId);
 
         if (failedQuery == null) {
@@ -227,7 +307,7 @@ public class QueuedStatementResource
                 "-- retry query " + queryId + "; attempt: " + retryCount + "\n" + failedQuery.getQuery(),
                 failedQuery.getSessionContext(),
                 dispatchManager,
-                queryResultsProvider,
+                executingQueryResponseProvider,
                 retryCount);
 
         retriedQueries.putIfAbsent(queryId, query);
@@ -242,9 +322,19 @@ public class QueuedStatementResource
             }
         }
 
-        return withCompressionConfiguration(Response.ok(query.getInitialQueryResults(uriInfo, xForwardedProto)), compressionEnabled).build();
+        return withCompressionConfiguration(Response.ok(query.getInitialQueryResults(uriInfo, xForwardedProto, xPrestoPrefixUrl, binaryResults)), compressionEnabled).build();
     }
 
+    /**
+     * HTTP endpoint for retrieving the status of a submitted query
+     * @param queryId Query Identifier of query whose status is polled
+     * @param token Monotonically increasing token that identifies the next batch of query results
+     * @param slug Unique security token generated for each query that controls access to that query's results
+     * @param maxWait Time to wait for the query to be dispatched
+     * @param xForwardedProto Forwarded protocol (http or https)
+     * @param uriInfo {@link javax.ws.rs.core.UriInfo}
+     * @param asyncResponse
+     */
     @GET
     @Path("/v1/statement/queued/{queryId}/{token}")
     @Produces(APPLICATION_JSON)
@@ -253,10 +343,14 @@ public class QueuedStatementResource
             @PathParam("token") long token,
             @QueryParam("slug") String slug,
             @QueryParam("maxWait") Duration maxWait,
+            @DefaultValue("false") @QueryParam("binaryResults") boolean binaryResults,
             @HeaderParam(X_FORWARDED_PROTO) String xForwardedProto,
+            @HeaderParam(PRESTO_PREFIX_URL) String xPrestoPrefixUrl,
             @Context UriInfo uriInfo,
             @Suspended AsyncResponse asyncResponse)
     {
+        abortIfPrefixUrlInvalid(xPrestoPrefixUrl);
+
         Query query = getQuery(queryId, slug);
         ListenableFuture<Double> acquirePermitAsync = queryRateLimiter.acquire(queryId);
         ListenableFuture<?> waitForDispatchedAsync = transformAsync(
@@ -275,11 +369,18 @@ public class QueuedStatementResource
         // when state changes, fetch the next result
         ListenableFuture<Response> queryResultsFuture = transformAsync(
                 futureStateChange,
-                ignored -> query.toResponse(token, uriInfo, xForwardedProto, WAIT_ORDERING.min(MAX_WAIT_TIME, maxWait), compressionEnabled),
+                ignored -> query.toResponse(token, uriInfo, xForwardedProto, xPrestoPrefixUrl, WAIT_ORDERING.min(MAX_WAIT_TIME, maxWait), compressionEnabled, nestedDataSerializationEnabled, binaryResults),
                 responseExecutor);
         bindAsyncResponse(asyncResponse, queryResultsFuture, responseExecutor);
     }
 
+    /**
+     * HTTP endpoint to cancel execution of a query in flight
+     * @param queryId Query Identifier of query to be canceled
+     * @param token Monotonically increasing token that identifies the next batch of query results
+     * @param slug Unique security token generated for each query that controls access to that query's results
+     * @return {@link javax.ws.rs.core.Response} HTTP response code
+     */
     @DELETE
     @Path("/v1/statement/queued/{queryId}/{token}")
     @Produces(APPLICATION_JSON)
@@ -315,63 +416,6 @@ public class QueuedStatementResource
         }
     }
 
-    private static URI getQueryHtmlUri(QueryId queryId, UriInfo uriInfo, String xForwardedProto)
-    {
-        return uriInfo.getRequestUriBuilder()
-                .scheme(getScheme(xForwardedProto, uriInfo))
-                .replacePath("ui/query.html")
-                .replaceQuery(queryId.toString())
-                .build();
-    }
-
-    private static URI getQueuedUri(QueryId queryId, String slug, long token, UriInfo uriInfo, String xForwardedProto)
-    {
-        return uriInfo.getBaseUriBuilder()
-                .scheme(getScheme(xForwardedProto, uriInfo))
-                .replacePath("/v1/statement/queued/")
-                .path(queryId.toString())
-                .path(String.valueOf(token))
-                .replaceQuery("")
-                .queryParam("slug", slug)
-                .build();
-    }
-
-    private static String getScheme(String xForwardedProto, @Context UriInfo uriInfo)
-    {
-        return isNullOrEmpty(xForwardedProto) ? uriInfo.getRequestUri().getScheme() : xForwardedProto;
-    }
-
-    private static QueryResults createQueryResults(
-            QueryId queryId,
-            URI nextUri,
-            Optional<QueryError> queryError,
-            UriInfo uriInfo,
-            String xForwardedProto,
-            Duration elapsedTime,
-            Optional<Duration> queuedTime,
-            Duration waitingForPrerequisitesTime)
-    {
-        QueryState state = queryError.map(error -> FAILED).orElse(queuedTime.isPresent() ? QUEUED : WAITING_FOR_PREREQUISITES);
-        return new QueryResults(
-                queryId.toString(),
-                getQueryHtmlUri(queryId, uriInfo, xForwardedProto),
-                null,
-                nextUri,
-                null,
-                null,
-                StatementStats.builder()
-                        .setState(state.toString())
-                        .setWaitingForPrerequisites(state == WAITING_FOR_PREREQUISITES)
-                        .setElapsedTimeMillis(elapsedTime.toMillis())
-                        .setQueuedTimeMillis(queuedTime.orElse(NO_DURATION).toMillis())
-                        .setWaitingForPrerequisitesTimeMillis(waitingForPrerequisitesTime.toMillis())
-                        .build(),
-                queryError.orElse(null),
-                ImmutableList.of(),
-                null,
-                null);
-    }
-
     private static WebApplicationException badRequest(Status status, String message)
     {
         throw new WebApplicationException(
@@ -394,60 +438,97 @@ public class QueuedStatementResource
         private final String query;
         private final SessionContext sessionContext;
         private final DispatchManager dispatchManager;
-        private final LocalQueryProvider queryProvider;
+        private final ExecutingQueryResponseProvider executingQueryResponseProvider;
         private final QueryId queryId;
-        private final String slug = "x" + randomUUID().toString().toLowerCase(ENGLISH).replace("-", "");
+        private final String slug;
         private final AtomicLong lastToken = new AtomicLong();
         private final int retryCount;
 
         @GuardedBy("this")
         private ListenableFuture<?> querySubmissionFuture;
 
-        public Query(String query, SessionContext sessionContext, DispatchManager dispatchManager, LocalQueryProvider queryResultsProvider, int retryCount)
+        public Query(String query, SessionContext sessionContext, DispatchManager dispatchManager, ExecutingQueryResponseProvider executingQueryResponseProvider, int retryCount)
+        {
+            this(query, sessionContext, dispatchManager, executingQueryResponseProvider, retryCount, dispatchManager.createQueryId(), createSlug());
+        }
+
+        public Query(
+                String query,
+                SessionContext sessionContext,
+                DispatchManager dispatchManager,
+                ExecutingQueryResponseProvider executingQueryResponseProvider,
+                int retryCount,
+                QueryId queryId,
+                String slug)
         {
             this.query = requireNonNull(query, "query is null");
             this.sessionContext = requireNonNull(sessionContext, "sessionContext is null");
             this.dispatchManager = requireNonNull(dispatchManager, "dispatchManager is null");
-            this.queryProvider = requireNonNull(queryResultsProvider, "queryExecutor is null");
-            this.queryId = dispatchManager.createQueryId();
+            this.executingQueryResponseProvider = requireNonNull(executingQueryResponseProvider, "executingQueryResponseProvider is null");
             this.retryCount = retryCount;
+            this.queryId = requireNonNull(queryId, "queryId is null");
+            this.slug = requireNonNull(slug, "slug is null");
         }
 
+        /**
+         * Returns the unique identifier of a query
+         */
         public QueryId getQueryId()
         {
             return queryId;
         }
 
+        /**
+         * Returns the query string
+         */
         public String getQuery()
         {
             return query;
         }
 
+        /**
+         * Returns the session context of the query
+         */
         public SessionContext getSessionContext()
         {
             return sessionContext;
         }
 
+        /**
+         * Returns the secure slug associated with the query
+         */
         public String getSlug()
         {
             return slug;
         }
 
+        /**
+         * Returns the last token of the result set
+         */
         public long getLastToken()
         {
             return lastToken.get();
         }
 
+        /**
+         * Returns the retry attempt of the query
+         */
         public int getRetryCount()
         {
             return retryCount;
         }
 
+        /**
+         * Checks whether the query has been processed by the dispatchManager
+         */
         public synchronized boolean isSubmissionFinished()
         {
             return querySubmissionFuture != null && querySubmissionFuture.isDone();
         }
 
+        /**
+         * Submit query to dispatchManager, if required, and for the dispatchManager to process the query
+         */
         private ListenableFuture<?> waitForDispatched()
         {
             // if query submission has not finished, wait for it to finish
@@ -463,7 +544,13 @@ public class QueuedStatementResource
             return dispatchManager.waitForDispatched(queryId);
         }
 
-        public synchronized QueryResults getInitialQueryResults(UriInfo uriInfo, String xForwardedProto)
+        /**
+         * Returns a placeholder for query results for the client to poll
+         * @param uriInfo {@link javax.ws.rs.core.UriInfo}
+         * @param xForwardedProto Forwarded protocol (http or https)
+         * @return {@link com.facebook.presto.client.QueryResults}
+         */
+        public synchronized QueryResults getInitialQueryResults(UriInfo uriInfo, String xForwardedProto, String xPrestoPrefixUrl, boolean binaryResults)
         {
             verify(lastToken.get() == 0);
             verify(querySubmissionFuture == null);
@@ -471,10 +558,20 @@ public class QueuedStatementResource
                     1,
                     uriInfo,
                     xForwardedProto,
-                    DispatchInfo.waitingForPrerequisites(NO_DURATION, NO_DURATION));
+                    xPrestoPrefixUrl,
+                    DispatchInfo.waitingForPrerequisites(NO_DURATION, NO_DURATION),
+                    binaryResults);
         }
 
-        public ListenableFuture<Response> toResponse(long token, UriInfo uriInfo, String xForwardedProto, Duration maxWait, boolean compressionEnabled)
+        public ListenableFuture<Response> toResponse(
+                long token,
+                UriInfo uriInfo,
+                String xForwardedProto,
+                String xPrestoPrefixUrl,
+                Duration maxWait,
+                boolean compressionEnabled,
+                boolean nestedDataSerializationEnabled,
+                boolean binaryResults)
         {
             long lastToken = this.lastToken.get();
             // token should be the last token or the next token
@@ -491,7 +588,9 @@ public class QueuedStatementResource
                             token + 1,
                             uriInfo,
                             xForwardedProto,
-                            DispatchInfo.waitingForPrerequisites(NO_DURATION, NO_DURATION));
+                            xPrestoPrefixUrl,
+                            DispatchInfo.waitingForPrerequisites(NO_DURATION, NO_DURATION),
+                            binaryResults);
                     return immediateFuture(withCompressionConfiguration(Response.ok(queryResults), compressionEnabled).build());
                 }
             }
@@ -504,23 +603,28 @@ public class QueuedStatementResource
                         .build()));
             }
 
-            if (!waitForDispatched().isDone()) {
-                return immediateFuture(withCompressionConfiguration(Response.ok(createQueryResults(token + 1, uriInfo, xForwardedProto, dispatchInfo.get())), compressionEnabled).build());
+            if (waitForDispatched().isDone()) {
+                Optional<ListenableFuture<Response>> executingQueryResponse = executingQueryResponseProvider.waitForExecutingResponse(
+                        queryId,
+                        slug,
+                        dispatchInfo.get(),
+                        uriInfo,
+                        xPrestoPrefixUrl,
+                        getScheme(xForwardedProto, uriInfo),
+                        maxWait,
+                        TARGET_RESULT_SIZE,
+                        compressionEnabled,
+                        nestedDataSerializationEnabled,
+                        binaryResults);
+
+                if (executingQueryResponse.isPresent()) {
+                    return executingQueryResponse.get();
+                }
             }
 
-            com.facebook.presto.server.protocol.Query query;
-            try {
-                query = queryProvider.getQuery(queryId, slug);
-            }
-            catch (WebApplicationException e) {
-                return immediateFuture(withCompressionConfiguration(Response.ok(createQueryResults(token + 1, uriInfo, xForwardedProto, dispatchInfo.get())), compressionEnabled).build());
-            }
-            // If this future completes successfully, the next URI will redirect to the executing statement endpoint.
-            // Hence it is safe to hardcode the token to be 0.
-            return transform(
-                    query.waitForResults(0, uriInfo, getScheme(xForwardedProto, uriInfo), maxWait, TARGET_RESULT_SIZE),
-                    results -> QueryResourceUtil.toResponse(query, results, compressionEnabled),
-                    directExecutor());
+            return immediateFuture(withCompressionConfiguration(Response.ok(
+                    createQueryResults(token + 1, uriInfo, xForwardedProto, xPrestoPrefixUrl, dispatchInfo.get(), binaryResults)), compressionEnabled)
+                    .build());
         }
 
         public synchronized void cancel()
@@ -528,31 +632,37 @@ public class QueuedStatementResource
             querySubmissionFuture.addListener(() -> dispatchManager.cancelQuery(queryId), directExecutor());
         }
 
-        private QueryResults createQueryResults(long token, UriInfo uriInfo, String xForwardedProto, DispatchInfo dispatchInfo)
+        private QueryResults createQueryResults(long token, UriInfo uriInfo, String xForwardedProto, String xPrestoPrefixUrl, DispatchInfo dispatchInfo, boolean binaryResults)
         {
-            URI nextUri = getNextUri(token, uriInfo, xForwardedProto, dispatchInfo);
+            URI nextUri = getNextUri(token, uriInfo, xForwardedProto, xPrestoPrefixUrl, dispatchInfo, binaryResults);
 
             Optional<QueryError> queryError = dispatchInfo.getFailureInfo()
                     .map(this::toQueryError);
 
-            return QueuedStatementResource.createQueryResults(
+            return createQueuedQueryResults(
                     queryId,
                     nextUri,
                     queryError,
                     uriInfo,
                     xForwardedProto,
+                    xPrestoPrefixUrl,
                     dispatchInfo.getElapsedTime(),
                     dispatchInfo.getQueuedTime(),
                     dispatchInfo.getWaitingForPrerequisitesTime());
         }
 
-        private URI getNextUri(long token, UriInfo uriInfo, String xForwardedProto, DispatchInfo dispatchInfo)
+        private static String createSlug()
+        {
+            return "x" + randomUUID().toString().toLowerCase(ENGLISH).replace("-", "");
+        }
+
+        private URI getNextUri(long token, UriInfo uriInfo, String xForwardedProto, String xPrestoPrefixUrl, DispatchInfo dispatchInfo, boolean binaryResults)
         {
             // if failed, query is complete
             if (dispatchInfo.getFailureInfo().isPresent()) {
                 return null;
             }
-            return getQueuedUri(queryId, slug, token, uriInfo, xForwardedProto);
+            return getQueuedUri(queryId, slug, token, uriInfo, xForwardedProto, xPrestoPrefixUrl, binaryResults);
         }
 
         private QueryError toQueryError(ExecutionFailureInfo executionFailureInfo)

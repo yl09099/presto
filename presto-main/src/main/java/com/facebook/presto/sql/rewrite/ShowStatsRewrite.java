@@ -21,18 +21,20 @@ import com.facebook.presto.common.type.DoubleType;
 import com.facebook.presto.common.type.IntegerType;
 import com.facebook.presto.common.type.RealType;
 import com.facebook.presto.common.type.SmallintType;
+import com.facebook.presto.common.type.SqlTime;
+import com.facebook.presto.common.type.SqlTimestamp;
 import com.facebook.presto.common.type.TinyintType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.metadata.TableMetadata;
-import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.Constraint;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.TableMetadata;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.plan.FilterNode;
 import com.facebook.presto.spi.plan.TableScanNode;
+import com.facebook.presto.spi.security.AccessControl;
 import com.facebook.presto.spi.statistics.ColumnStatistics;
 import com.facebook.presto.spi.statistics.DoubleRange;
 import com.facebook.presto.spi.statistics.Estimate;
@@ -70,12 +72,17 @@ import com.google.common.collect.ImmutableSet;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.facebook.presto.common.type.DateType.DATE;
+import static com.facebook.presto.common.type.SqlTimestamp.MICROSECONDS_PER_MILLISECOND;
 import static com.facebook.presto.common.type.StandardTypes.DOUBLE;
 import static com.facebook.presto.common.type.StandardTypes.VARCHAR;
+import static com.facebook.presto.common.type.TimeType.TIME;
+import static com.facebook.presto.common.type.TimestampType.TIMESTAMP;
 import static com.facebook.presto.metadata.MetadataUtil.createQualifiedObjectName;
 import static com.facebook.presto.sql.QueryUtil.aliased;
 import static com.facebook.presto.sql.QueryUtil.selectAll;
@@ -88,6 +95,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.lang.Math.round;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class ShowStatsRewrite
         implements StatementRewrite.Rewrite
@@ -97,14 +105,14 @@ public class ShowStatsRewrite
 
     @Override
     public Statement rewrite(Session session,
-                             Metadata metadata,
-                             SqlParser parser,
-                             Optional<QueryExplainer> queryExplainer,
-                             Statement node,
-                             List<Expression> parameters,
-                             Map<NodeRef<Parameter>, Expression> parameterLookup,
-                             AccessControl accessControl,
-                             WarningCollector warningCollector)
+            Metadata metadata,
+            SqlParser parser,
+            Optional<QueryExplainer> queryExplainer,
+            Statement node,
+            List<Expression> parameters,
+            Map<NodeRef<Parameter>, Expression> parameterLookup,
+            AccessControl accessControl,
+            WarningCollector warningCollector)
     {
         return (Statement) new Visitor(metadata, session, parameters, queryExplainer, warningCollector).process(node, null);
     }
@@ -199,10 +207,15 @@ public class ShowStatsRewrite
                         .filter(entry -> columns.contains(entry.getKey()))
                         .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
             }
-            TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle, ImmutableList.copyOf(columnHandles.values()), constraint);
+            TableMetadata tableMetadata = metadata.getTableMetadata(session, tableHandle);
+            List<ColumnHandle> nonHiddenColumns = ImmutableList.copyOf(tableMetadata.getColumns().stream().filter(column -> !column.isHidden())
+                    .map(ColumnMetadata::getName)
+                    .map(columnHandles::get)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList()));
+            TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle, nonHiddenColumns, constraint);
             List<String> statsColumnNames = buildColumnsNames();
             List<SelectItem> selectItems = buildSelectItems(statsColumnNames);
-            TableMetadata tableMetadata = metadata.getTableMetadata(session, tableHandle);
             List<Expression> resultRows = buildStatisticsRows(tableMetadata, columnHandles, tableStatistics);
 
             return simpleQuery(selectAll(selectItems),
@@ -240,7 +253,7 @@ public class ShowStatsRewrite
         private TableHandle getTableHandle(ShowStats node, QualifiedName table)
         {
             QualifiedObjectName qualifiedTableName = createQualifiedObjectName(session, node, table);
-            return metadata.getTableHandle(session, qualifiedTableName)
+            return metadata.getMetadataResolver(session).getTableHandle(qualifiedTableName)
                     .orElseThrow(() -> new SemanticException(MISSING_TABLE, node, "Table %s not found", table));
         }
 
@@ -254,6 +267,7 @@ public class ShowStatsRewrite
                     .add("row_count")
                     .add("low_value")
                     .add("high_value")
+                    .add("histogram")
                     .build();
         }
 
@@ -299,6 +313,7 @@ public class ShowStatsRewrite
             rowValues.add(NULL_DOUBLE);
             rowValues.add(toStringLiteral(type, columnStatistics.getRange().map(DoubleRange::getMin)));
             rowValues.add(toStringLiteral(type, columnStatistics.getRange().map(DoubleRange::getMax)));
+            rowValues.add(columnStatistics.getHistogram().map(Objects::toString).<Expression>map(StringLiteral::new).orElse(NULL_VARCHAR));
             return new Row(rowValues.build());
         }
 
@@ -310,6 +325,7 @@ public class ShowStatsRewrite
             rowValues.add(NULL_DOUBLE);
             rowValues.add(NULL_DOUBLE);
             rowValues.add(NULL_DOUBLE);
+            rowValues.add(NULL_VARCHAR);
             rowValues.add(NULL_VARCHAR);
             rowValues.add(NULL_VARCHAR);
             return new Row(rowValues.build());
@@ -325,6 +341,7 @@ public class ShowStatsRewrite
             rowValues.add(createEstimateRepresentation(tableStatistics.getRowCount()));
             rowValues.add(NULL_VARCHAR);
             rowValues.add(NULL_VARCHAR);
+            rowValues.add(NULL_VARCHAR);
             return new Row(rowValues.build());
         }
 
@@ -336,12 +353,12 @@ public class ShowStatsRewrite
             return new DoubleLiteral(Double.toString(estimate.getValue()));
         }
 
-        private static Expression toStringLiteral(Type type, Optional<Double> optionalValue)
+        private Expression toStringLiteral(Type type, Optional<Double> optionalValue)
         {
             return optionalValue.map(value -> toStringLiteral(type, value)).orElse(NULL_VARCHAR);
         }
 
-        private static Expression toStringLiteral(Type type, double value)
+        private Expression toStringLiteral(Type type, double value)
         {
             if (type.equals(BigintType.BIGINT) || type.equals(IntegerType.INTEGER) || type.equals(SmallintType.SMALLINT) || type.equals(TinyintType.TINYINT)) {
                 return new StringLiteral(Long.toString(round(value)));
@@ -354,6 +371,12 @@ public class ShowStatsRewrite
             }
             if (type.equals(DATE)) {
                 return new StringLiteral(LocalDate.ofEpochDay(round(value)).toString());
+            }
+            if (type.equals(TIMESTAMP)) {
+                return new StringLiteral(new SqlTimestamp(round(value) / MICROSECONDS_PER_MILLISECOND, session.getSqlFunctionProperties().getTimeZoneKey(), MILLISECONDS).toString());
+            }
+            if (type.equals(TIME)) {
+                return new StringLiteral(new SqlTime(round(value)).toString());
             }
             throw new IllegalArgumentException("Unexpected type: " + type);
         }

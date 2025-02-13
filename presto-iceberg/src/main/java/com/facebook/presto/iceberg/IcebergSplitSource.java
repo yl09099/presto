@@ -13,6 +13,8 @@
  */
 package com.facebook.presto.iceberg;
 
+import com.facebook.presto.common.predicate.TupleDomain;
+import com.facebook.presto.iceberg.delete.DeleteFile;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.ConnectorSplit;
 import com.facebook.presto.spi.ConnectorSplitSource;
@@ -21,38 +23,34 @@ import com.facebook.presto.spi.connector.ConnectorPartitionHandle;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.Closer;
 import org.apache.iceberg.FileScanTask;
-import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
-import org.apache.iceberg.StructLike;
+import org.apache.iceberg.PartitionSpecParser;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.CloseableIterator;
-import org.apache.iceberg.types.Type;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
-import static com.facebook.presto.iceberg.IcebergSessionProperties.getNodeSelectionStrategy;
-import static com.facebook.presto.iceberg.IcebergUtil.getIdentityPartitions;
+import static com.facebook.presto.hive.HiveCommonSessionProperties.getNodeSelectionStrategy;
+import static com.facebook.presto.iceberg.FileFormat.fromIcebergFileFormat;
+import static com.facebook.presto.iceberg.IcebergUtil.getDataSequenceNumber;
+import static com.facebook.presto.iceberg.IcebergUtil.getPartitionKeys;
+import static com.facebook.presto.iceberg.IcebergUtil.metadataColumnsMatchPredicates;
+import static com.facebook.presto.iceberg.IcebergUtil.partitionDataFromStructLike;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterators.limit;
-import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.CompletableFuture.completedFuture;
-import static org.apache.iceberg.types.Type.TypeID.BINARY;
-import static org.apache.iceberg.types.Type.TypeID.FIXED;
 
 public class IcebergSplitSource
         implements ConnectorSplitSource
 {
-    private CloseableIterable<FileScanTask> fileScanTaskIterable;
     private CloseableIterator<FileScanTask> fileScanTaskIterator;
 
     private final TableScan tableScan;
@@ -60,18 +58,20 @@ public class IcebergSplitSource
     private final double minimumAssignedSplitWeight;
     private final ConnectorSession session;
 
+    private final TupleDomain<IcebergColumnHandle> metadataColumnConstraints;
+
     public IcebergSplitSource(
             ConnectorSession session,
             TableScan tableScan,
             CloseableIterable<FileScanTask> fileScanTaskIterable,
-            double minimumAssignedSplitWeight)
+            double minimumAssignedSplitWeight,
+            TupleDomain<IcebergColumnHandle> metadataColumnConstraints)
     {
         this.session = requireNonNull(session, "session is null");
         this.tableScan = requireNonNull(tableScan, "tableScan is null");
-        this.fileScanTaskIterable = requireNonNull(fileScanTaskIterable, "combinedScanIterable is null");
         this.fileScanTaskIterator = fileScanTaskIterable.iterator();
         this.minimumAssignedSplitWeight = minimumAssignedSplitWeight;
-        closer.register(fileScanTaskIterable);
+        this.metadataColumnConstraints = requireNonNull(metadataColumnConstraints, "metadataColumnConstraints is null");
         closer.register(fileScanTaskIterator);
     }
 
@@ -83,7 +83,10 @@ public class IcebergSplitSource
         Iterator<FileScanTask> iterator = limit(fileScanTaskIterator, maxSize);
         while (iterator.hasNext()) {
             FileScanTask task = iterator.next();
-            splits.add(toIcebergSplit(task));
+            IcebergSplit icebergSplit = (IcebergSplit) toIcebergSplit(task);
+            if (metadataColumnsMatchPredicates(metadataColumnConstraints, icebergSplit.getPath(), icebergSplit.getDataSequenceNumber())) {
+                splits.add(icebergSplit);
+            }
         }
         return completedFuture(new ConnectorSplitBatch(splits, isFinished()));
     }
@@ -99,6 +102,9 @@ public class IcebergSplitSource
     {
         try {
             closer.close();
+            // TODO: remove this after org.apache.iceberg.io.CloseableIterator'withClose
+            //  correct release resources holds by iterator.
+            fileScanTaskIterator = CloseableIterator.empty();
         }
         catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -107,6 +113,9 @@ public class IcebergSplitSource
 
     private ConnectorSplit toIcebergSplit(FileScanTask task)
     {
+        PartitionSpec spec = task.spec();
+        Optional<PartitionData> partitionData = partitionDataFromStructLike(spec, task.file().partition());
+
         // TODO: We should leverage residual expression and convert that to TupleDomain.
         //       The predicate here is used by readers for predicate push down at reader level,
         //       so when we do not use residual expression, we are just wasting CPU cycles
@@ -116,42 +125,15 @@ public class IcebergSplitSource
                 task.file().path().toString(),
                 task.start(),
                 task.length(),
-                task.file().format(),
+                fromIcebergFileFormat(task.file().format()),
                 ImmutableList.of(),
                 getPartitionKeys(task),
+                PartitionSpecParser.toJson(spec),
+                partitionData.map(PartitionData::toJson),
                 getNodeSelectionStrategy(session),
-                SplitWeight.fromProportion(Math.min(Math.max((double) task.length() / tableScan.targetSplitSize(), minimumAssignedSplitWeight), 1.0)));
-    }
-
-    private static Map<Integer, String> getPartitionKeys(FileScanTask scanTask)
-    {
-        StructLike partition = scanTask.file().partition();
-        PartitionSpec spec = scanTask.spec();
-        Map<PartitionField, Integer> fieldToIndex = getIdentityPartitions(spec);
-        Map<Integer, String> partitionKeys = new HashMap<>();
-
-        fieldToIndex.forEach((field, index) -> {
-            int id = field.sourceId();
-            Type type = spec.schema().findType(id);
-            Class<?> javaClass = type.typeId().javaClass();
-            Object value = partition.get(index, javaClass);
-
-            if (value == null) {
-                partitionKeys.put(id, null);
-            }
-            else {
-                String partitionValue;
-                if (type.typeId() == FIXED || type.typeId() == BINARY) {
-                    // this is safe because Iceberg PartitionData directly wraps the byte array
-                    partitionValue = new String(((ByteBuffer) value).array(), UTF_8);
-                }
-                else {
-                    partitionValue = value.toString();
-                }
-                partitionKeys.put(id, partitionValue);
-            }
-        });
-
-        return Collections.unmodifiableMap(partitionKeys);
+                SplitWeight.fromProportion(Math.min(Math.max((double) task.length() / tableScan.targetSplitSize(), minimumAssignedSplitWeight), 1.0)),
+                task.deletes().stream().map(DeleteFile::fromIceberg).collect(toImmutableList()),
+                Optional.empty(),
+                getDataSequenceNumber(task.file()));
     }
 }

@@ -28,6 +28,7 @@ import com.facebook.presto.metadata.SqlScalarFunction;
 import com.facebook.presto.operator.aggregation.OptimizedTypedSet;
 import com.facebook.presto.operator.project.SelectedPositions;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.function.ComplexTypeFunctionDescriptor;
 import com.facebook.presto.spi.function.FunctionKind;
 import com.facebook.presto.spi.function.Signature;
 import com.facebook.presto.spi.function.SqlFunctionVisibility;
@@ -36,9 +37,10 @@ import com.google.common.collect.ImmutableList;
 
 import java.lang.invoke.MethodHandle;
 import java.util.List;
+import java.util.Optional;
 
 import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
-import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.DEFAULT_NAMESPACE;
+import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.JAVA_BUILTIN_NAMESPACE;
 import static com.facebook.presto.operator.scalar.ScalarFunctionImplementationChoice.ArgumentProperty.valueTypeArgumentProperty;
 import static com.facebook.presto.operator.scalar.ScalarFunctionImplementationChoice.NullConvention.RETURN_NULL_ON_NULL;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
@@ -59,16 +61,24 @@ public final class MapConcatFunction
 
     private static final MethodHandle METHOD_HANDLE = methodHandle(MapConcatFunction.class, "mapConcat", MapType.class, Block[].class);
 
+    private final ComplexTypeFunctionDescriptor descriptor;
+
     private MapConcatFunction()
     {
         super(new Signature(
-                QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, FUNCTION_NAME),
+                QualifiedObjectName.valueOf(JAVA_BUILTIN_NAMESPACE, FUNCTION_NAME),
                 FunctionKind.SCALAR,
                 ImmutableList.of(typeVariable("K"), typeVariable("V")),
                 ImmutableList.of(),
                 parseTypeSignature("map(K,V)"),
                 ImmutableList.of(parseTypeSignature("map(K,V)")),
                 true));
+        descriptor = new ComplexTypeFunctionDescriptor(
+                false,
+                ImmutableList.of(),
+                Optional.empty(),
+                Optional.of(ComplexTypeFunctionDescriptor::allSubfieldsRequired),
+                getSignature());
     }
 
     @Override
@@ -87,6 +97,12 @@ public final class MapConcatFunction
     public String getDescription()
     {
         return DESCRIPTION;
+    }
+
+    @Override
+    public ComplexTypeFunctionDescriptor getComplexTypeFunctionDescriptor()
+    {
+        return descriptor;
     }
 
     @Override
@@ -135,7 +151,7 @@ public final class MapConcatFunction
         Type valueType = mapType.getValueType();
 
         // We need to divide the entries by 2 because the maps array is SingleMapBlocks and it had the positionCount twice as large as a normal Block
-        OptimizedTypedSet typedSet = new OptimizedTypedSet(keyType, maps.length, entries / 2);
+        OptimizedTypedSet typedSet = new OptimizedTypedSet(keyType, Optional.empty(), maps.length, entries / 2);
         for (int i = lastMapIndex; i >= firstMapIndex; i--) {
             SingleMapBlock singleMapBlock = (SingleMapBlock) maps[i];
             Block keyBlock = singleMapBlock.getKeyBlock();

@@ -17,15 +17,17 @@ package com.facebook.presto.cost;
 import com.facebook.presto.Session;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.IntersectNode;
+import com.facebook.presto.spi.plan.JoinDistributionType;
+import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.spi.plan.SemiJoinNode;
+import com.facebook.presto.spi.plan.SpatialJoinNode;
 import com.facebook.presto.spi.plan.UnionNode;
 import com.facebook.presto.sql.planner.iterative.GroupReference;
 import com.facebook.presto.sql.planner.iterative.rule.DetermineJoinDistributionType;
 import com.facebook.presto.sql.planner.iterative.rule.ReorderJoins;
 import com.facebook.presto.sql.planner.plan.InternalPlanVisitor;
-import com.facebook.presto.sql.planner.plan.JoinNode;
-import com.facebook.presto.sql.planner.plan.SemiJoinNode;
-import com.facebook.presto.sql.planner.plan.SpatialJoinNode;
+import com.facebook.presto.sql.planner.plan.SequenceNode;
 
 import javax.annotation.concurrent.ThreadSafe;
 import javax.inject.Inject;
@@ -33,7 +35,9 @@ import javax.inject.Inject;
 import java.util.Objects;
 import java.util.Optional;
 
+import static com.facebook.presto.SystemSessionProperties.getCteProducerReplicationCoefficient;
 import static com.facebook.presto.cost.LocalCostEstimate.addPartialComponents;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -112,7 +116,7 @@ public class CostCalculatorWithEstimatedExchanges
         public LocalCostEstimate visitAggregation(AggregationNode node, Void context)
         {
             PlanNode source = node.getSource();
-            double inputSizeInBytes = getStats(source).getOutputSizeInBytes(source.getOutputVariables());
+            double inputSizeInBytes = getStats(source).getOutputSizeInBytes(source);
 
             LocalCostEstimate remoteRepartitionCost = calculateRemoteRepartitionCost(inputSizeInBytes);
             LocalCostEstimate localRepartitionCost = calculateLocalRepartitionCost(inputSizeInBytes);
@@ -128,7 +132,7 @@ public class CostCalculatorWithEstimatedExchanges
                     node.getLeft(),
                     node.getRight(),
                     stats,
-                    Objects.equals(node.getDistributionType(), Optional.of(JoinNode.DistributionType.REPLICATED)),
+                    Objects.equals(node.getDistributionType(), Optional.of(JoinDistributionType.REPLICATED)),
                     taskCountEstimator.estimateSourceDistributedTaskCount());
         }
 
@@ -161,15 +165,22 @@ public class CostCalculatorWithEstimatedExchanges
             // that is not always true
             // but this estimate is better that returning UNKNOWN, as it sets
             // cumulative cost to unknown
-            double inputSizeInBytes = getStats(node).getOutputSizeInBytes(node.getOutputVariables());
+            double inputSizeInBytes = getStats(node).getOutputSizeInBytes(node);
             return calculateRemoteGatherCost(inputSizeInBytes);
+        }
+
+        @Override
+        public LocalCostEstimate visitSequence(SequenceNode node, Void context)
+        {
+            return addPartialComponents(node.getSources().stream().map(n -> n.accept(this, context))
+                    .collect(toImmutableList()));
         }
 
         @Override
         public LocalCostEstimate visitIntersect(IntersectNode node, Void context)
         {
             // Similar to Union
-            double inputSizeInBytes = getStats(node).getOutputSizeInBytes(node.getOutputVariables());
+            double inputSizeInBytes = getStats(node).getOutputSizeInBytes(node);
             return calculateRemoteGatherCost(inputSizeInBytes);
         }
 
@@ -187,6 +198,13 @@ public class CostCalculatorWithEstimatedExchanges
     public static LocalCostEstimate calculateRemoteRepartitionCost(double inputSizeInBytes)
     {
         return LocalCostEstimate.of(inputSizeInBytes, 0, inputSizeInBytes);
+    }
+
+    public static LocalCostEstimate calculateCteProducerCost(Session session, StatsProvider statsProvider, PlanNode source)
+    {
+        double inputSizeInBytes = statsProvider.getStats(source).getOutputSizeInBytes(source);
+        double cteProducerReplicationCoefficient = getCteProducerReplicationCoefficient(session);
+        return LocalCostEstimate.of(cteProducerReplicationCoefficient * inputSizeInBytes, 0, cteProducerReplicationCoefficient * inputSizeInBytes);
     }
 
     public static LocalCostEstimate calculateLocalRepartitionCost(double inputSizeInBytes)
@@ -228,8 +246,8 @@ public class CostCalculatorWithEstimatedExchanges
             boolean replicated,
             int estimatedSourceDistributedTaskCount)
     {
-        double probeSizeInBytes = stats.getStats(probe).getOutputSizeInBytes(probe.getOutputVariables());
-        double buildSizeInBytes = stats.getStats(build).getOutputSizeInBytes(build.getOutputVariables());
+        double probeSizeInBytes = stats.getStats(probe).getOutputSizeInBytes(probe);
+        double buildSizeInBytes = stats.getStats(build).getOutputSizeInBytes(build);
         if (replicated) {
             // assuming the probe side of a replicated join is always source distributed
             LocalCostEstimate replicateCost = calculateRemoteReplicateCost(buildSizeInBytes, estimatedSourceDistributedTaskCount);
@@ -257,8 +275,8 @@ public class CostCalculatorWithEstimatedExchanges
         PlanNodeStatsEstimate probeStats = stats.getStats(probe);
         PlanNodeStatsEstimate buildStats = stats.getStats(build);
 
-        double buildSideSize = buildStats.getOutputSizeInBytes(build.getOutputVariables());
-        double probeSideSize = probeStats.getOutputSizeInBytes(probe.getOutputVariables());
+        double buildSideSize = buildStats.getOutputSizeInBytes(build);
+        double probeSideSize = probeStats.getOutputSizeInBytes(probe);
 
         double cpuCost = probeSideSize + buildSideSize * buildSizeMultiplier;
 

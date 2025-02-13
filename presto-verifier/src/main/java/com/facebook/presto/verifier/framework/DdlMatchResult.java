@@ -30,6 +30,7 @@ public class DdlMatchResult
         MISMATCH,
         CONTROL_NOT_PARSABLE,
         TEST_NOT_PARSABLE,
+        SNAPSHOT_DOES_NOT_EXIST,
     }
 
     private final MatchType matchType;
@@ -52,6 +53,12 @@ public class DdlMatchResult
     }
 
     @Override
+    public String getDataType()
+    {
+        return "DDL";
+    }
+
+    @Override
     public String getMatchTypeName()
     {
         return matchType.name();
@@ -59,6 +66,12 @@ public class DdlMatchResult
 
     @Override
     public boolean isMismatchPossiblyCausedByNonDeterminism()
+    {
+        return false;
+    }
+
+    @Override
+    public boolean isMismatchPossiblyCausedByReuseOutdatedTable()
     {
         return false;
     }

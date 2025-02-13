@@ -16,6 +16,7 @@ package com.facebook.presto.sql.planner.plan;
 import com.facebook.presto.spi.SourceLocation;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeId;
+import com.facebook.presto.spi.plan.StatisticAggregations;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -47,7 +48,20 @@ public class TableWriterMergeNode
             @JsonProperty("tableCommitContextVariable") VariableReferenceExpression tableCommitContextVariable,
             @JsonProperty("statisticsAggregation") Optional<StatisticAggregations> statisticsAggregation)
     {
-        super(sourceLocation, requireNonNull(id, "id is null"));
+        this(sourceLocation, id, Optional.empty(), source, rowCountVariable, fragmentVariable, tableCommitContextVariable, statisticsAggregation);
+    }
+
+    public TableWriterMergeNode(
+            Optional<SourceLocation> sourceLocation,
+            PlanNodeId id,
+            Optional<PlanNode> statsEquivalentPlanNode,
+            PlanNode source,
+            VariableReferenceExpression rowCountVariable,
+            VariableReferenceExpression fragmentVariable,
+            VariableReferenceExpression tableCommitContextVariable,
+            Optional<StatisticAggregations> statisticsAggregation)
+    {
+        super(sourceLocation, id, statsEquivalentPlanNode);
         this.source = requireNonNull(source, "source is null");
         this.rowCountVariable = requireNonNull(rowCountVariable, "rowCountVariable is null");
         this.fragmentVariable = requireNonNull(fragmentVariable, "fragmentVariable is null");
@@ -110,7 +124,13 @@ public class TableWriterMergeNode
     @Override
     public PlanNode replaceChildren(List<PlanNode> newChildren)
     {
-        return new TableWriterMergeNode(getSourceLocation(), getId(), getOnlyElement(newChildren), rowCountVariable, fragmentVariable, tableCommitContextVariable, statisticsAggregation);
+        return new TableWriterMergeNode(getSourceLocation(), getId(), getStatsEquivalentPlanNode(), getOnlyElement(newChildren), rowCountVariable, fragmentVariable, tableCommitContextVariable, statisticsAggregation);
+    }
+
+    @Override
+    public PlanNode assignStatsEquivalentPlanNode(Optional<PlanNode> statsEquivalentPlanNode)
+    {
+        return new TableWriterMergeNode(getSourceLocation(), getId(), statsEquivalentPlanNode, source, rowCountVariable, fragmentVariable, tableCommitContextVariable, statisticsAggregation);
     }
 
     @Override

@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.type;
 
+import com.facebook.presto.Session;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.block.BlockBuilder;
 import com.facebook.presto.common.type.ArrayType;
@@ -23,11 +24,11 @@ import com.facebook.presto.common.type.SqlDate;
 import com.facebook.presto.common.type.StandardTypes;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.operator.scalar.AbstractTestFunctions;
-import com.facebook.presto.spi.ErrorCode;
-import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.operator.scalar.FunctionAssertions;
 import com.facebook.presto.spi.function.LiteralParameters;
 import com.facebook.presto.spi.function.ScalarFunction;
 import com.facebook.presto.spi.function.SqlType;
+import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.analyzer.SemanticErrorCode;
 import com.facebook.presto.sql.analyzer.SemanticException;
 import com.google.common.base.Strings;
@@ -37,6 +38,7 @@ import com.google.common.collect.Lists;
 import com.google.common.primitives.Ints;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
@@ -50,6 +52,7 @@ import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
 
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
+import static com.facebook.presto.SystemSessionProperties.FIELD_NAMES_IN_JSON_CAST_ENABLED;
 import static com.facebook.presto.common.block.BlockSerdeUtil.writeBlock;
 import static com.facebook.presto.common.function.OperatorType.HASH_CODE;
 import static com.facebook.presto.common.function.OperatorType.INDETERMINATE;
@@ -75,6 +78,7 @@ import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.AMBIGUOUS_FUNCTION_CALL;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.FUNCTION_NOT_FOUND;
 import static com.facebook.presto.sql.analyzer.SemanticErrorCode.TYPE_MISMATCH;
+import static com.facebook.presto.sql.planner.PlannerUtils.createMapType;
 import static com.facebook.presto.testing.DateTimeTestingUtils.sqlTimestampOf;
 import static com.facebook.presto.util.StructuralTestUtil.appendToBlockBuilder;
 import static com.facebook.presto.util.StructuralTestUtil.arrayBlockOf;
@@ -87,20 +91,34 @@ import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
+import static java.util.Collections.nCopies;
 import static java.util.Collections.singletonList;
 import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
 public class TestArrayOperators
         extends AbstractTestFunctions
 {
+    private static FunctionAssertions fieldNameInJsonCastEnabled;
+
     public TestArrayOperators() {}
 
     @BeforeClass
     public void setUp()
     {
         registerScalar(getClass());
+        fieldNameInJsonCastEnabled = new FunctionAssertions(
+                Session.builder(session)
+                        .setSystemProperty(FIELD_NAMES_IN_JSON_CAST_ENABLED, "true")
+                        .build(),
+                new FeaturesConfig());
+    }
+
+    @AfterClass(alwaysRun = true)
+    public final void tearDown()
+    {
+        fieldNameInJsonCastEnabled.close();
+        fieldNameInJsonCastEnabled = null;
     }
 
     @ScalarFunction
@@ -162,7 +180,7 @@ public class TestArrayOperators
         assertFunction("CAST(ARRAY [ARRAY[1.0], ARRAY[2.0, 3.0]] AS ARRAY<ARRAY<DOUBLE>>)", new ArrayType(new ArrayType(DOUBLE)), asList(asList(1.0), asList(2.0, 3.0)));
         assertFunction("CAST(ARRAY [ARRAY[1.0E0], ARRAY[2.0E0, 3.0E0]] AS ARRAY<ARRAY<DECIMAL(2,1)>>)",
                 new ArrayType(new ArrayType(createDecimalType(2, 1))), asList(asList(decimal("1.0")), asList(decimal("2.0"), decimal("3.0"))));
-        assertFunction("CAST(ARRAY [ARRAY[1.0E0], ARRAY[2.0E0, 3.0E0]] AS ARRAY<ARRAY<DECIMAL(20,10)>>)",
+        fieldNameInJsonCastEnabled.assertFunction("CAST(ARRAY [ARRAY[1.0E0], ARRAY[2.0E0, 3.0E0]] AS ARRAY<ARRAY<DECIMAL(20,10)>>)",
                 new ArrayType(new ArrayType(createDecimalType(20, 10))),
                 asList(asList(decimal("0000000001.0000000000")), asList(decimal("0000000002.0000000000"), decimal("0000000003.0000000000"))));
 
@@ -186,6 +204,58 @@ public class TestArrayOperators
 
     @Test
     public void testArrayToJson()
+    {
+        fieldNameInJsonCastEnabled.assertFunction("cast(cast (null as ARRAY<BIGINT>) AS JSON)", JSON, null);
+        fieldNameInJsonCastEnabled.assertFunction("cast(ARRAY[] AS JSON)", JSON, "[]");
+        fieldNameInJsonCastEnabled.assertFunction("cast(ARRAY[null, null] AS JSON)", JSON, "[null,null]");
+
+        fieldNameInJsonCastEnabled.assertFunction("cast(ARRAY[true, false, null] AS JSON)", JSON, "[true,false,null]");
+
+        fieldNameInJsonCastEnabled.assertFunction("cast(cast(ARRAY[1, 2, null] AS ARRAY<TINYINT>) AS JSON)", JSON, "[1,2,null]");
+        fieldNameInJsonCastEnabled.assertFunction("cast(cast(ARRAY[12345, -12345, null] AS ARRAY<SMALLINT>) AS JSON)", JSON, "[12345,-12345,null]");
+        fieldNameInJsonCastEnabled.assertFunction("cast(cast(ARRAY[123456789, -123456789, null] AS ARRAY<INTEGER>) AS JSON)", JSON, "[123456789,-123456789,null]");
+        fieldNameInJsonCastEnabled.assertFunction("cast(cast(ARRAY[1234567890123456789, -1234567890123456789, null] AS ARRAY<BIGINT>) AS JSON)", JSON, "[1234567890123456789,-1234567890123456789,null]");
+
+        fieldNameInJsonCastEnabled.assertFunction("CAST(CAST(ARRAY[3.14E0, nan(), infinity(), -infinity(), null] AS ARRAY<REAL>) AS JSON)", JSON, "[3.14,\"NaN\",\"Infinity\",\"-Infinity\",null]");
+        fieldNameInJsonCastEnabled.assertFunction("CAST(ARRAY[3.14E0, 1e-323, 1e308, nan(), infinity(), -infinity(), null] AS JSON)", JSON, "[3.14,1.0E-323,1.0E308,\"NaN\",\"Infinity\",\"-Infinity\",null]");
+        fieldNameInJsonCastEnabled.assertFunction("CAST(ARRAY[DECIMAL '3.14', null] AS JSON)", JSON, "[3.14,null]");
+        fieldNameInJsonCastEnabled.assertFunction("CAST(ARRAY[DECIMAL '12345678901234567890.123456789012345678', null] AS JSON)", JSON, "[12345678901234567890.123456789012345678,null]");
+
+        fieldNameInJsonCastEnabled.assertFunction("cast(ARRAY['a', 'bb', null] AS JSON)", JSON, "[\"a\",\"bb\",null]");
+        fieldNameInJsonCastEnabled.assertFunction(
+                "cast(ARRAY[JSON '123', JSON '3.14', JSON 'false', JSON '\"abc\"', JSON '[1, \"a\", null]', JSON '{\"a\": 1, \"b\": \"str\", \"c\": null}', JSON 'null', null] AS JSON)",
+                JSON,
+                "[123,3.14,false,\"abc\",[1,\"a\",null],{\"a\":1,\"b\":\"str\",\"c\":null},null,null]");
+
+        fieldNameInJsonCastEnabled.assertFunction(
+                "CAST(ARRAY[TIMESTAMP '1970-01-01 00:00:01', null] AS JSON)",
+                JSON,
+                format("[\"%s\",null]", sqlTimestampOf(1970, 1, 1, 0, 0, 1, 0, TEST_SESSION)));
+        fieldNameInJsonCastEnabled.assertFunction(
+                "CAST(ARRAY[DATE '2001-08-22', DATE '2001-08-23', null] AS JSON)",
+                JSON,
+                "[\"2001-08-22\",\"2001-08-23\",null]");
+        fieldNameInJsonCastEnabled.assertFunction(
+                "cast(ARRAY[ARRAY[1, 2], ARRAY[3, null], ARRAY[], ARRAY[null, null], null] AS JSON)",
+                JSON,
+                "[[1,2],[3,null],[],[null,null],null]");
+        fieldNameInJsonCastEnabled.assertFunction(
+                "cast(ARRAY[MAP(ARRAY['b', 'a'], ARRAY[2, 1]), MAP(ARRAY['three', 'none'], ARRAY[3, null]), MAP(), MAP(ARRAY['h2', 'h1'], ARRAY[null, null]), null] AS JSON)",
+                JSON,
+                "[{\"a\":1,\"b\":2},{\"none\":null,\"three\":3},{},{\"h1\":null,\"h2\":null},null]");
+        fieldNameInJsonCastEnabled.assertFunction(
+                "cast(ARRAY[ROW(1, 2), ROW(3, CAST(null as INTEGER)), CAST(ROW(null, null) AS ROW(INTEGER, INTEGER)), null] AS JSON)",
+                JSON,
+                "[{\"\":1,\"\":2},{\"\":3,\"\":null},{\"\":null,\"\":null},null]");
+        fieldNameInJsonCastEnabled.assertFunction("CAST(ARRAY [12345.12345, 12345.12345, 3.0] AS JSON)", JSON, "[12345.12345,12345.12345,3.00000]");
+        fieldNameInJsonCastEnabled.assertFunction(
+                "CAST(ARRAY [123456789012345678901234567890.87654321, 123456789012345678901234567890.12345678] AS JSON)",
+                JSON,
+                "[123456789012345678901234567890.87654321,123456789012345678901234567890.12345678]");
+    }
+
+    @Test
+    public void testArrayToJsonNoFieldNames()
     {
         assertFunction("cast(cast (null as ARRAY<BIGINT>) AS JSON)", JSON, null);
         assertFunction("cast(ARRAY[] AS JSON)", JSON, "[]");
@@ -335,7 +405,7 @@ public class TestArrayOperators
         assertInvalidCast("CAST(unchecked_to_json('[1, 2, 3') AS ARRAY<BIGINT>)", "Cannot cast to array(bigint).\n[1, 2, 3");
 
         assertInvalidCast("CAST(JSON '[\"a\", \"b\"]' AS ARRAY<BIGINT>)", "Cannot cast to array(bigint). Cannot cast 'a' to BIGINT\n[\"a\",\"b\"]");
-        assertInvalidCast("CAST(JSON '[1234567890123.456]' AS ARRAY<INTEGER>)", "Cannot cast to array(integer). Out of range for integer: 1.234567890123456E12\n[1.234567890123456E12]");
+        assertInvalidCast("CAST(JSON '[1234567890123.456]' AS ARRAY<INTEGER>)", "Cannot cast to array(integer). Unable to cast 1.234567890123456E12 to integer\n[1.234567890123456E12]");
 
         assertFunction("CAST(JSON '[1, 2.0, 3]' AS ARRAY(DECIMAL(10,5)))", new ArrayType(createDecimalType(10, 5)), ImmutableList.of(decimal("1.00000"), decimal("2.00000"), decimal("3.00000")));
         assertFunction("CAST(CAST(ARRAY [1, 2.0, 3] as JSON) AS ARRAY(DECIMAL(10,5)))", new ArrayType(createDecimalType(10, 5)), ImmutableList.of(decimal("1.00000"), decimal("2.00000"), decimal("3.00000")));
@@ -544,6 +614,7 @@ public class TestArrayOperators
         assertFunction("array_join(ARRAY[1, NULL, 2], ',')", VARCHAR, "1,2");
         assertFunction("ARRAY_JOIN(ARRAY [1, 2, 3], ';', 'N/A')", VARCHAR, "1;2;3");
         assertFunction("ARRAY_JOIN(ARRAY [1, 2, null], ';', 'N/A')", VARCHAR, "1;2;N/A");
+        assertFunction("ARRAY_JOIN(ARRAY [1, 2, null], ';')", VARCHAR, "1;2");
         assertFunction("ARRAY_JOIN(ARRAY [1, 2, 3], 'x')", VARCHAR, "1x2x3");
         assertFunction("ARRAY_JOIN(ARRAY [BIGINT '1', 2, 3], 'x')", VARCHAR, "1x2x3");
         assertFunction("ARRAY_JOIN(ARRAY [null], '=')", VARCHAR, "");
@@ -603,11 +674,11 @@ public class TestArrayOperators
         assertFunction("ARRAY_MIN(ARRAY [NULL, NULL, NULL])", UNKNOWN, null);
         assertFunction("ARRAY_MIN(ARRAY [NaN(), NaN(), NaN()])", DOUBLE, NaN);
         assertFunction("ARRAY_MIN(ARRAY [NULL, 2, 3])", INTEGER, null);
-        assertFunction("ARRAY_MIN(ARRAY [NaN(), 2, 3])", DOUBLE, NaN);
-        assertFunction("ARRAY_MIN(ARRAY [NULL, NaN(), 1])", DOUBLE, NaN);
-        assertFunction("ARRAY_MIN(ARRAY [NaN(), NULL, 3.0])", DOUBLE, NaN);
+        assertFunction("ARRAY_MIN(ARRAY [NaN(), 2, 3])", DOUBLE, 2.0);
+        assertFunction("ARRAY_MIN(ARRAY [NULL, NaN(), 1])", DOUBLE, null);
+        assertFunction("ARRAY_MIN(ARRAY [NaN(), NULL, 3.0])", DOUBLE, null);
         assertFunction("ARRAY_MIN(ARRAY [1.0E0, NULL, 3])", DOUBLE, null);
-        assertFunction("ARRAY_MIN(ARRAY [1.0, NaN(), 3])", DOUBLE, NaN);
+        assertFunction("ARRAY_MIN(ARRAY [1.0, NaN(), 3])", DOUBLE, 1.0);
         assertFunction("ARRAY_MIN(ARRAY ['1', '2', NULL])", createVarcharType(1), null);
         assertFunction("ARRAY_MIN(ARRAY [3, 2, 1])", INTEGER, 1);
         assertFunction("ARRAY_MIN(ARRAY [1, 2, 3])", INTEGER, 1);
@@ -625,6 +696,30 @@ public class TestArrayOperators
     }
 
     @Test
+    public void testArrayMinWithNullsInBothArraysNotComparedFirstIsMin()
+    {
+        assertFunction("ARRAY_MIN(ARRAY [ARRAY[1, NULL], ARRAY[2, NULL]])", new ArrayType(INTEGER), Lists.newArrayList(1, null));
+    }
+
+    @Test
+    public void testArrayMinWithNullsInBothArraysNotComparedSecondIsMin()
+    {
+        assertFunction("ARRAY_MIN(ARRAY [ARRAY[2, NULL], ARRAY[1, NULL]])", new ArrayType(INTEGER), Lists.newArrayList(1, null));
+    }
+
+    @Test
+    public void testArrayMinWithNullInFirstArrayIsCompared()
+    {
+        assertInvalidFunction("ARRAY_MIN(ARRAY [ARRAY[1, NULL], ARRAY[1, 2]])", NOT_SUPPORTED);
+    }
+
+    @Test
+    public void testArrayMinWithNullInSecondArrayIsCompared()
+    {
+        assertInvalidFunction("ARRAY_MIN(ARRAY [ARRAY[1, 2], ARRAY[1, NULL]])", NOT_SUPPORTED);
+    }
+
+    @Test
     public void testArrayMax()
     {
         assertFunction("ARRAY_MAX(ARRAY [])", UNKNOWN, null);
@@ -634,8 +729,8 @@ public class TestArrayOperators
         assertFunction("ARRAY_MAX(ARRAY [NaN(), NaN(), NaN()])", DOUBLE, NaN);
         assertFunction("ARRAY_MAX(ARRAY [NULL, 2, 3])", INTEGER, null);
         assertFunction("ARRAY_MAX(ARRAY [NaN(), 2, 3])", DOUBLE, NaN);
-        assertFunction("ARRAY_MAX(ARRAY [NULL, NaN(), 1])", DOUBLE, NaN);
-        assertFunction("ARRAY_MAX(ARRAY [NaN(), NULL, 3.0])", DOUBLE, NaN);
+        assertFunction("ARRAY_MAX(ARRAY [NULL, NaN(), 1])", DOUBLE, null);
+        assertFunction("ARRAY_MAX(ARRAY [NaN(), NULL, 3.0])", DOUBLE, null);
         assertFunction("ARRAY_MAX(ARRAY [1.0E0, NULL, 3])", DOUBLE, null);
         assertFunction("ARRAY_MAX(ARRAY [1.0, NaN(), 3])", DOUBLE, NaN);
         assertFunction("ARRAY_MAX(ARRAY ['1', '2', NULL])", createVarcharType(1), null);
@@ -652,6 +747,30 @@ public class TestArrayOperators
         assertDecimalFunction("ARRAY_MAX(ARRAY [2.111111222111111114111, 2.22222222222222222, 2.222222222222223])", decimal("2.222222222222223000000"));
         assertDecimalFunction("ARRAY_MAX(ARRAY [1.9, 2, 2.3])", decimal("0000000002.3"));
         assertDecimalFunction("ARRAY_MAX(ARRAY [2.22222222222222222, 2.3])", decimal("2.30000000000000000"));
+    }
+
+    @Test
+    public void testArrayMaxWithNullsInBothArraysNotComparedSecondIsMax()
+    {
+        assertFunction("ARRAY_MAX(ARRAY [ARRAY[1, NULL], ARRAY[2, NULL]])", new ArrayType(INTEGER), Lists.newArrayList(2, null));
+    }
+
+    @Test
+    public void testArrayMaxWithNullsInBothArraysNotComparedFirstIsMax()
+    {
+        assertFunction("ARRAY_MAX(ARRAY [ARRAY[2, NULL], ARRAY[1, NULL]])", new ArrayType(INTEGER), Lists.newArrayList(2, null));
+    }
+
+    @Test
+    public void testArrayMaxWithNullInFirstArrayIsCompared()
+    {
+        assertInvalidFunction("ARRAY_MAX(ARRAY [ARRAY[1, NULL], ARRAY[1, 2]])", NOT_SUPPORTED);
+    }
+
+    @Test
+    public void testArrayMaxWithNullInSecondArrayIsCompared()
+    {
+        assertInvalidFunction("ARRAY_MAX(ARRAY [ARRAY[1, 2], ARRAY[1, NULL]])", NOT_SUPPORTED);
     }
 
     @Test
@@ -780,7 +899,7 @@ public class TestArrayOperators
             fail("Access to array with double subscript should fail");
         }
         catch (SemanticException e) {
-            assertTrue(e.getCode() == TYPE_MISMATCH);
+            assertEquals(e.getCode(), TYPE_MISMATCH);
         }
 
         assertFunction("ARRAY[NULL][1]", UNKNOWN, null);
@@ -1102,9 +1221,23 @@ public class TestArrayOperators
     }
 
     @Test
+    public void testDistinctWithIndeterminateRows()
+    {
+        assertFunction(
+                "ARRAY_DISTINCT(ARRAY[(123, 'abc'), (123, NULL)])",
+                new ArrayType(RowType.anonymous(ImmutableList.of(INTEGER, createVarcharType(3)))),
+                ImmutableList.of(asList(123, "abc"), asList(123, null)));
+        assertFunction(
+                "ARRAY_DISTINCT(ARRAY[(NULL, NULL), (42, 'def'), (NULL, 'abc'), (123, NULL), (42, 'def'), (NULL, NULL), (NULL, 'abc'), (123, NULL)])",
+                new ArrayType(RowType.anonymous(ImmutableList.of(INTEGER, createVarcharType(3)))),
+                ImmutableList.of(asList(null, null), asList(42, "def"), asList(null, "abc"), asList(123, null)));
+    }
+
+    @Test
     public void testSlice()
     {
         assertFunction("SLICE(ARRAY [1, 2, 3, 4, 5], 1, 4)", new ArrayType(INTEGER), ImmutableList.of(1, 2, 3, 4));
+        assertFunction("SLICE(ARRAY [1, 2, 3], 1, 3)", new ArrayType(INTEGER), ImmutableList.of(1, 2, 3));
         assertFunction("SLICE(ARRAY [1, 2], 1, 4)", new ArrayType(INTEGER), ImmutableList.of(1, 2));
         assertFunction("SLICE(ARRAY [1, 2, 3, 4, 5], 3, 2)", new ArrayType(INTEGER), ImmutableList.of(3, 4));
         assertFunction("SLICE(ARRAY ['1', '2', '3', '4'], 2, 1)", new ArrayType(createVarcharType(1)), ImmutableList.of("2"));
@@ -1198,122 +1331,6 @@ public class TestArrayOperators
         assertFunction("ARRAYS_OVERLAP(ARRAY [NULL, 9.1], ARRAY [9.1, 10.2, 3.0])", BooleanType.BOOLEAN, true);
         assertFunction("ARRAYS_OVERLAP(ARRAY [2.4], ARRAY [2.4])", BooleanType.BOOLEAN, true);
         assertFunction("ARRAYS_OVERLAP(ARRAY [2.4, 9.0, 10.9999999, 9.1, 4.1, 8.1], ARRAY [2.1, 10.999])", BooleanType.BOOLEAN, false);
-    }
-
-    @Test
-    public void testArrayIntersect()
-    {
-        // test basic
-        assertFunction("ARRAY_INTERSECT(ARRAY [5], ARRAY [5])", new ArrayType(INTEGER), ImmutableList.of(5));
-        assertFunction("ARRAY_INTERSECT(ARRAY [1, 2, 5, 5, 6], ARRAY [5, 5, 6, 6, 7, 8])", new ArrayType(INTEGER), ImmutableList.of(5, 6));
-        assertFunction("ARRAY_INTERSECT(ARRAY [IF (RAND() < 1.0E0, 7, 1) , 2], ARRAY [7])", new ArrayType(INTEGER), ImmutableList.of(7));
-        assertFunction("ARRAY_INTERSECT(ARRAY [CAST(5 AS BIGINT), CAST(5 AS BIGINT)], ARRAY [CAST(1 AS BIGINT), CAST(5 AS BIGINT)])", new ArrayType(BIGINT), ImmutableList.of(5L));
-        assertFunction("ARRAY_INTERSECT(ARRAY [1, 5], ARRAY [1.0E0])", new ArrayType(DOUBLE), ImmutableList.of(1.0));
-        assertFunction("ARRAY_INTERSECT(ARRAY [1.0E0, 5.0E0], ARRAY [5.0E0, 5.0E0, 6.0E0])", new ArrayType(DOUBLE), ImmutableList.of(5.0));
-        assertFunction("ARRAY_INTERSECT(ARRAY [8.3E0, 1.6E0, 4.1E0, 5.2E0], ARRAY [4.0E0, 5.2E0, 8.3E0, 9.7E0, 3.5E0])", new ArrayType(DOUBLE), ImmutableList.of(5.2, 8.3));
-        assertFunction("ARRAY_INTERSECT(ARRAY [5.1E0, 7, 3.0E0, 4.8E0, 10], ARRAY [6.5E0, 10.0E0, 1.9E0, 5.1E0, 3.9E0, 4.8E0])", new ArrayType(DOUBLE), ImmutableList.of(10.0, 5.1, 4.8));
-        assertFunction(
-                "ARRAY_INTERSECT(ARRAY [2.3, 2.3, 2.2], ARRAY[2.2, 2.3])",
-                new ArrayType(createDecimalType(2, 1)),
-                ImmutableList.of(decimal("2.3"), decimal("2.2")));
-        assertFunction("ARRAY_INTERSECT(ARRAY [2.330, 1.900, 2.330], ARRAY [2.3300, 1.9000])", new ArrayType(createDecimalType(5, 4)),
-                ImmutableList.of(decimal("2.3300"), decimal("1.9000")));
-        assertFunction("ARRAY_INTERSECT(ARRAY [2, 3], ARRAY[2.0, 3.0])", new ArrayType(createDecimalType(11, 1)),
-                ImmutableList.of(decimal("00000000002.0"), decimal("00000000003.0")));
-        assertFunction("ARRAY_INTERSECT(ARRAY [true], ARRAY [true])", new ArrayType(BOOLEAN), ImmutableList.of(true));
-        assertFunction("ARRAY_INTERSECT(ARRAY [true, false], ARRAY [true])", new ArrayType(BOOLEAN), ImmutableList.of(true));
-        assertFunction("ARRAY_INTERSECT(ARRAY [true, true], ARRAY [true, true])", new ArrayType(BOOLEAN), ImmutableList.of(true));
-        assertFunction("ARRAY_INTERSECT(ARRAY ['abc'], ARRAY ['abc', 'bcd'])", new ArrayType(createVarcharType(3)), ImmutableList.of("abc"));
-        assertFunction("ARRAY_INTERSECT(ARRAY ['abc', 'abc'], ARRAY ['abc', 'abc'])", new ArrayType(createVarcharType(3)), ImmutableList.of("abc"));
-        assertFunction("ARRAY_INTERSECT(ARRAY ['foo', 'bar', 'baz'], ARRAY ['foo', 'test', 'bar'])", new ArrayType(createVarcharType(4)), ImmutableList.of("foo", "bar"));
-
-        // test empty results
-        assertFunction("ARRAY_INTERSECT(ARRAY [], ARRAY [5])", new ArrayType(INTEGER), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [5, 6], ARRAY [])", new ArrayType(INTEGER), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [1], ARRAY [5])", new ArrayType(INTEGER), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [CAST(1 AS BIGINT)], ARRAY [CAST(5 AS BIGINT)])", new ArrayType(BIGINT), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [true, true], ARRAY [false])", new ArrayType(BOOLEAN), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [], ARRAY [false])", new ArrayType(BOOLEAN), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [5], ARRAY [1.0E0])", new ArrayType(DOUBLE), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY ['abc'], ARRAY [])", new ArrayType(createVarcharType(3)), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [], ARRAY ['abc', 'bcd'])", new ArrayType(createVarcharType(3)), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [], ARRAY [])", new ArrayType(UNKNOWN), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [], ARRAY [NULL])", new ArrayType(UNKNOWN), ImmutableList.of());
-
-        // test nulls
-        assertFunction("ARRAY_INTERSECT(ARRAY [NULL], ARRAY [NULL, NULL])", new ArrayType(UNKNOWN), asList((Object) null));
-        assertFunction("ARRAY_INTERSECT(ARRAY [0, 0, 1, NULL], ARRAY [0, 0, 1, NULL])", new ArrayType(INTEGER), asList(0, 1, null));
-        assertFunction("ARRAY_INTERSECT(ARRAY [0, 0], ARRAY [0, 0, NULL])", new ArrayType(INTEGER), ImmutableList.of(0));
-        assertFunction("ARRAY_INTERSECT(ARRAY [CAST(0 AS BIGINT), CAST(0 AS BIGINT)], ARRAY [CAST(0 AS BIGINT), NULL])", new ArrayType(BIGINT), ImmutableList.of(0L));
-        assertFunction("ARRAY_INTERSECT(ARRAY [0.0E0], ARRAY [NULL])", new ArrayType(DOUBLE), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [0.0E0, NULL], ARRAY [0.0E0, NULL])", new ArrayType(DOUBLE), asList(0.0, null));
-        assertFunction("ARRAY_INTERSECT(ARRAY [true, true, false, false, NULL], ARRAY [true, false, false, NULL])", new ArrayType(BOOLEAN), asList(true, false, null));
-        assertFunction("ARRAY_INTERSECT(ARRAY [false, false], ARRAY [false, false, NULL])", new ArrayType(BOOLEAN), ImmutableList.of(false));
-        assertFunction("ARRAY_INTERSECT(ARRAY ['abc'], ARRAY [NULL])", new ArrayType(createVarcharType(3)), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [''], ARRAY ['', NULL])", new ArrayType(createVarcharType(0)), ImmutableList.of(""));
-        assertFunction("ARRAY_INTERSECT(ARRAY ['', NULL], ARRAY ['', NULL])", new ArrayType(createVarcharType(0)), asList("", null));
-        assertFunction("ARRAY_INTERSECT(ARRAY [NULL], ARRAY ['abc', NULL])", new ArrayType(createVarcharType(3)), singletonList(null));
-        assertFunction("ARRAY_INTERSECT(ARRAY ['abc', NULL, 'xyz', NULL], ARRAY [NULL, 'abc', NULL, NULL])", new ArrayType(createVarcharType(3)), asList("abc", null));
-        assertFunction("ARRAY_INTERSECT(ARRAY [], ARRAY [NULL])", new ArrayType(UNKNOWN), ImmutableList.of());
-        assertFunction("ARRAY_INTERSECT(ARRAY [NULL], ARRAY [NULL])", new ArrayType(UNKNOWN), singletonList(null));
-
-        // test composite types
-        assertFunction(
-                "ARRAY_INTERSECT(ARRAY[(123, 456), (123, 789)], ARRAY[(123, 456), (123, 456), (123, 789)])",
-                new ArrayType(RowType.anonymous(ImmutableList.of(INTEGER, INTEGER))),
-                ImmutableList.of(asList(123, 456), asList(123, 789)));
-        assertFunction(
-                "ARRAY_INTERSECT(ARRAY[ARRAY[123, 456], ARRAY[123, 789]], ARRAY[ARRAY[123, 456], ARRAY[123, 456], ARRAY[123, 789]])",
-                new ArrayType(new ArrayType((INTEGER))),
-                ImmutableList.of(asList(123, 456), asList(123, 789)));
-        assertFunction(
-                "ARRAY_INTERSECT(ARRAY[(123, 'abc'), (123, 'cde')], ARRAY[(123, 'abc'), (123, 'cde')])",
-                new ArrayType(RowType.anonymous(ImmutableList.of(INTEGER, createVarcharType(3)))),
-                ImmutableList.of(asList(123, "abc"), asList(123, "cde")));
-        assertFunction(
-                "ARRAY_INTERSECT(ARRAY[(123, 'abc'), (123, 'cde'), NULL], ARRAY[(123, 'abc'), (123, 'cde')])",
-                new ArrayType(RowType.anonymous(ImmutableList.of(INTEGER, createVarcharType(3)))),
-                ImmutableList.of(asList(123, "abc"), asList(123, "cde")));
-        assertFunction(
-                "ARRAY_INTERSECT(ARRAY[(123, 'abc'), (123, 'cde'), NULL, NULL], ARRAY[(123, 'abc'), (123, 'cde'), NULL])",
-                new ArrayType(RowType.anonymous(ImmutableList.of(INTEGER, createVarcharType(3)))),
-                asList(asList(123, "abc"), asList(123, "cde"), null));
-        assertFunction(
-                "ARRAY_INTERSECT(ARRAY[(123, 'abc'), (123, 'abc')], ARRAY[(123, 'abc'), (123, NULL)])",
-                new ArrayType(RowType.anonymous(ImmutableList.of(INTEGER, createVarcharType(3)))),
-                ImmutableList.of(asList(123, "abc")));
-        assertFunction(
-                "ARRAY_INTERSECT(ARRAY[(123, 'abc')], ARRAY[(123, NULL)])",
-                new ArrayType(RowType.anonymous(ImmutableList.of(INTEGER, createVarcharType(3)))),
-                ImmutableList.of());
-
-        // test unsupported
-        assertNotSupported(
-                "ARRAY_INTERSECT(ARRAY[(123, 'abc'), (123, NULL)], ARRAY[(123, 'abc'), (123, NULL)])",
-                "ROW comparison not supported for fields with null elements");
-        assertNotSupported(
-                "ARRAY_INTERSECT(ARRAY[(NULL, 'abc'), (123, 'abc')], ARRAY[(123, 'abc'),(NULL, 'abc')])",
-                "ROW comparison not supported for fields with null elements");
-
-        assertCachedInstanceHasBoundedRetainedSize("ARRAY_INTERSECT(ARRAY ['foo', 'bar', 'baz'], ARRAY ['foo', 'test', 'bar'])");
-    }
-
-    @Test
-    public void testArrayUnion()
-    {
-        assertFunction("ARRAY_UNION(ARRAY [cast(10 as bigint), NULL, cast(12 as bigint), NULL], ARRAY [NULL, cast(10 as bigint), NULL, NULL])", new ArrayType(BIGINT), asList(10L, null, 12L));
-        assertFunction("ARRAY_UNION(ARRAY [12], ARRAY [10])", new ArrayType(INTEGER), ImmutableList.of(12, 10));
-        assertFunction("ARRAY_UNION(ARRAY ['foo', 'bar', 'baz'], ARRAY ['foo', 'test', 'bar'])", new ArrayType(createVarcharType(4)), ImmutableList.of("foo", "bar", "baz", "test"));
-        assertFunction("ARRAY_UNION(ARRAY [NULL], ARRAY [NULL, NULL])", new ArrayType(UNKNOWN), asList((Object) null));
-        assertFunction("ARRAY_UNION(ARRAY ['abc', NULL, 'xyz', NULL], ARRAY [NULL, 'abc', NULL, NULL])", new ArrayType(createVarcharType(3)), asList("abc", null, "xyz"));
-        assertFunction("ARRAY_UNION(ARRAY [1, 5], ARRAY [1])", new ArrayType(INTEGER), ImmutableList.of(1, 5));
-        assertFunction("ARRAY_UNION(ARRAY [1, 1, 2, 4], ARRAY [1, 1, 4, 4])", new ArrayType(INTEGER), ImmutableList.of(1, 2, 4));
-        assertFunction("ARRAY_UNION(ARRAY [2, 8], ARRAY [8, 3])", new ArrayType(INTEGER), ImmutableList.of(2, 8, 3));
-        assertFunction("ARRAY_UNION(ARRAY [IF (RAND() < 1.0E0, 7, 1) , 2], ARRAY [7])", new ArrayType(INTEGER), ImmutableList.of(7, 2));
-        assertFunction("ARRAY_UNION(ARRAY [1, 5], ARRAY [1.0E0])", new ArrayType(DOUBLE), ImmutableList.of(1.0, 5.0));
-        assertFunction("ARRAY_UNION(ARRAY [8.3E0, 1.6E0, 4.1E0, 5.2E0], ARRAY [4.0E0, 5.2E0, 8.3E0, 9.7E0, 3.5E0])", new ArrayType(DOUBLE), ImmutableList.of(8.3, 1.6, 4.1, 5.2, 4.0, 9.7, 3.5));
-        assertFunction("ARRAY_UNION(ARRAY [5.1E0, 7, 3.0E0, 4.8E0, 10], ARRAY [6.5E0, 10.0E0, 1.9E0, 5.1E0, 3.9E0, 4.8E0])", new ArrayType(DOUBLE), ImmutableList.of(5.1, 7.0, 3.0, 4.8, 10.0, 6.5, 1.9, 3.9));
-        assertFunction("ARRAY_UNION(ARRAY [ARRAY [4, 5], ARRAY [6, 7]], ARRAY [ARRAY [4, 5], ARRAY [6, 8]])", new ArrayType(new ArrayType(INTEGER)), ImmutableList.of(ImmutableList.of(4, 5), ImmutableList.of(6, 7), ImmutableList.of(6, 8)));
     }
 
     @Test
@@ -1559,8 +1576,8 @@ public class TestArrayOperators
         assertFunction("ARRAY_REMOVE(ARRAY [-1.23E0, 3.14E0], 3.14E0)", new ArrayType(DOUBLE), ImmutableList.of(-1.23));
         assertFunction("ARRAY_REMOVE(ARRAY [3.14E0], 0.0E0)", new ArrayType(DOUBLE), ImmutableList.of(3.14));
         assertFunction("ARRAY_REMOVE(ARRAY [sqrt(-1), 3.14E0], 3.14E0)", new ArrayType(DOUBLE), ImmutableList.of(NaN));
-        assertFunction("ARRAY_REMOVE(ARRAY [-1.23E0, sqrt(-1)], nan())", new ArrayType(DOUBLE), ImmutableList.of(-1.23, NaN));
-        assertFunction("ARRAY_REMOVE(ARRAY [-1.23E0, nan()], nan())", new ArrayType(DOUBLE), ImmutableList.of(-1.23, NaN));
+        assertFunction("ARRAY_REMOVE(ARRAY [-1.23E0, sqrt(-1)], nan())", new ArrayType(DOUBLE), ImmutableList.of(-1.23));
+        assertFunction("ARRAY_REMOVE(ARRAY [-1.23E0, nan()], nan())", new ArrayType(DOUBLE), ImmutableList.of(-1.23));
         assertFunction("ARRAY_REMOVE(ARRAY [-1.23E0, infinity()], -1.23E0)", new ArrayType(DOUBLE), ImmutableList.of(POSITIVE_INFINITY));
         assertFunction("ARRAY_REMOVE(ARRAY [infinity(), 3.14E0], infinity())", new ArrayType(DOUBLE), ImmutableList.of(3.14));
         assertFunction("ARRAY_REMOVE(ARRAY [-1.23E0, NULL, 3.14E0], 3.14E0)", new ArrayType(DOUBLE), asList(-1.23, null));
@@ -1592,6 +1609,19 @@ public class TestArrayOperators
     }
 
     @Test
+    public void testRemoveNulls()
+    {
+        assertFunction("REMOVE_NULLS(ARRAY ['foo', 'bar'])", new ArrayType(createVarcharType(3)), asList("foo", "bar"));
+        assertFunction("REMOVE_NULLS(ARRAY ['foo', NULL, 'bar'])", new ArrayType(createVarcharType(3)), asList("foo", "bar"));
+        assertFunction("REMOVE_NULLS(ARRAY [1, NULL, NULL, 3])", new ArrayType(INTEGER), asList(1, 3));
+        assertFunction("REMOVE_NULLS(ARRAY [ARRAY ['foo'], NULL, ARRAY['bar']])", new ArrayType(new ArrayType(createVarcharType(3))), asList(singletonList("foo"), singletonList("bar")));
+        assertFunction("REMOVE_NULLS(ARRAY [TRUE, FALSE, TRUE])", new ArrayType(BOOLEAN), asList(true, false, true));
+        assertFunction("REMOVE_NULLS(ARRAY [TRUE, FALSE, NULL])", new ArrayType(BOOLEAN), asList(true, false));
+        assertFunction("REMOVE_NULLS(ARRAY [ARRAY[NULL]])", new ArrayType(new ArrayType(UNKNOWN)), ImmutableList.of(singletonList(null)));
+        assertFunction("REMOVE_NULLS(ARRAY [ARRAY[NULL], NULL])", new ArrayType(new ArrayType(UNKNOWN)), ImmutableList.of(singletonList(null)));
+    }
+
+    @Test
     public void testRepeat()
     {
         // concrete values
@@ -1600,6 +1630,16 @@ public class TestArrayOperators
         assertFunction("REPEAT(true, 1)", new ArrayType(BOOLEAN), ImmutableList.of(true));
         assertFunction("REPEAT(0.5E0, 4)", new ArrayType(DOUBLE), ImmutableList.of(0.5, 0.5, 0.5, 0.5));
         assertFunction("REPEAT(array[1], 4)", new ArrayType(new ArrayType(INTEGER)), ImmutableList.of(ImmutableList.of(1), ImmutableList.of(1), ImmutableList.of(1), ImmutableList.of(1)));
+        assertFunction("repeat(cast(1 as integer), 10)", new ArrayType(INTEGER), nCopies(10, 1));
+        assertFunction("repeat(cast(1 as integer), 0)", new ArrayType(INTEGER), nCopies(0, 1));
+        assertFunction("repeat(cast(1 as bigint), 10)", new ArrayType(BIGINT), nCopies(10, (long) 1));
+        assertFunction("repeat(cast('ab' as varchar), 10)", new ArrayType(VARCHAR), nCopies(10, "ab"));
+        assertFunction("repeat(array[cast(2 as bigint)], 10)", new ArrayType(new ArrayType(BIGINT)), nCopies(10, ImmutableList.of((long) 2)));
+        assertFunction("repeat(array[cast(2 as bigint), 3], 10)", new ArrayType(new ArrayType(BIGINT)), nCopies(10, ImmutableList.of((long) 2, (long) 3)));
+        assertFunction("repeat(array[cast(2 as integer)], 10)", new ArrayType(new ArrayType(INTEGER)), nCopies(10, ImmutableList.of(2)));
+        assertFunction("repeat(map(array[cast(2 as integer)], array[cast('ab' as varchar)]), 10)", new ArrayType(createMapType(getFunctionAndTypeManager(), INTEGER, VARCHAR)), nCopies(10, ImmutableMap.of(2, "ab")));
+        assertFunction("REPEAT('loooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooongvarchar', 9999)", new ArrayType(createVarcharType(108)), nCopies(9999, "loooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooongvarchar"));
+        assertFunction("REPEAT(array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], 9999)", new ArrayType(new ArrayType(INTEGER)), nCopies(9999, ImmutableList.of(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)));
 
         // null values
         assertFunction("REPEAT(null, 4)", new ArrayType(UNKNOWN), asList(null, null, null, null));
@@ -1608,6 +1648,7 @@ public class TestArrayOperators
         assertFunction("REPEAT(cast(null as varchar), 4)", new ArrayType(VARCHAR), asList(null, null, null, null));
         assertFunction("REPEAT(cast(null as boolean), 4)", new ArrayType(BOOLEAN), asList(null, null, null, null));
         assertFunction("REPEAT(cast(null as array(boolean)), 4)", new ArrayType(new ArrayType(BOOLEAN)), asList(null, null, null, null));
+        assertFunction("repeat(cast(null as varchar), 10)", new ArrayType(VARCHAR), nCopies(10, null));
 
         // 0 counts
         assertFunction("REPEAT(cast(null as bigint), 0)", new ArrayType(BIGINT), ImmutableList.of());
@@ -1620,8 +1661,6 @@ public class TestArrayOperators
         // illegal inputs
         assertInvalidFunction("REPEAT(2, -1)", INVALID_FUNCTION_ARGUMENT);
         assertInvalidFunction("REPEAT(1, 1000000)", INVALID_FUNCTION_ARGUMENT);
-        assertInvalidFunction("REPEAT('loooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooongvarchar', 9999)", INVALID_FUNCTION_ARGUMENT);
-        assertInvalidFunction("REPEAT(array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], 9999)", INVALID_FUNCTION_ARGUMENT);
     }
 
     @Test
@@ -1953,17 +1992,6 @@ public class TestArrayOperators
         // test with ARRAY[ MAP( ARRAY[1], ARRAY[2] ) ]
         MapType mapType = mapType(INTEGER, INTEGER);
         assertArrayHashOperator("ARRAY[MAP(ARRAY[1], ARRAY[2])]", mapType, ImmutableList.of(mapBlockOf(INTEGER, INTEGER, ImmutableMap.of(1L, 2L))));
-    }
-
-    public void assertInvalidFunction(String projection, ErrorCode errorCode)
-    {
-        try {
-            assertFunction(projection, UNKNOWN, null);
-            fail("Expected error " + errorCode + " from " + projection);
-        }
-        catch (PrestoException e) {
-            assertEquals(e.getErrorCode(), errorCode);
-        }
     }
 
     private void assertArrayHashOperator(String inputArray, Type elementType, List<Object> elements)

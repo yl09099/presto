@@ -18,6 +18,7 @@ import com.facebook.airlift.http.client.testing.TestingHttpClient;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.execution.Location;
+import com.facebook.presto.execution.ScheduledSplit;
 import com.facebook.presto.execution.TaskId;
 import com.facebook.presto.execution.buffer.PagesSerdeFactory;
 import com.facebook.presto.execution.buffer.TestingPagesSerdeFactory;
@@ -54,6 +55,7 @@ import static com.facebook.presto.testing.TestingTaskContext.createTaskContext;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
@@ -63,9 +65,9 @@ public class TestExchangeOperator
     private static final List<Type> TYPES = ImmutableList.of(VARCHAR);
     private static final PagesSerdeFactory SERDE_FACTORY = new TestingPagesSerdeFactory();
 
-    private static final String TASK_1_ID = "task1.0.0.0";
-    private static final String TASK_2_ID = "task2.0.0.0";
-    private static final String TASK_3_ID = "task3.0.0.0";
+    private static final String TASK_1_ID = "task1.0.0.0.0";
+    private static final String TASK_2_ID = "task2.0.0.0.0";
+    private static final String TASK_3_ID = "task3.0.0.0.0";
 
     private final LoadingCache<String, TestingTaskBuffer> taskBuffers = CacheBuilder.newBuilder().build(CacheLoader.from(TestingTaskBuffer::new));
 
@@ -90,7 +92,6 @@ public class TestExchangeOperator
                 3,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
-                false,
                 0.2,
                 httpClient,
                 new TestingDriftClient<>(),
@@ -127,9 +128,9 @@ public class TestExchangeOperator
     {
         SourceOperator operator = createExchangeOperator();
 
-        operator.addSplit(newRemoteSplit(TASK_1_ID));
-        operator.addSplit(newRemoteSplit(TASK_2_ID));
-        operator.addSplit(newRemoteSplit(TASK_3_ID));
+        operator.addSplit(new ScheduledSplit(0, operator.getSourceId(), newRemoteSplit(TASK_1_ID)));
+        operator.addSplit(new ScheduledSplit(1, operator.getSourceId(), newRemoteSplit(TASK_2_ID)));
+        operator.addSplit(new ScheduledSplit(2, operator.getSourceId(), newRemoteSplit(TASK_3_ID)));
         operator.noMoreSplits();
 
         // add pages and close the buffers
@@ -155,9 +156,9 @@ public class TestExchangeOperator
     {
         SourceOperator operator = createExchangeOperator();
 
-        operator.addSplit(newRemoteSplit(TASK_1_ID));
-        operator.addSplit(newRemoteSplit(TASK_2_ID));
-        operator.addSplit(newRemoteSplit(TASK_3_ID));
+        operator.addSplit(new ScheduledSplit(0, operator.getSourceId(), newRemoteSplit(TASK_1_ID)));
+        operator.addSplit(new ScheduledSplit(1, operator.getSourceId(), newRemoteSplit(TASK_2_ID)));
+        operator.addSplit(new ScheduledSplit(2, operator.getSourceId(), newRemoteSplit(TASK_3_ID)));
         operator.noMoreSplits();
 
         // add pages and leave buffers open
@@ -169,9 +170,9 @@ public class TestExchangeOperator
         waitForPages(operator, 3);
 
         // verify state
-        assertEquals(operator.isFinished(), false);
-        assertEquals(operator.needsInput(), false);
-        assertEquals(operator.getOutput(), null);
+        assertFalse(operator.isFinished());
+        assertFalse(operator.needsInput());
+        assertNull(operator.getOutput());
 
         // add more pages and close the buffers
         taskBuffers.getUnchecked(TASK_1_ID).addPages(2, true);
@@ -192,7 +193,7 @@ public class TestExchangeOperator
         SourceOperator operator = createExchangeOperator();
 
         // add a buffer location containing one page and close the buffer
-        operator.addSplit(newRemoteSplit(TASK_1_ID));
+        operator.addSplit(new ScheduledSplit(0, operator.getSourceId(), newRemoteSplit(TASK_1_ID)));
         // add pages and leave buffers open
         taskBuffers.getUnchecked(TASK_1_ID).addPages(1, true);
 
@@ -200,12 +201,12 @@ public class TestExchangeOperator
         waitForPages(operator, 1);
 
         // verify state
-        assertEquals(operator.isFinished(), false);
-        assertEquals(operator.needsInput(), false);
-        assertEquals(operator.getOutput(), null);
+        assertFalse(operator.isFinished());
+        assertFalse(operator.needsInput());
+        assertNull(operator.getOutput());
 
         // add a buffer location
-        operator.addSplit(newRemoteSplit(TASK_2_ID));
+        operator.addSplit(new ScheduledSplit(1, operator.getSourceId(), newRemoteSplit(TASK_2_ID)));
         // set no more splits (buffer locations)
         operator.noMoreSplits();
         // add two pages and close the last buffer
@@ -224,9 +225,9 @@ public class TestExchangeOperator
     {
         SourceOperator operator = createExchangeOperator();
 
-        operator.addSplit(newRemoteSplit(TASK_1_ID));
-        operator.addSplit(newRemoteSplit(TASK_2_ID));
-        operator.addSplit(newRemoteSplit(TASK_3_ID));
+        operator.addSplit(new ScheduledSplit(0, operator.getSourceId(), newRemoteSplit(TASK_1_ID)));
+        operator.addSplit(new ScheduledSplit(1, operator.getSourceId(), newRemoteSplit(TASK_2_ID)));
+        operator.addSplit(new ScheduledSplit(2, operator.getSourceId(), newRemoteSplit(TASK_3_ID)));
         operator.noMoreSplits();
 
         // add pages and leave buffers open
@@ -238,9 +239,9 @@ public class TestExchangeOperator
         waitForPages(operator, 3);
 
         // verify state
-        assertEquals(operator.isFinished(), false);
-        assertEquals(operator.needsInput(), false);
-        assertEquals(operator.getOutput(), null);
+        assertFalse(operator.isFinished());
+        assertFalse(operator.needsInput());
+        assertNull(operator.getOutput());
 
         // finish without closing buffers
         operator.finish();

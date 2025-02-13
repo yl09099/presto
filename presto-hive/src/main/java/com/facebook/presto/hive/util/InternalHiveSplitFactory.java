@@ -14,32 +14,33 @@
 package com.facebook.presto.hive.util;
 
 import com.facebook.presto.common.predicate.Domain;
+import com.facebook.presto.hive.BlockLocation;
 import com.facebook.presto.hive.EncryptionInformation;
 import com.facebook.presto.hive.HiveFileInfo;
 import com.facebook.presto.hive.HiveSplitPartitionInfo;
 import com.facebook.presto.hive.InternalHiveSplit;
 import com.facebook.presto.hive.InternalHiveSplit.InternalHiveBlock;
-import com.facebook.presto.hive.S3SelectPushdown;
+import com.facebook.presto.hive.s3select.S3SelectPushdown;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
-import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.FileSplit;
 import org.apache.hadoop.mapred.InputFormat;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.net.URI;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
+import static com.facebook.presto.hive.BlockLocation.fromHiveBlockLocations;
+import static com.facebook.presto.hive.HiveColumnHandle.FILE_MODIFIED_TIME_COLUMN_INDEX;
+import static com.facebook.presto.hive.HiveColumnHandle.FILE_SIZE_COLUMN_INDEX;
+import static com.facebook.presto.hive.HiveColumnHandle.PATH_COLUMN_INDEX;
+import static com.facebook.presto.hive.HiveUtil.isSelectSplittable;
 import static com.facebook.presto.hive.HiveUtil.isSplittable;
 import static com.facebook.presto.hive.util.CustomSplitConversionUtils.extractCustomSplitInfo;
 import static com.facebook.presto.spi.schedule.NodeSelectionStrategy.HARD_AFFINITY;
@@ -52,7 +53,7 @@ public class InternalHiveSplitFactory
 {
     private final FileSystem fileSystem;
     private final InputFormat<?, ?> inputFormat;
-    private final Optional<Domain> pathDomain;
+    private final Map<Integer, Domain> infoColumnConstraints;
     private final NodeSelectionStrategy nodeSelectionStrategy;
     private final boolean s3SelectPushdownEnabled;
     private final HiveSplitPartitionInfo partitionInfo;
@@ -63,7 +64,7 @@ public class InternalHiveSplitFactory
     public InternalHiveSplitFactory(
             FileSystem fileSystem,
             InputFormat<?, ?> inputFormat,
-            Optional<Domain> pathDomain,
+            Map<Integer, Domain> infoColumnConstraints,
             NodeSelectionStrategy nodeSelectionStrategy,
             DataSize minimumTargetSplitSize,
             boolean s3SelectPushdownEnabled,
@@ -73,7 +74,7 @@ public class InternalHiveSplitFactory
     {
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.inputFormat = requireNonNull(inputFormat, "inputFormat is null");
-        this.pathDomain = requireNonNull(pathDomain, "pathDomain is null");
+        this.infoColumnConstraints = requireNonNull(infoColumnConstraints, "infoColumnConstraints is null");
         this.nodeSelectionStrategy = requireNonNull(nodeSelectionStrategy, "nodeSelectionStrategy is null");
         this.s3SelectPushdownEnabled = s3SelectPushdownEnabled;
         this.partitionInfo = partitionInfo;
@@ -83,33 +84,35 @@ public class InternalHiveSplitFactory
         checkArgument(minimumTargetSplitSizeInBytes > 0, "minimumTargetSplitSize must be > 0, found: %s", minimumTargetSplitSize);
     }
 
-    public Optional<InternalHiveSplit> createInternalHiveSplit(HiveFileInfo fileInfo, boolean splittable)
+    public Optional<InternalHiveSplit> createInternalHiveSplit(HiveFileInfo hiveFileInfo, boolean splittable)
     {
-        return createInternalHiveSplit(fileInfo, OptionalInt.empty(), OptionalInt.empty(), splittable);
+        return createInternalHiveSplit(hiveFileInfo, OptionalInt.empty(), OptionalInt.empty(), splittable);
     }
 
-    public Optional<InternalHiveSplit> createInternalHiveSplit(HiveFileInfo fileInfo, int readBucketNumber, int tableBucketNumber, boolean splittable)
+    public Optional<InternalHiveSplit> createInternalHiveSplit(HiveFileInfo hiveFileInfo, int readBucketNumber, int tableBucketNumber, boolean splittable)
     {
-        return createInternalHiveSplit(fileInfo, OptionalInt.of(readBucketNumber), OptionalInt.of(tableBucketNumber), splittable);
+        return createInternalHiveSplit(hiveFileInfo, OptionalInt.of(readBucketNumber), OptionalInt.of(tableBucketNumber), splittable);
     }
 
-    private Optional<InternalHiveSplit> createInternalHiveSplit(HiveFileInfo fileInfo, OptionalInt readBucketNumber, OptionalInt tableBucketNumber, boolean splittable)
+    private Optional<InternalHiveSplit> createInternalHiveSplit(HiveFileInfo hiveFileInfo, OptionalInt readBucketNumber, OptionalInt tableBucketNumber, boolean splittable)
     {
         splittable = splittable &&
-                fileInfo.getLength() > minimumTargetSplitSizeInBytes &&
-                isSplittable(inputFormat, fileSystem, fileInfo.getPath());
+                hiveFileInfo.getLength() > minimumTargetSplitSizeInBytes &&
+                (s3SelectPushdownEnabled ?
+                        isSelectSplittable(inputFormat, hiveFileInfo.getPath(), s3SelectPushdownEnabled) :
+                        isSplittable(inputFormat, fileSystem, hiveFileInfo.getPath()));
         return createInternalHiveSplit(
-                fileInfo.getPath(),
-                fileInfo.getBlockLocations(),
+                hiveFileInfo.getPath(),
+                hiveFileInfo.getBlockLocations().toArray(new BlockLocation[0]),
                 0,
-                fileInfo.getLength(),
-                fileInfo.getLength(),
-                fileInfo.getFileModifiedTime(),
+                hiveFileInfo.getLength(),
+                hiveFileInfo.getLength(),
+                hiveFileInfo.getFileModifiedTime(),
                 readBucketNumber,
                 tableBucketNumber,
                 splittable,
-                fileInfo.getExtraFileInfo(),
-                fileInfo.getCustomSplitInfo());
+                hiveFileInfo.getExtraFileInfo(),
+                hiveFileInfo.getCustomSplitInfo());
     }
 
     public Optional<InternalHiveSplit> createInternalHiveSplit(FileSplit split)
@@ -118,8 +121,8 @@ public class InternalHiveSplitFactory
         FileStatus file = fileSystem.getFileStatus(split.getPath());
         Map<String, String> customSplitInfo = extractCustomSplitInfo(split);
         return createInternalHiveSplit(
-                split.getPath(),
-                fileSystem.getFileBlockLocations(file, split.getStart(), split.getLength()),
+                split.getPath().toUri().toString(),
+                fromHiveBlockLocations(fileSystem.getFileBlockLocations(file, split.getStart(), split.getLength())).toArray(new BlockLocation[0]),
                 split.getStart(),
                 split.getLength(),
                 file.getLen(),
@@ -132,7 +135,7 @@ public class InternalHiveSplitFactory
     }
 
     private Optional<InternalHiveSplit> createInternalHiveSplit(
-            Path path,
+            String path,
             BlockLocation[] blockLocations,
             long start,
             long length,
@@ -144,8 +147,7 @@ public class InternalHiveSplitFactory
             Optional<byte[]> extraFileInfo,
             Map<String, String> customSplitInfo)
     {
-        String pathString = path.toString();
-        if (!pathMatchesPredicate(pathDomain, pathString)) {
+        if (!infoColumnsMatchPredicates(infoColumnConstraints, path, fileSize, fileModificationTime)) {
             return Optional.empty();
         }
 
@@ -154,7 +156,7 @@ public class InternalHiveSplitFactory
         // while others (e.g. hdfs.DistributedFileSystem) produces no block.
         // Synthesize an empty block if one does not already exist.
         if (fileSize == 0 && blockLocations.length == 0) {
-            blockLocations = new BlockLocation[] {new BlockLocation()};
+            blockLocations = new BlockLocation[] {new BlockLocation(ImmutableList.of(), 0, 0)};
             // Turn off force local scheduling because hosts list doesn't exist.
             forceLocalScheduling = false;
         }
@@ -191,9 +193,15 @@ public class InternalHiveSplitFactory
             blocks = ImmutableList.of(new InternalHiveBlock(start + length, addresses));
         }
 
-        URI relativePath = partitionInfo.getPath().relativize(path.toUri());
+        String relativePath = path;
+        boolean isRelative = false;
+        if (path.startsWith(partitionInfo.getPath())) {
+            relativePath = path.substring(partitionInfo.getPath().length());
+            isRelative = true;
+        }
         return Optional.of(new InternalHiveSplit(
-                relativePath.toString(),
+                relativePath,
+                isRelative,
                 start,
                 start + length,
                 fileSize,
@@ -237,24 +245,36 @@ public class InternalHiveSplitFactory
 
     private static List<HostAddress> getHostAddresses(BlockLocation blockLocation)
     {
-        String[] hosts;
-        try {
-            hosts = blockLocation.getHosts();
-        }
-        catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-        return Arrays.stream(hosts)
+        return blockLocation.getHosts().stream()
                 .map(HostAddress::fromString)
                 .collect(toImmutableList());
     }
 
-    private static boolean pathMatchesPredicate(Optional<Domain> pathDomain, String path)
+    private static boolean infoColumnsMatchPredicates(Map<Integer, Domain> constraints,
+            String path,
+            long fileSize,
+            long fileModificationTime)
     {
-        if (!pathDomain.isPresent()) {
+        if (constraints.isEmpty()) {
             return true;
         }
 
-        return pathDomain.get().includesNullableValue(utf8Slice(path));
+        boolean matches = true;
+
+        for (Map.Entry<Integer, Domain> constraint : constraints.entrySet()) {
+            switch (constraint.getKey()) {
+                case PATH_COLUMN_INDEX:
+                    matches &= constraint.getValue().includesNullableValue(utf8Slice(path));
+                    break;
+                case FILE_SIZE_COLUMN_INDEX:
+                    matches &= constraint.getValue().includesNullableValue(fileSize);
+                    break;
+                case FILE_MODIFIED_TIME_COLUMN_INDEX:
+                    matches &= constraint.getValue().includesNullableValue(fileModificationTime);
+                    break;
+            }
+        }
+
+        return matches;
     }
 }

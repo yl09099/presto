@@ -25,28 +25,26 @@ import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.SqlAggregationFunction;
 import com.facebook.presto.operator.aggregation.AccumulatorCompiler;
 import com.facebook.presto.operator.aggregation.BuiltInAggregationFunctionImplementation;
+import com.facebook.presto.operator.aggregation.MapAggregationFunction;
 import com.facebook.presto.operator.aggregation.SetOfValues;
 import com.facebook.presto.operator.aggregation.state.SetAggregationState;
 import com.facebook.presto.operator.aggregation.state.SetAggregationStateFactory;
-import com.facebook.presto.spi.function.AccumulatorState;
-import com.facebook.presto.spi.function.AccumulatorStateFactory;
-import com.facebook.presto.spi.function.AccumulatorStateSerializer;
 import com.facebook.presto.spi.function.aggregation.Accumulator;
 import com.facebook.presto.spi.function.aggregation.AggregationMetadata;
-import com.facebook.presto.spi.function.aggregation.AggregationMetadata.AccumulatorStateDescriptor;
-import com.facebook.presto.spi.function.aggregation.AggregationMetadata.ParameterMetadata;
 import com.facebook.presto.spi.function.aggregation.GroupedAccumulator;
 import com.google.common.collect.ImmutableList;
 
 import java.lang.invoke.MethodHandle;
 import java.util.List;
 
+import static com.facebook.presto.common.function.OperatorType.IS_DISTINCT_FROM;
 import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.operator.aggregation.AggregationUtils.generateAggregationName;
 import static com.facebook.presto.spi.function.Signature.typeVariable;
 import static com.facebook.presto.spi.function.aggregation.AggregationMetadata.ParameterMetadata.ParameterType.BLOCK_INDEX;
 import static com.facebook.presto.spi.function.aggregation.AggregationMetadata.ParameterMetadata.ParameterType.NULLABLE_BLOCK_INPUT_CHANNEL;
 import static com.facebook.presto.spi.function.aggregation.AggregationMetadata.ParameterMetadata.ParameterType.STATE;
+import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static com.facebook.presto.util.Reflection.methodHandle;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 
@@ -54,9 +52,8 @@ public class SetAggregationFunction
         extends SqlAggregationFunction
 {
     public static final SetAggregationFunction SET_AGG = new SetAggregationFunction();
-
-    private static final String NAME = "set_agg";
-    private static final MethodHandle INPUT_FUNCTION = methodHandle(SetAggregationFunction.class, "input", Type.class, SetAggregationState.class, Block.class, int.class);
+    public static final String NAME = "set_agg";
+    private static final MethodHandle INPUT_FUNCTION = methodHandle(SetAggregationFunction.class, "input", Type.class, MethodHandle.class, SetAggregationState.class, Block.class, int.class);
     private static final MethodHandle COMBINE_FUNCTION = methodHandle(SetAggregationFunction.class, "combine", SetAggregationState.class, SetAggregationState.class);
     private static final MethodHandle OUTPUT_FUNCTION = methodHandle(SetAggregationFunction.class, "output", SetAggregationState.class, BlockBuilder.class);
 
@@ -72,16 +69,7 @@ public class SetAggregationFunction
     @Override
     public String getDescription()
     {
-        return "return an array of values";
-    }
-
-    @Override
-    public BuiltInAggregationFunctionImplementation specialize(BoundVariables boundVariables, int arity, FunctionAndTypeManager functionAndTypeManager)
-    {
-        Type type = boundVariables.getTypeVariable("T");
-        ArrayType outputType = (ArrayType) functionAndTypeManager.getParameterizedType(StandardTypes.ARRAY, ImmutableList.of(
-                TypeSignatureParameter.of(type.getTypeSignature())));
-        return generateAggregation(type, outputType);
+        return "Aggregates distinct values into a single array";
     }
 
     @Override
@@ -90,27 +78,32 @@ public class SetAggregationFunction
         return true;
     }
 
-    private static BuiltInAggregationFunctionImplementation generateAggregation(Type type, ArrayType outputType)
+    @Override
+    public BuiltInAggregationFunctionImplementation specialize(BoundVariables boundVariables, int arity, FunctionAndTypeManager functionAndTypeManager)
     {
-        DynamicClassLoader classLoader = new DynamicClassLoader(SetAggregationFunction.class.getClassLoader());
+        Type inputType = boundVariables.getTypeVariable("T");
+        ArrayType outputType = (ArrayType) functionAndTypeManager.getParameterizedType(StandardTypes.ARRAY, ImmutableList.of(TypeSignatureParameter.of(inputType.getTypeSignature())));
+        MethodHandle distinctFromMethodHandle = functionAndTypeManager.getJavaScalarFunctionImplementation(functionAndTypeManager.resolveOperator(IS_DISTINCT_FROM, fromTypes(inputType, inputType))).getMethodHandle();
+        return generateAggregation(inputType, outputType, distinctFromMethodHandle);
+    }
 
-        List<Type> inputTypes = ImmutableList.of(type);
-        AccumulatorStateSerializer<?> stateSerializer = new SetAggregationStateSerializer(outputType);
-        AccumulatorStateFactory<?> stateFactory = new SetAggregationStateFactory(type);
-
+    private static BuiltInAggregationFunctionImplementation generateAggregation(Type inputType, ArrayType outputType, MethodHandle distinctFromMethodHandle)
+    {
+        DynamicClassLoader classLoader = new DynamicClassLoader(MapAggregationFunction.class.getClassLoader());
+        List<Type> inputTypes = ImmutableList.of(inputType);
+        SetAggregationStateSerializer stateSerializer = new SetAggregationStateSerializer(inputType, distinctFromMethodHandle);
         Type intermediateType = stateSerializer.getSerializedType();
-        List<ParameterMetadata> inputParameterMetadata = createInputParameterMetadata(type);
-        Class<? extends AccumulatorState> stateInterface = SetAggregationState.class;
+
         AggregationMetadata metadata = new AggregationMetadata(
                 generateAggregationName(NAME, outputType.getTypeSignature(), inputTypes.stream().map(Type::getTypeSignature).collect(toImmutableList())),
-                inputParameterMetadata,
-                INPUT_FUNCTION.bindTo(type),
+                createInputParameterMetadata(inputType),
+                INPUT_FUNCTION.bindTo(inputType).bindTo(distinctFromMethodHandle),
                 COMBINE_FUNCTION,
                 OUTPUT_FUNCTION,
-                ImmutableList.of(new AccumulatorStateDescriptor(
-                        stateInterface,
+                ImmutableList.of(new AggregationMetadata.AccumulatorStateDescriptor(
+                        SetAggregationState.class,
                         stateSerializer,
-                        stateFactory)),
+                        new SetAggregationStateFactory(inputType))),
                 outputType);
 
         Class<? extends Accumulator> accumulatorClass = AccumulatorCompiler.generateAccumulatorClass(
@@ -121,20 +114,29 @@ public class SetAggregationFunction
                 GroupedAccumulator.class,
                 metadata,
                 classLoader);
-        return new BuiltInAggregationFunctionImplementation(NAME, inputTypes, ImmutableList.of(intermediateType),
-                outputType, true, true, metadata, accumulatorClass, groupedAccumulatorClass);
+        return new
+
+                BuiltInAggregationFunctionImplementation(NAME, inputTypes, ImmutableList.of(intermediateType), outputType,
+                true, true, metadata, accumulatorClass, groupedAccumulatorClass);
     }
 
-    private static List<ParameterMetadata> createInputParameterMetadata(Type value)
+    private static List<AggregationMetadata.ParameterMetadata> createInputParameterMetadata(Type valueType)
     {
-        return ImmutableList.of(new ParameterMetadata(STATE), new ParameterMetadata(NULLABLE_BLOCK_INPUT_CHANNEL, value), new ParameterMetadata(BLOCK_INDEX));
+        return ImmutableList.of(new AggregationMetadata.ParameterMetadata(STATE),
+                new AggregationMetadata.ParameterMetadata(NULLABLE_BLOCK_INPUT_CHANNEL, valueType),
+                new AggregationMetadata.ParameterMetadata(BLOCK_INDEX));
     }
 
-    public static void input(Type type, SetAggregationState state, Block block, int position)
+    public static void input(
+            Type type,
+            MethodHandle distinctFromMethodHandle,
+            SetAggregationState state,
+            Block block,
+            int position)
     {
         SetOfValues set = state.get();
         if (set == null) {
-            set = new SetOfValues(type);
+            set = new SetOfValues(type, distinctFromMethodHandle);
             state.set(set);
         }
 
@@ -143,7 +145,9 @@ public class SetAggregationFunction
         state.addMemoryUsage(set.estimatedInMemorySize() - startSize);
     }
 
-    public static void combine(SetAggregationState state, SetAggregationState otherState)
+    public static void combine(
+            SetAggregationState state,
+            SetAggregationState otherState)
     {
         if (state.get() != null && otherState.get() != null) {
             SetOfValues otherSet = otherState.get();
@@ -161,7 +165,9 @@ public class SetAggregationFunction
         }
     }
 
-    public static void output(SetAggregationState state, BlockBuilder out)
+    public static void output(
+            SetAggregationState state,
+            BlockBuilder out)
     {
         SetOfValues set = state.get();
         if (set == null) {

@@ -28,6 +28,7 @@ import io.airlift.units.Duration;
 import java.io.PrintStream;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -42,6 +43,8 @@ import static com.facebook.presto.cli.KeyReader.readKey;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.airlift.units.Duration.nanosSince;
+import static io.airlift.units.Duration.succinctDuration;
+import static io.airlift.units.Duration.succinctNanos;
 import static java.lang.Character.toUpperCase;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
@@ -64,13 +67,15 @@ public class StatusPrinter
     private final ConsolePrinter console;
 
     private boolean debug;
+    private boolean runtime;
 
-    public StatusPrinter(StatementClient client, PrintStream out, boolean debug)
+    public StatusPrinter(StatementClient client, PrintStream out, boolean debug, boolean runtime)
     {
         this.client = client;
         this.out = out;
         this.console = new ConsolePrinter(out);
         this.debug = debug;
+        this.runtime = runtime;
     }
 
 /*
@@ -154,7 +159,7 @@ Spilled: 20GB
     private String autoFormatMetricValue(RuntimeUnit unit, long value)
     {
         if (unit == RuntimeUnit.NANO) {
-            return formatTime(Duration.succinctNanos(value));
+            return formatTime(succinctNanos(value));
         }
         if (unit == RuntimeUnit.BYTE) {
             return formatDataSize(bytes(value), true);
@@ -162,12 +167,16 @@ Spilled: 20GB
         return formatCount(value); // NONE
     }
 
-    public void printFinalInfo()
+    public void printFinalInfo(Optional<Long> clientStopTimestamp)
     {
-        Duration wallTime = nanosSince(start);
+        //We don't want to use nanosSince(start) for client side latency since that will include time the user spent
+        // viewing the results in the pager. Instead, we use the caller provided clientStopTimestamp (if present) for
+        // accurate client side latency
+        Duration clientSideWallTime = succinctNanos(clientStopTimestamp.orElse(System.nanoTime()) - start);
 
         QueryStatusInfo results = client.finalStatusInfo();
         StatementStats stats = results.getStats();
+        Duration serverSideWallTime = succinctDuration(stats.getElapsedTimeMillis(), MILLISECONDS);
 
         int nodes = stats.getNodes();
         if ((nodes == 0) || (stats.getTotalSplits() == 0)) {
@@ -197,58 +206,61 @@ Spilled: 20GB
         out.println(splitsSummary);
 
         if (debug) {
-            // CPU Time: 565.2s total,   26K rows/s, 3.85MB/s
-            Duration cpuTime = millis(stats.getCpuTimeMillis());
-            String cpuTimeSummary = format("CPU Time: %.1fs total, %5s rows/s, %8s, %d%% active",
-                    cpuTime.getValue(SECONDS),
-                    formatCountRate(stats.getProcessedRows(), cpuTime, false),
-                    formatDataRate(bytes(stats.getProcessedBytes()), cpuTime, true),
-                    (int) percentage(stats.getCpuTimeMillis(), stats.getWallTimeMillis()));
-            out.println(cpuTimeSummary);
+            if (runtime) {
+                // CPU Time: 565.2s total,   26K rows/s, 3.85MB/s
+                Duration cpuTime = millis(stats.getCpuTimeMillis());
+                String cpuTimeSummary = format("CPU Time: %.1fs total, %5s rows/s, %8s, %d%% active",
+                        cpuTime.getValue(SECONDS),
+                        formatCountRate(stats.getProcessedRows(), cpuTime, false),
+                        formatDataRate(bytes(stats.getProcessedBytes()), cpuTime, true),
+                        (int) percentage(stats.getCpuTimeMillis(), stats.getWallTimeMillis()));
+                out.println(cpuTimeSummary);
 
-            double parallelism = cpuTime.getValue(MILLISECONDS) / wallTime.getValue(MILLISECONDS);
+                double parallelism = cpuTime.getValue(MILLISECONDS) / serverSideWallTime.getValue(MILLISECONDS);
 
-            // Per Node: 3.5 parallelism, 83.3K rows/s, 0.7 MB/s
-            String perNodeSummary = format("Per Node: %.1f parallelism, %5s rows/s, %8s",
-                    parallelism / nodes,
-                    formatCountRate((double) stats.getProcessedRows() / nodes, wallTime, false),
-                    formatDataRate(bytes(stats.getProcessedBytes() / nodes), wallTime, true));
-            reprintLine(perNodeSummary);
+                // Per Node: 3.5 parallelism, 83.3K rows/s, 0.7 MB/s
+                String perNodeSummary = format("Per Node: %.1f parallelism, %5s rows/s, %8s",
+                        parallelism / nodes,
+                        formatCountRate((double) stats.getProcessedRows() / nodes, serverSideWallTime, false),
+                        formatDataRate(bytes(stats.getProcessedBytes() / nodes), serverSideWallTime, true));
+                reprintLine(perNodeSummary);
 
-            // Parallelism: 5.3
-            out.println(format("Parallelism: %.1f", parallelism));
+                // Parallelism: 5.3
+                out.println(format("Parallelism: %.1f", parallelism));
 
-            // Peak User Memory: 1.97GB
-            reprintLine("Peak User Memory: " + formatDataSize(bytes(stats.getPeakMemoryBytes()), true));
-            // Peak Total Memory: 1.98GB
-            reprintLine("Peak Total Memory: " + formatDataSize(bytes(stats.getPeakTotalMemoryBytes()), true));
-            // Peak Task Total Memory: 1.99GB
-            reprintLine("Peak Task Total Memory: " + formatDataSize(bytes(stats.getPeakTaskTotalMemoryBytes()), true));
+                // Peak User Memory: 1.97GB
+                reprintLine("Peak User Memory: " + formatDataSize(bytes(stats.getPeakMemoryBytes()), true));
+                // Peak Total Memory: 1.98GB
+                reprintLine("Peak Total Memory: " + formatDataSize(bytes(stats.getPeakTotalMemoryBytes()), true));
+                // Peak Task Total Memory: 1.99GB
+                reprintLine("Peak Task Total Memory: " + formatDataSize(bytes(stats.getPeakTaskTotalMemoryBytes()), true));
 
-            // Spilled Data: 20GB
-            if (stats.getSpilledBytes() > 0) {
-                reprintLine("Spilled: " + formatDataSize(bytes(stats.getSpilledBytes()), true));
-            }
+                // Spilled Data: 20GB
+                if (stats.getSpilledBytes() > 0) {
+                    reprintLine("Spilled: " + formatDataSize(bytes(stats.getSpilledBytes()), true));
+                }
 
-            // bytesFromCache: sum=2K count=2 min=1K max=1K
-            if (stats.getRuntimeStats() != null) {
-                stats.getRuntimeStats().getMetrics().values().stream().sorted(Comparator.comparing(RuntimeMetric::getName)).forEach(
-                        metric -> reprintLine(format("%s: sum=%s count=%s min=%s max=%s",
-                                metric.getName(),
-                                autoFormatMetricValue(metric.getUnit(), metric.getSum()),
-                                formatCount(metric.getCount()),
-                                autoFormatMetricValue(metric.getUnit(), metric.getMin()),
-                                autoFormatMetricValue(metric.getUnit(), metric.getMax()))));
+                // bytesFromCache: sum=2K count=2 min=1K max=1K
+                if (stats.getRuntimeStats() != null) {
+                    stats.getRuntimeStats().getMetrics().values().stream().sorted(Comparator.comparing(RuntimeMetric::getName)).forEach(
+                            metric -> reprintLine(format("%s: sum=%s count=%s min=%s max=%s",
+                                    metric.getName(),
+                                    autoFormatMetricValue(metric.getUnit(), metric.getSum()),
+                                    formatCount(metric.getCount()),
+                                    autoFormatMetricValue(metric.getUnit(), metric.getMin()),
+                                    autoFormatMetricValue(metric.getUnit(), metric.getMax()))));
+                }
             }
         }
 
-        // 0:32 [2.12GB, 15M rows] [67MB/s, 463K rows/s]
-        String statsLine = format("%s [%s rows, %s] [%s rows/s, %s]",
-                formatTime(wallTime),
+        // [Measured Latency: client-side: 0:33, server-side: 0:32] [2.12GB, 15M rows] [67MB/s, 463K rows/s]
+        String statsLine = format("[Latency: client-side: %s, server-side: %s] [%s rows, %s] [%s rows/s, %s]",
+                formatTime(clientSideWallTime),
+                formatTime(serverSideWallTime),
                 formatCount(stats.getProcessedRows()),
                 formatDataSize(bytes(stats.getProcessedBytes()), true),
-                formatCountRate(stats.getProcessedRows(), wallTime, false),
-                formatDataRate(bytes(stats.getProcessedBytes()), wallTime, true));
+                formatCountRate(stats.getProcessedRows(), serverSideWallTime, false),
+                formatDataRate(bytes(stats.getProcessedBytes()), serverSideWallTime, true));
 
         out.println(statsLine);
 

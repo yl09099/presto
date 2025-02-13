@@ -13,10 +13,27 @@
  */
 package com.facebook.presto.iceberg.hadoop;
 
+import com.facebook.presto.hive.gcs.HiveGcsConfig;
+import com.facebook.presto.hive.gcs.HiveGcsConfigurationInitializer;
+import com.facebook.presto.hive.s3.HiveS3Config;
+import com.facebook.presto.hive.s3.PrestoS3ConfigurationUpdater;
+import com.facebook.presto.iceberg.IcebergCatalogName;
+import com.facebook.presto.iceberg.IcebergConfig;
 import com.facebook.presto.iceberg.IcebergDistributedSmokeTestBase;
+import com.facebook.presto.iceberg.IcebergNativeCatalogFactory;
+import com.facebook.presto.iceberg.IcebergUtil;
+import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.SchemaTableName;
+import org.apache.iceberg.Table;
 import org.testng.annotations.Test;
 
+import java.io.File;
+import java.nio.file.Path;
+
 import static com.facebook.presto.iceberg.CatalogType.HADOOP;
+import static com.facebook.presto.iceberg.IcebergQueryRunner.ICEBERG_CATALOG;
+import static com.facebook.presto.iceberg.IcebergQueryRunner.getIcebergDataDirectoryPath;
+import static java.lang.String.format;
 
 @Test
 public class TestIcebergSmokeHadoop
@@ -25,5 +42,37 @@ public class TestIcebergSmokeHadoop
     public TestIcebergSmokeHadoop()
     {
         super(HADOOP);
+    }
+
+    @Override
+    protected String getLocation(String schema, String table)
+    {
+        File tempLocation = getCatalogDirectory().toFile();
+        return format("%s%s/%s", tempLocation.toURI(), schema, table);
+    }
+
+    @Override
+    protected Path getCatalogDirectory()
+    {
+        Path dataDirectory = getDistributedQueryRunner().getCoordinator().getDataDirectory();
+        Path catalogDirectory = getIcebergDataDirectoryPath(dataDirectory, HADOOP.name(), new IcebergConfig().getFileFormat(), false);
+        return catalogDirectory;
+    }
+
+    @Override
+    protected Table getIcebergTable(ConnectorSession session, String schema, String tableName)
+    {
+        IcebergConfig icebergConfig = new IcebergConfig();
+        icebergConfig.setCatalogType(HADOOP);
+        icebergConfig.setCatalogWarehouse(getCatalogDirectory().toFile().getPath());
+
+        IcebergNativeCatalogFactory catalogFactory = new IcebergNativeCatalogFactory(icebergConfig,
+                new IcebergCatalogName(ICEBERG_CATALOG),
+                new PrestoS3ConfigurationUpdater(new HiveS3Config()),
+                new HiveGcsConfigurationInitializer(new HiveGcsConfig()));
+
+        return IcebergUtil.getNativeIcebergTable(catalogFactory,
+                session,
+                SchemaTableName.valueOf(schema + "." + tableName));
     }
 }

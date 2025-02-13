@@ -155,7 +155,8 @@ abstract class AbstractOrcRecordReader<T extends StreamReader>
             StripeMetadataSource stripeMetadataSource,
             boolean cacheable,
             RuntimeStats runtimeStats,
-            Optional<OrcFileIntrospector> fileIntrospector)
+            Optional<OrcFileIntrospector> fileIntrospector,
+            long fileModificationTime)
     {
         requireNonNull(includedColumns, "includedColumns is null");
         requireNonNull(predicate, "predicate is null");
@@ -184,7 +185,7 @@ abstract class AbstractOrcRecordReader<T extends StreamReader>
         ImmutableSet.Builder<Integer> presentColumns = ImmutableSet.builder();
         OrcType root = types.get(0);
         for (int column : includedColumns.keySet()) {
-            // an old file can have less columns since columns can be added
+            // an old file can have fewer columns since columns can be added
             // after the file was written
             if (column >= 0 && column < root.getFieldCount()) {
                 presentColumns.add(column);
@@ -262,7 +263,8 @@ abstract class AbstractOrcRecordReader<T extends StreamReader>
                 cacheable,
                 this.dwrfEncryptionGroupMap,
                 runtimeStats,
-                fileIntrospector);
+                fileIntrospector,
+                fileModificationTime);
 
         this.streamReaders = requireNonNull(streamReaders, "streamReaders is null");
         for (int columnId = 0; columnId < root.getFieldCount(); columnId++) {
@@ -334,6 +336,9 @@ abstract class AbstractOrcRecordReader<T extends StreamReader>
         Map<String, List<Subfield>> fields = new HashMap<>();
         for (Subfield subfield : requiredSubfields) {
             List<Subfield.PathElement> path = subfield.getPath();
+            if (path.size() == 1 && path.get(0) instanceof Subfield.NoSubfield) {
+                continue;
+            }
             String name = ((Subfield.NestedField) path.get(0)).getName().toLowerCase(Locale.ENGLISH);
             fields.computeIfAbsent(name, k -> new ArrayList<>());
             if (path.size() > 1) {
@@ -764,30 +769,6 @@ abstract class AbstractOrcRecordReader<T extends StreamReader>
         return systemMemoryUsage.getBytes();
     }
 
-    protected static StreamDescriptor createStreamDescriptor(String parentStreamName, String fieldName, int typeId, List<OrcType> types, OrcDataSource dataSource)
-    {
-        OrcType type = types.get(typeId);
-
-        if (!fieldName.isEmpty()) {
-            parentStreamName += "." + fieldName;
-        }
-
-        ImmutableList.Builder<StreamDescriptor> nestedStreams = ImmutableList.builder();
-        if (type.getOrcTypeKind() == STRUCT) {
-            for (int i = 0; i < type.getFieldCount(); ++i) {
-                nestedStreams.add(createStreamDescriptor(parentStreamName, type.getFieldName(i), type.getFieldTypeIndex(i), types, dataSource));
-            }
-        }
-        else if (type.getOrcTypeKind() == OrcType.OrcTypeKind.LIST) {
-            nestedStreams.add(createStreamDescriptor(parentStreamName, "item", type.getFieldTypeIndex(0), types, dataSource));
-        }
-        else if (type.getOrcTypeKind() == OrcType.OrcTypeKind.MAP) {
-            nestedStreams.add(createStreamDescriptor(parentStreamName, "key", type.getFieldTypeIndex(0), types, dataSource));
-            nestedStreams.add(createStreamDescriptor(parentStreamName, "value", type.getFieldTypeIndex(1), types, dataSource));
-        }
-        return new StreamDescriptor(parentStreamName, typeId, fieldName, type, dataSource, nestedStreams.build());
-    }
-
     protected boolean shouldValidateWritePageChecksum()
     {
         return writeChecksumBuilder.isPresent();
@@ -801,6 +782,11 @@ abstract class AbstractOrcRecordReader<T extends StreamReader>
             stripeStatisticsValidation.get().addPage(page);
             fileStatisticsValidation.get().addPage(page);
         }
+    }
+
+    protected OrcDataSourceId getOrcDataSourceId()
+    {
+        return orcDataSource.getId();
     }
 
     private static class StripeInfo

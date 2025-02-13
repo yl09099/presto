@@ -15,7 +15,7 @@ package com.facebook.presto.sql.analyzer;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.common.QualifiedObjectName;
-import com.facebook.presto.spi.ConnectorMaterializedViewDefinition;
+import com.facebook.presto.spi.MaterializedViewDefinition;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.relational.RowExpressionDomainTranslator;
@@ -30,9 +30,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static com.facebook.presto.sql.ParsingUtil.createParsingOptions;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static com.facebook.presto.transaction.TransactionBuilder.transaction;
+import static com.facebook.presto.util.AnalyzerUtil.createParsingOptions;
 import static java.lang.String.format;
 import static org.testng.Assert.assertEquals;
 
@@ -337,10 +337,11 @@ public class TestMaterializedViewQueryOptimizer
         expectedRewrittenSql = format("SELECT SUM(a), SUM(bc), d, e FROM %s GROUP BY d, e", VIEW_1);
         assertOptimizedQuery(baseQuerySql, expectedRewrittenSql, originalViewSql, BASE_TABLE_1, VIEW_1);
 
-        baseQuerySql = format("SELECT d, e FROM %s", BASE_TABLE_1);
-        assertOptimizedQuery(baseQuerySql, baseQuerySql, originalViewSql, BASE_TABLE_1, VIEW_1);
-
         baseQuerySql = format("SELECT SUM(d) FROM %s GROUP BY e", BASE_TABLE_1);
+        expectedRewrittenSql = format("SELECT SUM(d) FROM %s GROUP BY e", VIEW_1);
+        assertOptimizedQuery(baseQuerySql, expectedRewrittenSql, originalViewSql, BASE_TABLE_1, VIEW_1);
+
+        baseQuerySql = format("SELECT d, e FROM %s", BASE_TABLE_1);
         assertOptimizedQuery(baseQuerySql, baseQuerySql, originalViewSql, BASE_TABLE_1, VIEW_1);
 
         baseQuerySql = format("SELECT SUM(a) FROM %s WHERE x > 10", BASE_TABLE_1);
@@ -388,13 +389,27 @@ public class TestMaterializedViewQueryOptimizer
     @Test
     public void testWithUnsupportedFunction()
     {
+        String originalViewSql = format("SELECT GEOMETRIC_MEAN(a) FROM %s", BASE_TABLE_1);
+        String baseQuerySql = format("SELECT GEOMETRIC_MEAN(a) FROM %s", BASE_TABLE_1);
+
+        assertOptimizedQuery(baseQuerySql, baseQuerySql, originalViewSql, BASE_TABLE_1, VIEW_1);
+
+        originalViewSql = format("SELECT a FROM %s", BASE_TABLE_1);
+        baseQuerySql = format("SELECT GEOMETRIC_MEAN(a) FROM %s", BASE_TABLE_1);
+
+        assertOptimizedQuery(baseQuerySql, baseQuerySql, originalViewSql, BASE_TABLE_1, VIEW_1);
+    }
+
+    @Test
+    public void testAssociativeRewriteOfNonAssociativeFunctions()
+    {
         String originalViewSql = format("SELECT AVG(a) FROM %s", BASE_TABLE_1);
         String baseQuerySql = format("SELECT AVG(a) FROM %s", BASE_TABLE_1);
 
         assertOptimizedQuery(baseQuerySql, baseQuerySql, originalViewSql, BASE_TABLE_1, VIEW_1);
 
-        originalViewSql = format("SELECT a FROM %s", BASE_TABLE_1);
-        baseQuerySql = format("SELECT AVG(a) FROM %s", BASE_TABLE_1);
+        originalViewSql = format("SELECT APPROX_DISTINCT(a) FROM %s", BASE_TABLE_1);
+        baseQuerySql = format("SELECT APPROX_DISTINCT(a) FROM %s", BASE_TABLE_1);
 
         assertOptimizedQuery(baseQuerySql, baseQuerySql, originalViewSql, BASE_TABLE_1, VIEW_1);
     }
@@ -1141,6 +1156,82 @@ public class TestMaterializedViewQueryOptimizer
     }
 
     @Test
+    public void testAvgRewriteWithSumAndCount()
+    {
+        String originalViewSql = format("SELECT SUM(a) AS mv_sum, COUNT(a) AS mv_count FROM %s", BASE_TABLE_1);
+        String baseQuerySql = format("SELECT AVG(a) AS base_avg FROM %s", BASE_TABLE_1);
+        String expectedRewrittenSql = format("SELECT (SUM(mv_sum) / SUM(mv_count)) AS base_avg FROM %s", VIEW_1);
+
+        assertOptimizedQuery(baseQuerySql, expectedRewrittenSql, originalViewSql, BASE_TABLE_1, VIEW_1);
+
+        originalViewSql = format("SELECT SUM(a, b) AS mv_sum, COUNT(a, b) AS mv_count FROM %s", BASE_TABLE_1);
+        baseQuerySql = format("SELECT AVG(a, b) AS base_avg FROM %s", BASE_TABLE_1);
+
+        assertOptimizedQuery(baseQuerySql, baseQuerySql, originalViewSql, BASE_TABLE_1, VIEW_1);
+
+        originalViewSql = format("SELECT SUM(a+b) AS mv_sum, COUNT(a+b) AS mv_count FROM %s", BASE_TABLE_1);
+        baseQuerySql = format("SELECT AVG(a+b) AS base_avg FROM %s", BASE_TABLE_1);
+
+        assertOptimizedQuery(baseQuerySql, baseQuerySql, originalViewSql, BASE_TABLE_1, VIEW_1);
+    }
+
+    @Test
+    public void testAvgRewriteWithSumAndCountC()
+    {
+        String originalViewSql = format("SELECT SUM(a) AS mv_sum, COUNT(a) AS mv_count FROM %s", BASE_TABLE_1);
+        String baseQuerySql = format("SELECT AVG(a) AS base_avg FROM %s", BASE_TABLE_1);
+        String expectedRewrittenSql = format("SELECT (SUM(mv_sum) / SUM(mv_count)) AS base_avg FROM %s", VIEW_1);
+
+        assertOptimizedQuery(baseQuerySql, expectedRewrittenSql, originalViewSql, BASE_TABLE_1, VIEW_1);
+    }
+
+    @Test
+    public void testAvgRewriteWithSumAndCountGroupByJoin()
+    {
+        String originalViewSql = format("SELECT SUM(a) AS mv_sum, COUNT(a) AS mv_count, b, c FROM %s GROUP BY b, c", BASE_TABLE_1);
+        String baseQuerySql = format("SELECT AVG(a), b FROM %s GROUP BY b", BASE_TABLE_1);
+        String expectedRewrittenSql = format("SELECT (SUM(mv_sum) / SUM(mv_count)), b FROM %s GROUP BY b", VIEW_1);
+
+        assertOptimizedQuery(baseQuerySql, expectedRewrittenSql, originalViewSql, BASE_TABLE_1, VIEW_1);
+
+        originalViewSql = format("SELECT SUM(a) AS mv_sum, COUNT(a) AS mv_count, b FROM %s GROUP BY b", BASE_TABLE_1);
+
+        baseQuerySql = format("SELECT filtered_avg, b, a_count FROM " +
+                "(SELECT base_avg as filtered_avg, b FROM (SELECT AVG(a) AS base_avg, b FROM %s GROUP BY b ORDER BY b) WHERE base_avg < 5.25) s1 " +
+                "INNER JOIN " +
+                "(SELECT COUNT(a) AS a_count, b FROM %s GROUP BY b) s2 " +
+                "ON s1.b = s2.b", BASE_TABLE_1, BASE_TABLE_1);
+
+        expectedRewrittenSql = format("SELECT filtered_avg, b, a_count FROM " +
+                "(SELECT base_avg as filtered_avg, b FROM (SELECT (SUM(mv_sum) / SUM(mv_count)) AS base_avg, b FROM %s GROUP BY b ORDER BY b) WHERE base_avg < 5.25) s1 " +
+                "INNER JOIN " +
+                "(SELECT SUM(mv_count) AS a_count, b FROM %s GROUP BY b) s2 " +
+                "ON s1.b = s2.b", VIEW_1, VIEW_1);
+
+        assertOptimizedQuery(baseQuerySql, expectedRewrittenSql, originalViewSql, BASE_TABLE_1, VIEW_1);
+    }
+
+    @Test
+    public void testApproxDistinctRewrite()
+    {
+        String originalViewSql = format("SELECT cast(APPROX_SET(a) as varbinary) AS mv_approx_set FROM %s", BASE_TABLE_1);
+        String baseQuerySql = format("SELECT APPROX_DISTINCT(a) AS base_approx_distinct FROM %s", BASE_TABLE_1);
+        String expectedRewrittenSql = format("SELECT (CARDINALITY(MERGE(CAST(mv_approx_set AS hyperloglog)))) AS base_approx_distinct FROM %s", VIEW_1);
+
+        assertOptimizedQuery(baseQuerySql, expectedRewrittenSql, originalViewSql, BASE_TABLE_1, VIEW_1);
+    }
+
+    @Test
+    public void testApproxDistinctRewriteGroupBy()
+    {
+        String originalViewSql = format("SELECT cast(APPROX_SET(a) as varbinary) AS mv_approx_set, b, c FROM %s GROUP BY b, c", BASE_TABLE_1);
+        String baseQuerySql = format("SELECT APPROX_DISTINCT(a) AS base_approx_distinct, b FROM %s GROUP BY b", BASE_TABLE_1);
+        String expectedRewrittenSql = format("SELECT (CARDINALITY(MERGE(CAST(mv_approx_set AS hyperloglog)))) AS base_approx_distinct, b FROM %s GROUP BY b", VIEW_1);
+
+        assertOptimizedQuery(baseQuerySql, expectedRewrittenSql, originalViewSql, BASE_TABLE_1, VIEW_1);
+    }
+
+    @Test
     public void subqueryAggregationUnsupportedFunction()
     {
         String subquery1 = format("SELECT GEOMETRIC_MEAN(b) AS mean_b FROM %s", BASE_TABLE_1);
@@ -1482,9 +1573,9 @@ public class TestMaterializedViewQueryOptimizer
                 });
     }
 
-    private ConnectorMaterializedViewDefinition createStubConnectorMaterializedViewDefinition(String viewName, String viewSql, String schema, List<SchemaTableName> baseTables)
+    private MaterializedViewDefinition createStubConnectorMaterializedViewDefinition(String viewName, String viewSql, String schema, List<SchemaTableName> baseTables)
     {
-        return new ConnectorMaterializedViewDefinition(
+        return new MaterializedViewDefinition(
                 viewSql,
                 schema,
                 viewName,

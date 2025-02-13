@@ -15,10 +15,13 @@ package com.facebook.presto.server;
 
 import com.facebook.airlift.concurrent.BoundedExecutor;
 import com.facebook.airlift.log.Logger;
+import com.facebook.airlift.stats.TimeStat;
 import com.facebook.presto.execution.TaskId;
 import com.facebook.presto.execution.TaskManager;
+import com.facebook.presto.execution.buffer.BufferInfo;
 import com.facebook.presto.execution.buffer.BufferResult;
 import com.facebook.presto.execution.buffer.OutputBuffers.OutputBufferId;
+import com.facebook.presto.execution.buffer.PageBufferInfo;
 import com.facebook.presto.operator.ExchangeClientConfig;
 import com.facebook.presto.spi.page.SerializedPage;
 import com.google.common.annotations.VisibleForTesting;
@@ -26,6 +29,8 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import org.weakref.jmx.Managed;
+import org.weakref.jmx.Nested;
 
 import javax.annotation.security.RolesAllowed;
 import javax.inject.Inject;
@@ -38,6 +43,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import java.io.IOException;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -45,6 +51,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import static com.facebook.airlift.concurrent.MoreFutures.addTimeout;
 import static com.facebook.presto.PrestoMediaTypes.PRESTO_PAGES;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_BUFFER_COMPLETE;
+import static com.facebook.presto.client.PrestoHeaders.PRESTO_BUFFER_REMAINING_BYTES;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_MAX_SIZE;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_PAGE_NEXT_TOKEN;
 import static com.facebook.presto.client.PrestoHeaders.PRESTO_PAGE_TOKEN;
@@ -56,6 +63,7 @@ import static com.facebook.presto.util.TaskUtils.randomizeWaitTime;
 import static com.google.common.net.HttpHeaders.CONTENT_LENGTH;
 import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
 import static com.google.common.util.concurrent.Futures.addCallback;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static java.lang.Long.parseLong;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -73,6 +81,9 @@ public class AsyncPageTransportServlet
     private final TaskManager taskManager;
     private final Executor responseExecutor;
     private final ScheduledExecutorService timeoutExecutor;
+
+    private final TimeStat readFromOutputBufferTime = new TimeStat();
+    private final TimeStat resultsRequestTime = new TimeStat();
 
     @Inject
     public AsyncPageTransportServlet(
@@ -118,6 +129,20 @@ public class AsyncPageTransportServlet
         OutputBufferId bufferId = null;
         long token = 0;
 
+        if (request != null) {
+            Enumeration<String> headerNames = request.getHeaderNames();
+            while (headerNames.hasMoreElements()) {
+                String headerName = headerNames.nextElement();
+                String headerValue = request.getHeader(headerName);
+                if (headerName.contains("\r") || headerName.contains("\n")) {
+                    throw new IllegalArgumentException(format("Invalid header name: %s", headerName));
+                }
+                if (headerValue.contains("\r") || headerValue.contains("\n")) {
+                    throw new IllegalArgumentException(format("Invalid header value: %s", headerValue));
+                }
+            }
+        }
+
         int previousIndex = -1;
         for (int part = 0; part < 8; part++) {
             int nextIndex = requestURI.indexOf('/', previousIndex + 1);
@@ -150,6 +175,7 @@ public class AsyncPageTransportServlet
             HttpServletRequest request, HttpServletResponse response)
             throws IOException
     {
+        long start = System.nanoTime();
         DataSize maxSize = DataSize.valueOf(request.getHeader(PRESTO_MAX_SIZE));
 
         AsyncContext asyncContext = request.startAsync(request, response);
@@ -162,6 +188,7 @@ public class AsyncPageTransportServlet
         {
             public void onComplete(AsyncEvent event)
             {
+                resultsRequestTime.add(Duration.nanosSince(start));
             }
 
             public void onError(AsyncEvent event)
@@ -188,9 +215,20 @@ public class AsyncPageTransportServlet
         ListenableFuture<BufferResult> bufferResultFuture = taskManager.getTaskResults(taskId, bufferId, token, maxSize);
         bufferResultFuture = addTimeout(
                 bufferResultFuture,
-                () -> BufferResult.emptyResults(taskManager.getTaskInstanceId(taskId), token, false),
+                () -> BufferResult.emptyResults(
+                        taskManager.getTaskInstanceId(taskId),
+                        token,
+                        taskManager.getOutputBufferInfo(taskId).getBuffers().stream()
+                                .filter(bufferInfo -> bufferInfo.getBufferId().equals(bufferId))
+                                .map(BufferInfo::getPageBufferInfo)
+                                .map(PageBufferInfo::getBufferedBytes)
+                                .findFirst()
+                                .orElse(0L),
+                        false),
                 waitTime,
                 timeoutExecutor);
+
+        bufferResultFuture.addListener(() -> readFromOutputBufferTime.add(Duration.nanosSince(start)), directExecutor());
 
         ServletOutputStream out = response.getOutputStream();
         addCallback(bufferResultFuture, new FutureCallback<BufferResult>()
@@ -203,6 +241,7 @@ public class AsyncPageTransportServlet
                         response.setHeader(PRESTO_PAGE_TOKEN, String.valueOf(bufferResult.getToken()));
                         response.setHeader(PRESTO_PAGE_NEXT_TOKEN, String.valueOf(bufferResult.getNextToken()));
                         response.setHeader(PRESTO_BUFFER_COMPLETE, String.valueOf(bufferResult.isBufferComplete()));
+                        response.setHeader(PRESTO_BUFFER_REMAINING_BYTES, String.valueOf(bufferResult.getBufferedBytes()));
 
                         List<SerializedPage> serializedPages = bufferResult.getSerializedPages();
                         if (serializedPages.isEmpty()) {
@@ -235,8 +274,17 @@ public class AsyncPageTransportServlet
                 responseExecutor);
     }
 
-    @Override
-    public void destroy()
+    @Managed
+    @Nested
+    public TimeStat getReadFromOutputBufferTime()
     {
+        return readFromOutputBufferTime;
+    }
+
+    @Managed
+    @Nested
+    public TimeStat getResultsRequestTime()
+    {
+        return resultsRequestTime;
     }
 }

@@ -34,6 +34,8 @@ public class PruneAggregationSourceColumns
 {
     private static final Pattern<AggregationNode> PATTERN = aggregation();
 
+    public PruneAggregationSourceColumns() {}
+
     @Override
     public Pattern<AggregationNode> getPattern()
     {
@@ -45,20 +47,20 @@ public class PruneAggregationSourceColumns
     {
         Set<VariableReferenceExpression> requiredInputs = Streams.concat(
                 aggregationNode.getGroupingKeys().stream(),
-                aggregationNode.getHashVariable().map(Stream::of).orElse(Stream.empty()),
+                aggregationNode.getHashVariable().map(Stream::of).orElseGet(Stream::empty),
                 aggregationNode.getAggregations().values().stream()
-                        .flatMap(aggregation -> getAggregationInputs(aggregation, context.getVariableAllocator().getTypes())))
+                        .flatMap(aggregation -> getAggregationInputs(aggregation, TypeProvider.viewOf(context.getVariableAllocator().getVariables()))))
                 .collect(toImmutableSet());
 
         return restrictChildOutputs(context.getIdAllocator(), aggregationNode, requiredInputs)
                 .map(Result::ofPlanNode)
-                .orElse(Result.empty());
+                .orElseGet(Result::empty);
     }
 
     private static Stream<VariableReferenceExpression> getAggregationInputs(AggregationNode.Aggregation aggregation, TypeProvider types)
     {
         return Streams.concat(
-                AggregationNodeUtils.extractAggregationUniqueVariables(aggregation, types).stream(),
-                aggregation.getMask().map(Stream::of).orElse(Stream.empty()));
+                AggregationNodeUtils.extractAggregationUniqueVariables(aggregation).stream(),
+                aggregation.getMask().map(Stream::of).orElseGet(Stream::empty));
     }
 }

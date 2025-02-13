@@ -66,10 +66,10 @@ public class TestDistributedResourceGroupInfoResource
         this.resourceManager = resourceManager.get();
         coordinator1.getResourceGroupManager().get().addConfigurationManagerFactory(new FileResourceGroupConfigurationManagerFactory());
         coordinator1.getResourceGroupManager().get()
-                .setConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath("resource_groups_config_simple.json")));
+                .forceSetConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath("resource_groups_config_simple.json")));
         coordinator2.getResourceGroupManager().get().addConfigurationManagerFactory(new FileResourceGroupConfigurationManagerFactory());
         coordinator2.getResourceGroupManager().get()
-                .setConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath("resource_groups_config_simple.json")));
+                .forceSetConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath("resource_groups_config_simple.json")));
     }
 
     @AfterClass(alwaysRun = true)
@@ -102,7 +102,7 @@ public class TestDistributedResourceGroupInfoResource
         assertTrue(subGroupResourceIdSet.contains(new ResourceGroupId(resourceGroupInfo.getId(), "user-user2")));
     }
 
-    @Test(expectedExceptions = UnexpectedResponseException.class, expectedExceptionsMessageRegExp = ".*404: Not Found")
+    @Test(expectedExceptions = UnexpectedResponseException.class, expectedExceptionsMessageRegExp = ".*404")
     public void testResourceGroup404()
     {
         getResponseEntity(client, coordinator1, "/v1/resourceGroupState/global1", JsonCodec.jsonCodec(ResourceGroupInfo.class));

@@ -13,12 +13,12 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.facebook.presto.sql.planner.optimizations.WindowNodeUtil;
-import com.facebook.presto.sql.planner.plan.WindowNode;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 
@@ -38,7 +38,7 @@ public class PruneWindowColumns
     }
 
     @Override
-    protected Optional<PlanNode> pushDownProjectOff(PlanNodeIdAllocator idAllocator, PlanVariableAllocator variableAllocator, WindowNode windowNode, Set<VariableReferenceExpression> referencedOutputs)
+    protected Optional<PlanNode> pushDownProjectOff(PlanNodeIdAllocator idAllocator, VariableAllocator variableAllocator, WindowNode windowNode, Set<VariableReferenceExpression> referencedOutputs)
     {
         Map<VariableReferenceExpression, WindowNode.Function> referencedFunctions = Maps.filterKeys(windowNode.getWindowFunctions(), referencedOutputs::contains);
 
@@ -59,15 +59,17 @@ public class PruneWindowColumns
         windowNode.getHashVariable().ifPresent(referencedInputs::add);
 
         for (WindowNode.Function windowFunction : referencedFunctions.values()) {
-            referencedInputs.addAll(WindowNodeUtil.extractWindowFunctionUniqueVariables(windowFunction, variableAllocator.getTypes()));
+            referencedInputs.addAll(WindowNodeUtil.extractWindowFunctionUniqueVariables(windowFunction));
             windowFunction.getFrame().getStartValue().ifPresent(referencedInputs::add);
             windowFunction.getFrame().getEndValue().ifPresent(referencedInputs::add);
+            windowFunction.getFrame().getSortKeyCoercedForFrameStartComparison().ifPresent(referencedInputs::add);
+            windowFunction.getFrame().getSortKeyCoercedForFrameEndComparison().ifPresent(referencedInputs::add);
         }
 
         PlanNode prunedWindowNode = new WindowNode(
                 windowNode.getSourceLocation(),
                 windowNode.getId(),
-                restrictOutputs(idAllocator, windowNode.getSource(), referencedInputs.build(), false)
+                restrictOutputs(idAllocator, windowNode.getSource(), referencedInputs.build())
                         .orElse(windowNode.getSource()),
                 windowNode.getSpecification(),
                 referencedFunctions,

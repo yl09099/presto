@@ -22,6 +22,8 @@ import com.google.inject.Scopes;
 
 import javax.inject.Singleton;
 
+import static com.facebook.airlift.configuration.ConfigBinder.configBinder;
+
 public class StatsCalculatorModule
         implements Module
 {
@@ -31,7 +33,9 @@ public class StatsCalculatorModule
         binder.bind(ScalarStatsCalculator.class).in(Scopes.SINGLETON);
         binder.bind(StatsNormalizer.class).in(Scopes.SINGLETON);
         binder.bind(FilterStatsCalculator.class).in(Scopes.SINGLETON);
+        configBinder(binder).bindConfig(HistoryBasedOptimizationConfig.class);
         binder.bind(HistoryBasedPlanStatisticsManager.class).in(Scopes.SINGLETON);
+        binder.bind(FragmentStatsProvider.class).in(Scopes.SINGLETON);
     }
 
     @Provides
@@ -41,17 +45,19 @@ public class StatsCalculatorModule
             ScalarStatsCalculator scalarStatsCalculator,
             StatsNormalizer normalizer,
             FilterStatsCalculator filterStatsCalculator,
-            HistoryBasedPlanStatisticsManager historyBasedPlanStatisticsManager)
+            HistoryBasedPlanStatisticsManager historyBasedPlanStatisticsManager,
+            FragmentStatsProvider fragmentStatsProvider)
     {
-        StatsCalculator delegate = createComposableStatsCalculator(metadata, scalarStatsCalculator, normalizer, filterStatsCalculator);
+        StatsCalculator delegate = createComposableStatsCalculator(metadata, scalarStatsCalculator, normalizer, filterStatsCalculator, fragmentStatsProvider);
         return historyBasedPlanStatisticsManager.getHistoryBasedPlanStatisticsCalculator(delegate);
     }
 
-    private static ComposableStatsCalculator createComposableStatsCalculator(
+    public static ComposableStatsCalculator createComposableStatsCalculator(
             Metadata metadata,
             ScalarStatsCalculator scalarStatsCalculator,
             StatsNormalizer normalizer,
-            FilterStatsCalculator filterStatsCalculator)
+            FilterStatsCalculator filterStatsCalculator,
+            FragmentStatsProvider fragmentStatsProvider)
     {
         ImmutableList.Builder<ComposableStatsCalculator.Rule<?>> rules = ImmutableList.builder();
         rules.add(new OutputStatsRule());
@@ -74,6 +80,11 @@ public class StatsCalculatorModule
         rules.add(new SortStatsRule());
         rules.add(new SampleStatsRule(normalizer));
         rules.add(new IntersectStatsRule(normalizer));
+        rules.add(new RemoteSourceStatsRule(fragmentStatsProvider, normalizer));
+        rules.add(new SequenceStatsRule());
+        rules.add(new CteProducerStatsRule());
+        rules.add(new CteConsumerStatsRule());
+        rules.add(new CteReferenceStatsRule());
 
         return new ComposableStatsCalculator(rules.build());
     }

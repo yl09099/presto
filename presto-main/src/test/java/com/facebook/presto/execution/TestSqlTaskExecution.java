@@ -36,7 +36,6 @@ import com.facebook.presto.operator.OperatorFactory;
 import com.facebook.presto.operator.PipelineExecutionStrategy;
 import com.facebook.presto.operator.SourceOperator;
 import com.facebook.presto.operator.SourceOperatorFactory;
-import com.facebook.presto.operator.StageExecutionDescriptor;
 import com.facebook.presto.operator.TaskContext;
 import com.facebook.presto.operator.TaskMemoryReservationSummary;
 import com.facebook.presto.operator.TaskOutputOperator.TaskOutputOperatorFactory;
@@ -51,6 +50,7 @@ import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.facebook.presto.spi.memory.MemoryPoolId;
 import com.facebook.presto.spi.page.SerializedPage;
 import com.facebook.presto.spi.plan.PlanNodeId;
+import com.facebook.presto.spi.plan.StageExecutionDescriptor;
 import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
 import com.facebook.presto.spiller.SpillSpaceTracker;
 import com.facebook.presto.sql.planner.LocalExecutionPlanner.LocalExecutionPlan;
@@ -124,7 +124,7 @@ public class TestSqlTaskExecution
     private static final ConnectorId CONNECTOR_ID = new ConnectorId("test");
     private static final ConnectorTransactionHandle TRANSACTION_HANDLE = TestingTransactionHandle.create();
     private static final Duration ASSERT_WAIT_TIMEOUT = new Duration(1, HOURS);
-    private static final TaskId TASK_ID = TaskId.valueOf("queryid.0.0.0");
+    private static final TaskId TASK_ID = TaskId.valueOf("queryid.0.0.0.0");
 
     @DataProvider
     public static Object[][] executionStrategies()
@@ -864,8 +864,9 @@ public class TestSqlTaskExecution
             }
 
             @Override
-            public Supplier<Optional<UpdatablePageSource>> addSplit(Split split)
+            public Supplier<Optional<UpdatablePageSource>> addSplit(ScheduledSplit scheduledSplit)
             {
+                Split split = requireNonNull(scheduledSplit, "scheduledSplit is null").getSplit();
                 requireNonNull(split, "split is null");
                 checkState(this.split == null, "Table scan split already set");
 

@@ -17,10 +17,10 @@ import com.facebook.presto.Session;
 import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.memory.VersionedMemoryPoolId;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.server.BasicQueryInfo;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupQueryLimits;
+import com.facebook.presto.spi.security.AccessControl;
 import com.facebook.presto.sql.planner.Plan;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.Statement;
@@ -158,6 +158,12 @@ public abstract class DataDefinitionExecution<T extends Statement>
     }
 
     @Override
+    public DataSize getWrittenIntermediateDataSize()
+    {
+        return DataSize.succinctBytes(0);
+    }
+
+    @Override
     public long getOutputPositions()
     {
         return 0;
@@ -285,7 +291,13 @@ public abstract class DataDefinitionExecution<T extends Statement>
     }
 
     @Override
-    public void pruneInfo()
+    public void pruneExpiredQueryInfo()
+    {
+        // no-op
+    }
+
+    @Override
+    public void pruneFinishedQueryInfo()
     {
         // no-op
     }

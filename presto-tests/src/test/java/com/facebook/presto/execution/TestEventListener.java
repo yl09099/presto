@@ -19,6 +19,7 @@ import com.facebook.presto.resourceGroups.ResourceGroupManagerPlugin;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.eventlistener.QueryCompletedEvent;
 import com.facebook.presto.spi.eventlistener.QueryCreatedEvent;
+import com.facebook.presto.spi.eventlistener.QueryProgressEvent;
 import com.facebook.presto.spi.eventlistener.SplitCompletedEvent;
 import com.facebook.presto.testing.MaterializedResult;
 import com.facebook.presto.tests.DistributedQueryRunner;
@@ -32,6 +33,7 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -39,10 +41,12 @@ import java.util.concurrent.TimeUnit;
 
 import static com.facebook.presto.execution.TestQueues.createResourceGroupId;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
+import static com.facebook.presto.utils.ResourceUtils.getResourceFilePath;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static java.util.stream.Collectors.toSet;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
 @Test(singleThreaded = true)
@@ -53,6 +57,7 @@ public class TestEventListener
 
     private DistributedQueryRunner queryRunner;
     private Session session;
+    private long lastSeenQueryProgressEventId;
 
     @BeforeClass
     private void setUp()
@@ -64,18 +69,18 @@ public class TestEventListener
                 .setSchema("tiny")
                 .setClientInfo("{\"clientVersion\":\"testVersion\"}")
                 .build();
-        queryRunner = new DistributedQueryRunner(session, 1);
+
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
+                .put("event.query-progress-publish-interval", "1ms")
+                .build();
+
+        queryRunner = new DistributedQueryRunner(session, 1, properties);
         queryRunner.installPlugin(new TpchPlugin());
         queryRunner.installPlugin(new TestingEventListenerPlugin(generatedEvents));
         queryRunner.installPlugin(new ResourceGroupManagerPlugin());
         queryRunner.createCatalog("tpch", "tpch", ImmutableMap.of("tpch.splits-per-node", Integer.toString(SPLITS_PER_NODE)));
         queryRunner.getCoordinator().getResourceGroupManager().get()
-                .setConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath("resource_groups_config_simple.json")));
-    }
-
-    private String getResourceFilePath(String fileName)
-    {
-        return this.getClass().getClassLoader().getResource(fileName).getPath();
+                .forceSetConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath("resource_groups_config_simple.json")));
     }
 
     @AfterClass(alwaysRun = true)
@@ -105,8 +110,8 @@ public class TestEventListener
     public void testConstantQuery()
             throws Exception
     {
-        // QueryCreated: 1, QueryCompleted: 1, Splits: 1
-        runQueryAndWaitForEvents("SELECT 1", 3);
+        // QueryCreated: 1, QueryProgressEvent:1, QueryCompleted: 1, Splits: 1
+        runQueryAndWaitForEvents("SELECT 1", 4);
 
         QueryCreatedEvent queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
         assertEquals(queryCreatedEvent.getContext().getServerVersion(), "testversion");
@@ -115,6 +120,16 @@ public class TestEventListener
         assertEquals(queryCreatedEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
         assertEquals(queryCreatedEvent.getMetadata().getQuery(), "SELECT 1");
         assertFalse(queryCreatedEvent.getMetadata().getPreparedQuery().isPresent());
+
+        QueryProgressEvent queryProgressEvent = generatedEvents.getQueryProgressEvent();
+        assertNotNull(queryProgressEvent);
+        assertTrue(queryProgressEvent.getMonotonicallyIncreasingEventId() > lastSeenQueryProgressEventId);
+        lastSeenQueryProgressEventId = queryProgressEvent.getMonotonicallyIncreasingEventId();
+        assertTrue(queryProgressEvent.getContext().getResourceGroupId().isPresent());
+        assertEquals(queryProgressEvent.getContext().getResourceGroupId().get(), createResourceGroupId("global", "user-user"));
+        assertEquals(queryProgressEvent.getStatistics().getTotalRows(), 0L);
+        assertEquals(queryProgressEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
+        assertEquals(queryCreatedEvent.getMetadata().getQueryId(), queryProgressEvent.getMetadata().getQueryId());
 
         QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
         assertTrue(queryCompletedEvent.getContext().getResourceGroupId().isPresent());
@@ -126,7 +141,8 @@ public class TestEventListener
 
         List<SplitCompletedEvent> splitCompletedEvents = generatedEvents.getSplitCompletedEvents();
         assertEquals(splitCompletedEvents.get(0).getQueryId(), queryCompletedEvent.getMetadata().getQueryId());
-        assertEquals(splitCompletedEvents.get(0).getStatistics().getCompletedPositions(), 1);
+        // No input scanned for a constant query
+        assertEquals(splitCompletedEvents.get(0).getStatistics().getCompletedPositions(), 0L);
     }
 
     @Test
@@ -134,8 +150,8 @@ public class TestEventListener
             throws Exception
     {
         // We expect the following events
-        // QueryCreated: 1, QueryCompleted: 1, Splits: SPLITS_PER_NODE (leaf splits) + LocalExchange[SINGLE] split + Aggregation/Output split
-        int expectedEvents = 1 + 1 + SPLITS_PER_NODE + 1 + 1;
+        // QueryCreated: 1, QueryProgressEvent:1, QueryCompleted: 1, Splits: SPLITS_PER_NODE (leaf splits) + LocalExchange[SINGLE] split + Aggregation/Output split
+        int expectedEvents = 1 + 1 + 1 + SPLITS_PER_NODE + 1 + 1;
         runQueryAndWaitForEvents("SELECT sum(linenumber) FROM lineitem", expectedEvents);
 
         QueryCreatedEvent queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
@@ -145,6 +161,16 @@ public class TestEventListener
         assertEquals(queryCreatedEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
         assertEquals(queryCreatedEvent.getMetadata().getQuery(), "SELECT sum(linenumber) FROM lineitem");
         assertFalse(queryCreatedEvent.getMetadata().getPreparedQuery().isPresent());
+
+        QueryProgressEvent queryProgressEvent = generatedEvents.getQueryProgressEvent();
+        assertNotNull(queryProgressEvent);
+        assertTrue(queryProgressEvent.getMonotonicallyIncreasingEventId() > lastSeenQueryProgressEventId);
+        lastSeenQueryProgressEventId = queryProgressEvent.getMonotonicallyIncreasingEventId();
+        assertTrue(queryProgressEvent.getContext().getResourceGroupId().isPresent());
+        assertEquals(queryProgressEvent.getContext().getResourceGroupId().get(), createResourceGroupId("global", "user-user"));
+        assertEquals(queryProgressEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
+        assertEquals(queryCreatedEvent.getMetadata().getQueryId(), queryProgressEvent.getMetadata().getQueryId());
+        assertFalse(queryProgressEvent.getMetadata().getPreparedQuery().isPresent());
 
         QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
         assertTrue(queryCompletedEvent.getContext().getResourceGroupId().isPresent());
@@ -186,8 +212,8 @@ public class TestEventListener
         String selectQuery = "SELECT count(*) FROM lineitem WHERE shipmode = ?";
         String prepareQuery = "PREPARE stmt FROM " + selectQuery;
 
-        // QueryCreated: 1, QueryCompleted: 1, Splits: 0
-        runQueryAndWaitForEvents(prepareQuery, 2);
+        // QueryCreated: 1, QueryProgressEvent: 1, QueryCompleted: 1, Splits: 0
+        runQueryAndWaitForEvents(prepareQuery, 3);
 
         QueryCreatedEvent queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
         assertEquals(queryCreatedEvent.getContext().getServerVersion(), "testversion");
@@ -196,6 +222,16 @@ public class TestEventListener
         assertEquals(queryCreatedEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
         assertEquals(queryCreatedEvent.getMetadata().getQuery(), prepareQuery);
         assertFalse(queryCreatedEvent.getMetadata().getPreparedQuery().isPresent());
+
+        QueryProgressEvent queryProgressEvent = generatedEvents.getQueryProgressEvent();
+        assertNotNull(queryProgressEvent);
+        assertTrue(queryProgressEvent.getMonotonicallyIncreasingEventId() > lastSeenQueryProgressEventId);
+        lastSeenQueryProgressEventId = queryProgressEvent.getMonotonicallyIncreasingEventId();
+        assertTrue(queryProgressEvent.getContext().getResourceGroupId().isPresent());
+        assertEquals(queryProgressEvent.getContext().getResourceGroupId().get(), createResourceGroupId("global", "user-user"));
+        assertEquals(queryProgressEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
+        assertEquals(queryCreatedEvent.getMetadata().getQueryId(), queryProgressEvent.getMetadata().getQueryId());
+        assertFalse(queryProgressEvent.getMetadata().getPreparedQuery().isPresent());
 
         QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
         assertTrue(queryCompletedEvent.getContext().getResourceGroupId().isPresent());
@@ -211,8 +247,8 @@ public class TestEventListener
         Session sessionWithPrepare = Session.builder(session).addPreparedStatement("stmt", selectQuery).build();
 
         // We expect the following events
-        // QueryCreated: 1, QueryCompleted: 1, Splits: SPLITS_PER_NODE (leaf splits) + LocalExchange[SINGLE] split + Aggregation/Output split
-        int expectedEvents = 1 + 1 + SPLITS_PER_NODE + 1 + 1;
+        // QueryCreated: 1, QueryProgressEvent:1, QueryCompleted: 1, Splits: SPLITS_PER_NODE (leaf splits) + LocalExchange[SINGLE] split + Aggregation/Output split
+        int expectedEvents = 1 + 1 + 1 + SPLITS_PER_NODE + 1 + 1;
         runQueryAndWaitForEvents("EXECUTE stmt USING 'SHIP'", expectedEvents, sessionWithPrepare);
 
         queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
@@ -223,6 +259,17 @@ public class TestEventListener
         assertEquals(queryCreatedEvent.getMetadata().getQuery(), "EXECUTE stmt USING 'SHIP'");
         assertTrue(queryCreatedEvent.getMetadata().getPreparedQuery().isPresent());
         assertEquals(queryCreatedEvent.getMetadata().getPreparedQuery().get(), selectQuery);
+
+        queryProgressEvent = generatedEvents.getQueryProgressEvent();
+        assertNotNull(queryProgressEvent);
+        assertTrue(queryProgressEvent.getMonotonicallyIncreasingEventId() > lastSeenQueryProgressEventId);
+        lastSeenQueryProgressEventId = queryProgressEvent.getMonotonicallyIncreasingEventId();
+        assertTrue(queryProgressEvent.getContext().getResourceGroupId().isPresent());
+        assertEquals(queryProgressEvent.getContext().getResourceGroupId().get(), createResourceGroupId("global", "user-user"));
+        assertEquals(queryProgressEvent.getContext().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
+        assertEquals(queryCreatedEvent.getMetadata().getQueryId(), queryProgressEvent.getMetadata().getQueryId());
+        assertTrue(queryProgressEvent.getMetadata().getPreparedQuery().isPresent());
+        assertEquals(queryProgressEvent.getMetadata().getPreparedQuery().get(), selectQuery);
 
         queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
         assertTrue(queryCompletedEvent.getContext().getResourceGroupId().isPresent());
@@ -242,13 +289,17 @@ public class TestEventListener
             throws Exception
     {
         // We expect the following events
-        // QueryCreated: 1, QueryCompleted: 1, Splits: SPLITS_PER_NODE (leaf splits) + LocalExchange[SINGLE] split + Aggregation/Output split
-        int expectedEvents = 1 + 1 + SPLITS_PER_NODE + 1 + 1;
+        // QueryCreated: 1, QueryProgressEvent:1, QueryCompleted: 1, Splits: SPLITS_PER_NODE (leaf splits) + LocalExchange[SINGLE] split + Aggregation/Output split
+        int expectedEvents = 1 + 1 + 1 + SPLITS_PER_NODE + 1 + 1;
         MaterializedResult result = runQueryAndWaitForEvents("SELECT 1 FROM lineitem", expectedEvents);
         QueryCreatedEvent queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
+        QueryProgressEvent queryProgressEvent = generatedEvents.getQueryProgressEvent();
         QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
         QueryStats queryStats = queryRunner.getCoordinator().getQueryManager().getFullQueryInfo(new QueryId(queryCreatedEvent.getMetadata().getQueryId())).getQueryStats();
 
+        assertNotNull(queryProgressEvent);
+        assertTrue(queryProgressEvent.getMonotonicallyIncreasingEventId() > lastSeenQueryProgressEventId);
+        lastSeenQueryProgressEventId = queryProgressEvent.getMonotonicallyIncreasingEventId();
         assertTrue(queryStats.getOutputDataSize().toBytes() > 0L);
         assertTrue(queryCompletedEvent.getStatistics().getOutputBytes() > 0L);
         assertEquals(result.getRowCount(), queryStats.getOutputPositions());
@@ -256,20 +307,40 @@ public class TestEventListener
 
         runQueryAndWaitForEvents("SELECT COUNT(1) FROM lineitem", expectedEvents);
         queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
+        queryProgressEvent = generatedEvents.getQueryProgressEvent();
         queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
         queryStats = queryRunner.getCoordinator().getQueryManager().getFullQueryInfo(new QueryId(queryCreatedEvent.getMetadata().getQueryId())).getQueryStats();
 
+        assertNotNull(queryProgressEvent);
+        assertTrue(queryProgressEvent.getMonotonicallyIncreasingEventId() > lastSeenQueryProgressEventId);
+        lastSeenQueryProgressEventId = queryProgressEvent.getMonotonicallyIncreasingEventId();
         assertTrue(queryStats.getOutputDataSize().toBytes() > 0L);
         assertTrue(queryCompletedEvent.getStatistics().getOutputBytes() > 0L);
         assertEquals(1L, queryStats.getOutputPositions());
         assertEquals(1L, queryCompletedEvent.getStatistics().getOutputRows());
     }
 
-    static class EventsBuilder
+    @Test
+    public void testGraphvizQueryPlanOutput()
+            throws Exception
+    {
+        int expectedEvents = 1 + 1 + 1 + SPLITS_PER_NODE + 1 + 1;
+        String query = "EXPLAIN (type distributed, format graphviz) SELECT * FROM LINEITEM limit 1";
+        Session sessionForEventLoggingWithStats = Session.builder(session)
+                .setSystemProperty("print_stats_for_non_join_query", "true")
+                .build();
+        runQueryAndWaitForEvents("SELECT * FROM lineitem limit 1", expectedEvents, sessionForEventLoggingWithStats);
+        QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        MaterializedResult expected = runQueryAndWaitForEvents(query, expectedEvents);
+        assertEquals(queryCompletedEvent.getMetadata().getGraphvizPlan().get(), getOnlyElement(expected.getOnlyColumnAsSet()));
+    }
+
+    public static class EventsBuilder
     {
         private ImmutableList.Builder<QueryCreatedEvent> queryCreatedEvents;
         private ImmutableList.Builder<QueryCompletedEvent> queryCompletedEvents;
         private ImmutableList.Builder<SplitCompletedEvent> splitCompletedEvents;
+        private QueryProgressEvent queryProgressEvent;
 
         private CountDownLatch eventsLatch;
 
@@ -278,6 +349,7 @@ public class TestEventListener
             queryCreatedEvents = ImmutableList.builder();
             queryCompletedEvents = ImmutableList.builder();
             splitCompletedEvents = ImmutableList.builder();
+            queryProgressEvent = null;
 
             eventsLatch = new CountDownLatch(numEvents);
         }
@@ -306,6 +378,15 @@ public class TestEventListener
             eventsLatch.countDown();
         }
 
+        public synchronized void addQueryProgress(QueryProgressEvent event)
+        {
+            // Store only one QueryProgress event
+            if (queryProgressEvent == null) {
+                queryProgressEvent = event;
+                eventsLatch.countDown();
+            }
+        }
+
         public List<QueryCreatedEvent> getQueryCreatedEvents()
         {
             return queryCreatedEvents.build();
@@ -319,6 +400,11 @@ public class TestEventListener
         public List<SplitCompletedEvent> getSplitCompletedEvents()
         {
             return splitCompletedEvents.build();
+        }
+
+        public QueryProgressEvent getQueryProgressEvent()
+        {
+            return queryProgressEvent;
         }
     }
 }

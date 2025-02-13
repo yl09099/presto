@@ -13,11 +13,11 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.google.common.collect.Maps;
 
 import java.util.Map;
@@ -37,7 +37,7 @@ public class PruneAggregationColumns
     @Override
     protected Optional<PlanNode> pushDownProjectOff(
             PlanNodeIdAllocator idAllocator,
-            PlanVariableAllocator variableAllocator,
+            VariableAllocator variableAllocator,
             AggregationNode aggregationNode,
             Set<VariableReferenceExpression> referencedOutputs)
     {
@@ -58,6 +58,7 @@ public class PruneAggregationColumns
                         aggregationNode.getPreGroupedVariables(),
                         aggregationNode.getStep(),
                         aggregationNode.getHashVariable(),
-                        aggregationNode.getGroupIdVariable()));
+                        aggregationNode.getGroupIdVariable(),
+                        aggregationNode.getAggregationId()));
     }
 }

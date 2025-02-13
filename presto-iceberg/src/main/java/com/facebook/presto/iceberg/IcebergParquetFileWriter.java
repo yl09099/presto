@@ -39,6 +39,7 @@ public class IcebergParquetFileWriter
     private final Path outputPath;
     private final HdfsEnvironment hdfsEnvironment;
     private final HdfsContext hdfsContext;
+    private final MetricsConfig metricsConfig;
 
     public IcebergParquetFileWriter(
             OutputStream outputStream,
@@ -52,23 +53,27 @@ public class IcebergParquetFileWriter
             CompressionCodecName compressionCodecName,
             Path outputPath,
             HdfsEnvironment hdfsEnvironment,
-            HdfsContext hdfsContext)
+            HdfsContext hdfsContext,
+            MetricsConfig metricsConfig)
     {
         super(outputStream,
                 rollbackAction,
                 fileColumnNames,
                 fileColumnTypes,
+                messageType,
+                primitiveTypes,
                 parquetWriterOptions,
                 fileInputColumnIndexes,
                 compressionCodecName);
         this.outputPath = requireNonNull(outputPath, "outputPath is null");
         this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
         this.hdfsContext = requireNonNull(hdfsContext, "hdfsContext is null");
+        this.metricsConfig = requireNonNull(metricsConfig, "metricsConfig is null");
     }
 
     @Override
     public Metrics getMetrics()
     {
-        return hdfsEnvironment.doAs(hdfsContext.getIdentity().getUser(), () -> ParquetUtil.fileMetrics(new HdfsInputFile(outputPath, hdfsEnvironment, hdfsContext), MetricsConfig.getDefault()));
+        return hdfsEnvironment.doAs(hdfsContext.getIdentity().getUser(), () -> ParquetUtil.fileMetrics(new HdfsInputFile(outputPath, hdfsEnvironment, hdfsContext), metricsConfig));
     }
 }

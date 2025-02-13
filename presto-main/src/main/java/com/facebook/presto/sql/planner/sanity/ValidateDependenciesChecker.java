@@ -18,28 +18,41 @@ import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.AggregationNode.Aggregation;
+import com.facebook.presto.spi.plan.CteConsumerNode;
+import com.facebook.presto.spi.plan.CteProducerNode;
+import com.facebook.presto.spi.plan.CteReferenceNode;
+import com.facebook.presto.spi.plan.DeleteNode;
 import com.facebook.presto.spi.plan.DistinctLimitNode;
+import com.facebook.presto.spi.plan.EquiJoinClause;
 import com.facebook.presto.spi.plan.ExceptNode;
 import com.facebook.presto.spi.plan.FilterNode;
 import com.facebook.presto.spi.plan.IntersectNode;
+import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.plan.LimitNode;
 import com.facebook.presto.spi.plan.MarkDistinctNode;
+import com.facebook.presto.spi.plan.MergeJoinNode;
+import com.facebook.presto.spi.plan.OutputNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.spi.plan.SemiJoinNode;
 import com.facebook.presto.spi.plan.SetOperationNode;
+import com.facebook.presto.spi.plan.SortNode;
+import com.facebook.presto.spi.plan.SpatialJoinNode;
+import com.facebook.presto.spi.plan.StatisticAggregationsDescriptor;
+import com.facebook.presto.spi.plan.StatisticAggregationsDescriptor.ColumnStatisticsDescriptor;
+import com.facebook.presto.spi.plan.TableFinishNode;
 import com.facebook.presto.spi.plan.TableScanNode;
+import com.facebook.presto.spi.plan.TableWriterNode;
 import com.facebook.presto.spi.plan.TopNNode;
 import com.facebook.presto.spi.plan.UnionNode;
 import com.facebook.presto.spi.plan.ValuesNode;
+import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.parser.SqlParser;
-import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.VariablesExtractor;
 import com.facebook.presto.sql.planner.optimizations.WindowNodeUtil;
 import com.facebook.presto.sql.planner.plan.ApplyNode;
 import com.facebook.presto.sql.planner.plan.AssignUniqueId;
-import com.facebook.presto.sql.planner.plan.DeleteNode;
 import com.facebook.presto.sql.planner.plan.EnforceSingleRowNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.ExplainAnalyzeNode;
@@ -47,44 +60,31 @@ import com.facebook.presto.sql.planner.plan.GroupIdNode;
 import com.facebook.presto.sql.planner.plan.IndexJoinNode;
 import com.facebook.presto.sql.planner.plan.IndexSourceNode;
 import com.facebook.presto.sql.planner.plan.InternalPlanVisitor;
-import com.facebook.presto.sql.planner.plan.JoinNode;
 import com.facebook.presto.sql.planner.plan.LateralJoinNode;
-import com.facebook.presto.sql.planner.plan.MergeJoinNode;
 import com.facebook.presto.sql.planner.plan.MetadataDeleteNode;
 import com.facebook.presto.sql.planner.plan.OffsetNode;
-import com.facebook.presto.sql.planner.plan.OutputNode;
 import com.facebook.presto.sql.planner.plan.RemoteSourceNode;
 import com.facebook.presto.sql.planner.plan.RowNumberNode;
 import com.facebook.presto.sql.planner.plan.SampleNode;
-import com.facebook.presto.sql.planner.plan.SemiJoinNode;
-import com.facebook.presto.sql.planner.plan.SortNode;
-import com.facebook.presto.sql.planner.plan.SpatialJoinNode;
-import com.facebook.presto.sql.planner.plan.StatisticAggregationsDescriptor;
+import com.facebook.presto.sql.planner.plan.SequenceNode;
 import com.facebook.presto.sql.planner.plan.StatisticsWriterNode;
-import com.facebook.presto.sql.planner.plan.TableFinishNode;
 import com.facebook.presto.sql.planner.plan.TableWriterMergeNode;
-import com.facebook.presto.sql.planner.plan.TableWriterNode;
 import com.facebook.presto.sql.planner.plan.TopNRowNumberNode;
 import com.facebook.presto.sql.planner.plan.UnnestNode;
-import com.facebook.presto.sql.planner.plan.WindowNode;
+import com.facebook.presto.sql.planner.plan.UpdateNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
+import static com.facebook.presto.spi.plan.JoinNode.checkLeftOutputVariablesBeforeRight;
 import static com.facebook.presto.sql.planner.optimizations.AggregationNodeUtils.extractAggregationUniqueVariables;
 import static com.facebook.presto.sql.planner.optimizations.IndexJoinOptimizer.IndexKeyTracer;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.isExpression;
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static java.util.Objects.requireNonNull;
 
 /**
  * Ensures that all dependencies (i.e., symbols in expressions) for a plan node are provided by its source nodes
@@ -93,24 +93,21 @@ public final class ValidateDependenciesChecker
         implements PlanChecker.Checker
 {
     @Override
-    public void validate(PlanNode plan, Session session, Metadata metadata, SqlParser sqlParser, TypeProvider types, WarningCollector warningCollector)
+    public void validate(PlanNode plan, Session session, Metadata metadata, WarningCollector warningCollector)
     {
-        validate(plan, types);
+        validate(plan);
     }
 
-    public static void validate(PlanNode plan, TypeProvider types)
+    public static void validate(PlanNode plan)
     {
-        plan.accept(new Visitor(types), ImmutableSet.of());
+        plan.accept(new Visitor(), ImmutableSet.of());
     }
 
     private static class Visitor
             extends InternalPlanVisitor<Void, Set<VariableReferenceExpression>>
     {
-        private final TypeProvider types;
-
-        public Visitor(TypeProvider types)
+        public Visitor()
         {
-            this.types = requireNonNull(types, "types is null");
         }
 
         @Override
@@ -138,7 +135,7 @@ public final class ValidateDependenciesChecker
             checkDependencies(inputs, node.getGroupingKeys(), "Invalid node. Grouping key variables (%s) not in source plan output (%s)", node.getGroupingKeys(), node.getSource().getOutputVariables());
 
             for (Aggregation aggregation : node.getAggregations().values()) {
-                Set<VariableReferenceExpression> dependencies = extractAggregationUniqueVariables(aggregation, types);
+                Set<VariableReferenceExpression> dependencies = extractAggregationUniqueVariables(aggregation);
                 checkDependencies(inputs, dependencies, "Invalid node. Aggregation dependencies (%s) not in source plan output (%s)", dependencies, node.getSource().getOutputVariables());
                 aggregation.getMask().ifPresent(mask -> {
                     checkDependencies(inputs, ImmutableSet.of(mask), "Invalid node. Aggregation mask symbol (%s) not in source plan output (%s)", mask, node.getSource().getOutputVariables());
@@ -198,8 +195,19 @@ public final class ValidateDependenciesChecker
             }
             checkDependencies(inputs, bounds.build(), "Invalid node. Frame bounds (%s) not in source plan output (%s)", bounds.build(), node.getSource().getOutputVariables());
 
+            ImmutableList.Builder<VariableReferenceExpression> symbolsForFrameBoundsComparison = ImmutableList.builder();
+            for (WindowNode.Frame frame : node.getFrames()) {
+                if (frame.getSortKeyCoercedForFrameStartComparison().isPresent()) {
+                    symbolsForFrameBoundsComparison.add(frame.getSortKeyCoercedForFrameStartComparison().get());
+                }
+                if (frame.getSortKeyCoercedForFrameEndComparison().isPresent()) {
+                    symbolsForFrameBoundsComparison.add(frame.getSortKeyCoercedForFrameEndComparison().get());
+                }
+            }
+            checkDependencies(inputs, symbolsForFrameBoundsComparison.build(), "Invalid node. Symbols for frame bound comparison (%s) not in source plan output (%s)", symbolsForFrameBoundsComparison.build(), node.getSource().getOutputVariables());
+
             for (WindowNode.Function function : node.getWindowFunctions().values()) {
-                Set<VariableReferenceExpression> dependencies = WindowNodeUtil.extractWindowFunctionUniqueVariables(function, types);
+                Set<VariableReferenceExpression> dependencies = WindowNodeUtil.extractWindowFunctionUniqueVariables(function);
                 checkDependencies(inputs, dependencies, "Invalid node. Window function dependencies (%s) not in source plan output (%s)", dependencies, node.getSource().getOutputVariables());
             }
 
@@ -243,16 +251,7 @@ public final class ValidateDependenciesChecker
             Set<VariableReferenceExpression> inputs = createInputs(source, boundVariables);
             checkDependencies(inputs, node.getOutputVariables(), "Invalid node. Output symbols (%s) not in source plan output (%s)", node.getOutputVariables(), node.getSource().getOutputVariables());
 
-            // Only verify names here as filter expression would contain type cast, which will be translated to an non-existent variable in
-            // SqlToRowExpressionTranslator
-            // TODO https://github.com/prestodb/presto/issues/12892
-            Set<String> dependencies;
-            if (isExpression(node.getPredicate())) {
-                dependencies = VariablesExtractor.extractUnique(castToExpression(node.getPredicate()), types).stream().map(VariableReferenceExpression::getName).collect(toImmutableSet());
-            }
-            else {
-                dependencies = VariablesExtractor.extractUnique(node.getPredicate()).stream().map(VariableReferenceExpression::getName).collect(toImmutableSet());
-            }
+            Set<String> dependencies = VariablesExtractor.extractUnique(node.getPredicate()).stream().map(VariableReferenceExpression::getName).collect(toImmutableSet());
             checkArgument(
                     inputs.stream().map(VariableReferenceExpression::getName).collect(toImmutableSet()).containsAll(dependencies),
                     "Symbol from filter (%s) not in sources (%s)",
@@ -279,13 +278,7 @@ public final class ValidateDependenciesChecker
 
             Set<VariableReferenceExpression> inputs = createInputs(source, boundVariables);
             for (RowExpression expression : node.getAssignments().getExpressions()) {
-                Set<VariableReferenceExpression> dependencies;
-                if (isExpression(expression)) {
-                    dependencies = VariablesExtractor.extractUnique(castToExpression(expression), types);
-                }
-                else {
-                    dependencies = VariablesExtractor.extractUnique(expression);
-                }
+                Set<VariableReferenceExpression> dependencies = VariablesExtractor.extractUnique(expression);
                 checkDependencies(inputs, dependencies, "Invalid node. Expression dependencies (%s) not in source plan output (%s)", dependencies, inputs);
             }
 
@@ -380,7 +373,7 @@ public final class ValidateDependenciesChecker
                     .addAll(rightInputs)
                     .build();
 
-            for (JoinNode.EquiJoinClause clause : node.getCriteria()) {
+            for (EquiJoinClause clause : node.getCriteria()) {
                 checkArgument(leftInputs.contains(clause.getLeft()), "Symbol from join clause (%s) not in left source (%s)", clause.getLeft(), node.getLeft().getOutputVariables());
                 checkArgument(rightInputs.contains(clause.getRight()), "Symbol from join clause (%s) not in right source (%s)", clause.getRight(), node.getRight().getOutputVariables());
             }
@@ -389,13 +382,7 @@ public final class ValidateDependenciesChecker
                 // Only verify names here as filter expression would contain type cast, which will be translated to an non-existent variable in
                 // SqlToRowExpressionTranslator
                 // TODO https://github.com/prestodb/presto/issues/12892
-                Set<String> predicateVariables;
-                if (isExpression(predicate)) {
-                    predicateVariables = VariablesExtractor.extractUnique(castToExpression(predicate), types).stream().map(VariableReferenceExpression::getName).collect(toImmutableSet());
-                }
-                else {
-                    predicateVariables = VariablesExtractor.extractUnique(predicate).stream().map(VariableReferenceExpression::getName).collect(toImmutableSet());
-                }
+                Set<String> predicateVariables = VariablesExtractor.extractUnique(predicate).stream().map(VariableReferenceExpression::getName).collect(toImmutableSet());
                 checkArgument(
                         allInputs.stream().map(VariableReferenceExpression::getName).collect(toImmutableSet()).containsAll(predicateVariables),
                         "Symbol from filter (%s) not in sources (%s)",
@@ -439,13 +426,7 @@ public final class ValidateDependenciesChecker
                     .addAll(rightInputs)
                     .build();
 
-            Set<VariableReferenceExpression> predicateVariables;
-            if (isExpression(node.getFilter())) {
-                predicateVariables = VariablesExtractor.extractUnique(castToExpression(node.getFilter()), types);
-            }
-            else {
-                predicateVariables = VariablesExtractor.extractUnique(node.getFilter());
-            }
+            Set<VariableReferenceExpression> predicateVariables = VariablesExtractor.extractUnique(node.getFilter());
 
             checkArgument(
                     allInputs.containsAll(predicateVariables),
@@ -470,29 +451,12 @@ public final class ValidateDependenciesChecker
                     .addAll(rightInputs)
                     .build();
 
-            for (JoinNode.EquiJoinClause clause : node.getCriteria()) {
+            for (EquiJoinClause clause : node.getCriteria()) {
                 checkArgument(leftInputs.contains(clause.getLeft()), "Symbol from join clause (%s) not in left source (%s)", clause.getLeft(), node.getLeft().getOutputVariables());
                 checkArgument(rightInputs.contains(clause.getRight()), "Symbol from join clause (%s) not in right source (%s)", clause.getRight(), node.getRight().getOutputVariables());
             }
 
             return null;
-        }
-
-        private void checkLeftOutputVariablesBeforeRight(List<VariableReferenceExpression> leftVariables, List<VariableReferenceExpression> outputVariables)
-        {
-            int leftMaxPosition = -1;
-            Optional<Integer> rightMinPosition = Optional.empty();
-            Set<VariableReferenceExpression> leftVariablesSet = new HashSet<>(leftVariables);
-            for (int i = 0; i < outputVariables.size(); i++) {
-                VariableReferenceExpression variable = outputVariables.get(i);
-                if (leftVariablesSet.contains(variable)) {
-                    leftMaxPosition = i;
-                }
-                else if (!rightMinPosition.isPresent()) {
-                    rightMinPosition = Optional.of(i);
-                }
-            }
-            checkState(!rightMinPosition.isPresent() || rightMinPosition.get() > leftMaxPosition, "Not all left output variables are before right output variables");
         }
 
         @Override
@@ -542,9 +506,39 @@ public final class ValidateDependenciesChecker
         }
 
         @Override
+        public Void visitCteReference(CteReferenceNode node, Set<VariableReferenceExpression> boundVariables)
+        {
+            node.getSource().accept(this, boundVariables);
+            return null;
+        }
+
+        public Void visitCteProducer(CteProducerNode node, Set<VariableReferenceExpression> boundVariables)
+        {
+            PlanNode source = node.getSource();
+            source.accept(this, boundVariables);
+            checkDependencies(source.getOutputVariables(), node.getOutputVariables(),
+                    "Invalid node. Output column dependencies (%s) not in source plan output (%s)",
+                    node.getOutputVariables(), source.getOutputVariables());
+
+            return null;
+        }
+
+        public Void visitCteConsumer(CteConsumerNode node, Set<VariableReferenceExpression> boundVariables)
+        {
+            //We don't have to do a check here as CteConsumerNode has no dependencies.
+            return null;
+        }
+
+        public Void visitSequence(SequenceNode node, Set<VariableReferenceExpression> boundVariables)
+        {
+            node.getSources().forEach(plan -> plan.accept(this, boundVariables));
+            return null;
+        }
+
+        @Override
         public Void visitValues(ValuesNode node, Set<VariableReferenceExpression> boundVariables)
         {
-            Set<VariableReferenceExpression> correlatedDependencies = VariablesExtractor.extractUnique(node, types);
+            Set<VariableReferenceExpression> correlatedDependencies = VariablesExtractor.extractUnique(node);
             checkDependencies(
                     boundVariables,
                     correlatedDependencies,
@@ -624,6 +618,16 @@ public final class ValidateDependenciesChecker
 
             return null;
         }
+        @Override
+        public Void visitUpdate(UpdateNode node, Set<VariableReferenceExpression> boundVariables)
+        {
+            PlanNode source = node.getSource();
+            source.accept(this, boundVariables); // visit child
+            checkArgument(source.getOutputVariables().contains(node.getRowId()), "Invalid node. Row ID symbol (%s) is not in source plan output (%s)", node.getRowId(), node.getSource().getOutputVariables());
+            checkArgument(source.getOutputVariables().containsAll(node.getColumnValueAndRowIdSymbols()), "Invalid node. Some UPDATE SET expression symbols (%s) are not contained in the outputSymbols (%s)", node.getColumnValueAndRowIdSymbols(), source.getOutputVariables());
+
+            return null;
+        }
 
         @Override
         public Void visitMetadataDelete(MetadataDeleteNode node, Set<VariableReferenceExpression> boundVariables)
@@ -639,7 +643,7 @@ public final class ValidateDependenciesChecker
             StatisticAggregationsDescriptor<VariableReferenceExpression> descriptor = node.getDescriptor();
             Set<VariableReferenceExpression> dependencies = ImmutableSet.<VariableReferenceExpression>builder()
                     .addAll(descriptor.getGrouping().values())
-                    .addAll(descriptor.getColumnStatistics().values())
+                    .addAll(descriptor.getColumnStatistics().stream().map(ColumnStatisticsDescriptor::getItem).iterator())
                     .addAll(descriptor.getTableStatistics().values())
                     .build();
             List<VariableReferenceExpression> outputVariables = node.getSource().getOutputVariables();
@@ -712,7 +716,7 @@ public final class ValidateDependenciesChecker
             node.getSubquery().accept(this, subqueryCorrelation); // visit child
 
             checkDependencies(node.getInput().getOutputVariables(), node.getCorrelation(), "APPLY input must provide all the necessary correlation variables for subquery");
-            checkDependencies(VariablesExtractor.extractUnique(node.getSubquery(), types), node.getCorrelation(), "not all APPLY correlation symbols are used in subquery");
+            checkDependencies(VariablesExtractor.extractUnique(node.getSubquery()), node.getCorrelation(), "not all APPLY correlation symbols are used in subquery");
 
             ImmutableSet<VariableReferenceExpression> inputs = ImmutableSet.<VariableReferenceExpression>builder()
                     .addAll(createInputs(node.getSubquery(), boundVariables))
@@ -720,13 +724,7 @@ public final class ValidateDependenciesChecker
                     .build();
 
             for (RowExpression expression : node.getSubqueryAssignments().getExpressions()) {
-                Set<VariableReferenceExpression> dependencies;
-                if (isExpression(expression)) {
-                    dependencies = VariablesExtractor.extractUnique(castToExpression(expression), types);
-                }
-                else {
-                    dependencies = VariablesExtractor.extractUnique(expression);
-                }
+                Set<VariableReferenceExpression> dependencies = VariablesExtractor.extractUnique(expression);
                 checkDependencies(inputs, dependencies, "Invalid node. Expression dependencies (%s) not in source plan output (%s)", dependencies, inputs);
             }
 
@@ -749,7 +747,7 @@ public final class ValidateDependenciesChecker
                     node.getCorrelation(),
                     "LATERAL input must provide all the necessary correlation symbols for subquery");
             checkDependencies(
-                    VariablesExtractor.extractUnique(node.getSubquery(), types),
+                    VariablesExtractor.extractUnique(node.getSubquery()),
                     node.getCorrelation(),
                     "not all LATERAL correlation symbols are used in subquery");
 

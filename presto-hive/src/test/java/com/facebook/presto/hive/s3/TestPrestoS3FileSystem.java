@@ -53,6 +53,7 @@ import org.testng.annotations.Test;
 import javax.crypto.spec.SecretKeySpec;
 
 import java.io.ByteArrayInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.URI;
@@ -95,6 +96,7 @@ import static java.nio.file.Files.createTempDirectory;
 import static java.nio.file.Files.createTempFile;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
 public class TestPrestoS3FileSystem
@@ -267,7 +269,7 @@ public class TestPrestoS3FileSystem
     }
 
     @SuppressWarnings("ResultOfMethodCallIgnored")
-    @Test(expectedExceptions = IOException.class, expectedExceptionsMessageRegExp = ".*Failing getObject call with " + HTTP_NOT_FOUND + ".*")
+    @Test(expectedExceptions = FileNotFoundException.class, expectedExceptionsMessageRegExp = "File does not exist: s3n://test-bucket/test")
     public void testReadNotFound()
             throws Exception
     {
@@ -413,7 +415,7 @@ public class TestPrestoS3FileSystem
             s3.setGetObjectMetadataHttpCode(HTTP_NOT_FOUND);
             fs.initialize(new URI("s3n://test-bucket/"), new Configuration());
             fs.setS3Client(s3);
-            assertEquals(fs.getS3ObjectMetadata(new Path("s3n://test-bucket/test")), null);
+            assertNull(fs.getS3ObjectMetadata(new Path("s3n://test-bucket/test")).getObjectMetadata());
         }
     }
 
@@ -506,6 +508,27 @@ public class TestPrestoS3FileSystem
         }
     }
 
+    @Test
+    public void testGetScheme()
+            throws Exception
+    {
+        Configuration config = new Configuration();
+        try (PrestoS3FileSystem fs = new PrestoS3FileSystem()) {
+            fs.initialize(new URI("s3a://test-bucket/table"), config);
+            assertEquals(fs.getScheme(), "s3a");
+        }
+
+        try (PrestoS3FileSystem fs = new PrestoS3FileSystem()) {
+            fs.initialize(new URI("s3://test-bucket/table"), config);
+            assertEquals(fs.getScheme(), "s3");
+        }
+
+        try (PrestoS3FileSystem fs = new PrestoS3FileSystem()) {
+            fs.initialize(new URI("s3n://test-bucket/table"), config);
+            assertEquals(fs.getScheme(), "s3n");
+        }
+    }
+
     @DataProvider(name = "skipGlacierObjectsConfig")
     public static Object[][] skipGlacierObjectsConfigProvider()
     {
@@ -525,7 +548,7 @@ public class TestPrestoS3FileSystem
             fs.initialize(new URI("s3n://test-bucket/"), config);
             fs.setS3Client(s3);
             FileStatus[] statuses = fs.listStatus(new Path("s3n://test-bucket/test"));
-            assertEquals(statuses.length, skipGlacierObjects ? 1 : 2);
+            assertEquals(statuses.length, skipGlacierObjects ? 1 : 3);
         }
     }
 

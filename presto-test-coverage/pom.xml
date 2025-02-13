@@ -5,7 +5,7 @@
     <parent>
         <groupId>com.facebook.presto</groupId>
         <artifactId>presto-root</artifactId>
-        <version>0.276-SNAPSHOT</version>
+        <version>0.292-SNAPSHOT</version>
     </parent>
 
     <artifactId>presto-test-coverage</artifactId>
@@ -74,6 +74,13 @@
         <dependency>
             <groupId>com.facebook.presto</groupId>
             <artifactId>presto-mysql</artifactId>
+            <version>${project.version}</version>
+            <scope>compile</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.facebook.presto</groupId>
+            <artifactId>presto-hana</artifactId>
             <version>${project.version}</version>
             <scope>compile</scope>
         </dependency>
@@ -200,13 +207,6 @@
         <dependency>
             <groupId>com.facebook.presto</groupId>
             <artifactId>presto-spark-base</artifactId>
-            <version>${project.version}</version>
-            <scope>compile</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>com.facebook.presto</groupId>
-            <artifactId>presto-geospatial</artifactId>
             <version>${project.version}</version>
             <scope>compile</scope>
         </dependency>

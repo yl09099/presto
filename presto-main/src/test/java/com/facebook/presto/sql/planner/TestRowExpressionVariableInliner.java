@@ -15,7 +15,9 @@ package com.facebook.presto.sql.planner;
 
 import com.facebook.presto.common.CatalogSchemaName;
 import com.facebook.presto.common.QualifiedObjectName;
+import com.facebook.presto.common.type.TypeSignature;
 import com.facebook.presto.spi.function.FunctionHandle;
+import com.facebook.presto.spi.function.FunctionKind;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.LambdaDefinitionExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
@@ -23,9 +25,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.testng.annotations.Test;
 
+import java.util.List;
 import java.util.Optional;
 
 import static com.facebook.presto.common.type.BigintType.BIGINT;
+import static com.facebook.presto.spi.function.FunctionKind.SCALAR;
+import static java.util.Collections.emptyList;
 import static org.testng.Assert.assertEquals;
 
 public class TestRowExpressionVariableInliner
@@ -37,6 +42,24 @@ public class TestRowExpressionVariableInliner
         public CatalogSchemaName getCatalogSchemaName()
         {
             return QualifiedObjectName.valueOf(new CatalogSchemaName("a", "b"), "c").getCatalogSchemaName();
+        }
+
+        @Override
+        public String getName()
+        {
+            return "a.b.c";
+        }
+
+        @Override
+        public FunctionKind getKind()
+        {
+            return SCALAR;
+        }
+
+        @Override
+        public List<TypeSignature> getArgumentTypes()
+        {
+            return emptyList();
         }
     }
 
@@ -76,11 +99,6 @@ public class TestRowExpressionVariableInliner
                                 ImmutableList.of(BIGINT),
                                 ImmutableList.of("lambda_argument"),
                                 new CallExpression("add", TEST_FUNCTION, BIGINT, ImmutableList.of(variable("lambda_argument"), variable("b")))))));
-    }
-
-    private Symbol symbol(String name)
-    {
-        return new Symbol(name);
     }
 
     private VariableReferenceExpression variable(String name)

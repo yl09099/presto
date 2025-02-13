@@ -9,6 +9,7 @@ from different data sources.
     :maxdepth: 1
 
     connector/accumulo
+    connector/base-arrow-flight
     connector/bigquery
     connector/blackhole
     connector/cassandra
@@ -16,6 +17,9 @@ from different data sources.
     connector/deltalake
     connector/druid
     connector/elasticsearch
+    connector/file-based-metastore
+    connector/googlesheets
+    connector/hana
     connector/hive
     connector/hive-security
     connector/hudi
@@ -35,6 +39,8 @@ from different data sources.
     connector/prometheus
     connector/redis
     connector/redshift
+    connector/scylladb
+    connector/singlestore
     connector/sqlserver
     connector/system
     connector/thrift

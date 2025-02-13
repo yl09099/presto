@@ -24,6 +24,7 @@ import com.facebook.airlift.log.Logger;
 import com.facebook.airlift.security.pem.PemReader;
 import com.facebook.presto.elasticsearch.AwsSecurityConfig;
 import com.facebook.presto.elasticsearch.ElasticsearchConfig;
+import com.facebook.presto.elasticsearch.PasswordConfig;
 import com.facebook.presto.spi.PrestoException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,10 +36,14 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.units.Duration;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
+import org.apache.http.auth.AuthScope;
+import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.entity.ByteArrayEntity;
 import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
 import org.apache.http.impl.nio.reactor.IOReactorConfig;
 import org.apache.http.message.BasicHeader;
@@ -129,9 +134,12 @@ public class ElasticsearchClient
     private final boolean ignorePublishAddress;
 
     @Inject
-    public ElasticsearchClient(ElasticsearchConfig config, Optional<AwsSecurityConfig> awsSecurityConfig)
+    public ElasticsearchClient(
+            ElasticsearchConfig config,
+            Optional<AwsSecurityConfig> awsSecurityConfig,
+            Optional<PasswordConfig> passwordConfig)
     {
-        client = createClient(config, awsSecurityConfig);
+        client = createClient(config, awsSecurityConfig, passwordConfig);
 
         this.ignorePublishAddress = config.isIgnorePublishAddress();
         this.scrollSize = config.getScrollSize();
@@ -183,7 +191,10 @@ public class ElasticsearchClient
         }
     }
 
-    private static RestHighLevelClient createClient(ElasticsearchConfig config, Optional<AwsSecurityConfig> awsSecurityConfig)
+    private static RestHighLevelClient createClient(
+            ElasticsearchConfig config,
+            Optional<AwsSecurityConfig> awsSecurityConfig,
+            Optional<PasswordConfig> passwordConfig)
     {
         RestClientBuilder builder = RestClient.builder(
                 new HttpHost(config.getHost(), config.getPort(), config.isTlsEnabled() ? "https" : "http"))
@@ -215,6 +226,12 @@ public class ElasticsearchClient
                     clientBuilder.setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE);
                 }
             }
+
+            passwordConfig.ifPresent(securityConfig -> {
+                CredentialsProvider credentials = new BasicCredentialsProvider();
+                credentials.setCredentials(AuthScope.ANY, new UsernamePasswordCredentials(securityConfig.getUser(), securityConfig.getPassword()));
+                clientBuilder.setDefaultCredentialsProvider(credentials);
+            });
 
             awsSecurityConfig.ifPresent(securityConfig -> clientBuilder.addInterceptorLast(new AwsRequestSigner(
                     securityConfig.getRegion(),
@@ -294,7 +311,7 @@ public class ElasticsearchClient
             X509TrustManager trustManager = (X509TrustManager) trustManagers[0];
 
             // create SSLContext
-            SSLContext result = SSLContext.getInstance("SSL");
+            SSLContext result = SSLContext.getInstance("TLS");
             result.init(keyManagers, new TrustManager[] {trustManager}, null);
             return Optional.of(result);
         }
@@ -475,6 +492,10 @@ public class ElasticsearchClient
                     // Older versions of ElasticSearch supported multiple "type" mappings
                     // for a given index. Newer versions support only one and don't
                     // expose it in the document. Here we skip it if it's present.
+
+                    if (!mappings.elements().hasNext()) {
+                        return new IndexMetadata(new IndexMetadata.ObjectType(ImmutableList.of()));
+                    }
                     mappings = mappings.elements().next();
                 }
 

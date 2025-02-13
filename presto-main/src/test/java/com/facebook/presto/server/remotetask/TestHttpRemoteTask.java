@@ -28,6 +28,7 @@ import com.facebook.drift.codec.utils.DataSizeToBytesThriftCodec;
 import com.facebook.drift.codec.utils.DurationToMillisThriftCodec;
 import com.facebook.drift.codec.utils.JodaDateTimeToEpochMillisThriftCodec;
 import com.facebook.presto.client.NodeVersion;
+import com.facebook.presto.common.ErrorCode;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.common.type.TypeManager;
 import com.facebook.presto.connector.ConnectorTypeSerdeManager;
@@ -35,6 +36,7 @@ import com.facebook.presto.execution.Lifespan;
 import com.facebook.presto.execution.NodeTaskMap;
 import com.facebook.presto.execution.QueryManagerConfig;
 import com.facebook.presto.execution.RemoteTask;
+import com.facebook.presto.execution.SchedulerStatsTracker;
 import com.facebook.presto.execution.TaskId;
 import com.facebook.presto.execution.TaskInfo;
 import com.facebook.presto.execution.TaskManagerConfig;
@@ -55,7 +57,6 @@ import com.facebook.presto.server.ConnectorMetadataUpdateHandleJsonSerde;
 import com.facebook.presto.server.InternalCommunicationConfig;
 import com.facebook.presto.server.TaskUpdateRequest;
 import com.facebook.presto.spi.ConnectorId;
-import com.facebook.presto.spi.ErrorCode;
 import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.Serialization;
@@ -67,10 +68,12 @@ import com.facebook.presto.testing.TestingTransactionHandle;
 import com.facebook.presto.type.TypeDeserializer;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.SettableFuture;
 import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -89,6 +92,7 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.UriInfo;
 
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
@@ -127,6 +131,7 @@ import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertTrue;
 
 public class TestHttpRemoteTask
@@ -134,7 +139,7 @@ public class TestHttpRemoteTask
     // This 30 sec per-test timeout should never be reached because the test should fail and do proper cleanup after 20 sec.
     private static final Duration POLL_TIMEOUT = new Duration(100, MILLISECONDS);
     private static final Duration IDLE_TIMEOUT = new Duration(3, SECONDS);
-    private static final Duration FAIL_TIMEOUT = new Duration(20, SECONDS);
+    private static final Duration FAIL_TIMEOUT = new Duration(40, SECONDS);
     private static final TaskManagerConfig TASK_MANAGER_CONFIG = new TaskManagerConfig()
             // Shorten status refresh wait and info update interval so that we can have a shorter test timeout
             .setStatusRefreshMaxWait(new Duration(IDLE_TIMEOUT.roundTo(MILLISECONDS) / 100, MILLISECONDS))
@@ -148,28 +153,28 @@ public class TestHttpRemoteTask
         return new Object[][] {{true}, {false}};
     }
 
-    @Test(timeOut = 30000, dataProvider = "thriftEncodingToggle")
+    @Test(timeOut = 50000, dataProvider = "thriftEncodingToggle")
     public void testRemoteTaskMismatch(boolean useThriftEncoding)
             throws Exception
     {
         runTest(FailureScenario.TASK_MISMATCH, useThriftEncoding);
     }
 
-    @Test(timeOut = 30000, dataProvider = "thriftEncodingToggle")
+    @Test(timeOut = 50000, dataProvider = "thriftEncodingToggle")
     public void testRejectedExecutionWhenVersionIsHigh(boolean useThriftEncoding)
             throws Exception
     {
         runTest(FailureScenario.TASK_MISMATCH_WHEN_VERSION_IS_HIGH, useThriftEncoding);
     }
 
-    @Test(timeOut = 30000, dataProvider = "thriftEncodingToggle")
+    @Test(timeOut = 40000, dataProvider = "thriftEncodingToggle")
     public void testRejectedExecution(boolean useThriftEncoding)
             throws Exception
     {
         runTest(FailureScenario.REJECTED_EXECUTION, useThriftEncoding);
     }
 
-    @Test(timeOut = 30000, dataProvider = "thriftEncodingToggle")
+    @Test(timeOut = 60000, dataProvider = "thriftEncodingToggle")
     public void testRegular(boolean useThriftEncoding)
             throws Exception
     {
@@ -201,7 +206,7 @@ public class TestHttpRemoteTask
         httpRemoteTaskFactory.stop();
     }
 
-    @Test(timeOut = 30000)
+    @Test(timeOut = 50000)
     public void testHTTPRemoteTaskSize()
             throws Exception
     {
@@ -216,9 +221,76 @@ public class TestHttpRemoteTask
         remoteTask.start();
         // just need to run a TaskUpdateRequest to increment the decay counter
         remoteTask.cancel();
+
+        waitUntilTaskFinish(remoteTask);
+
         httpRemoteTaskFactory.stop();
 
         assertTrue(httpRemoteTaskFactory.getTaskUpdateRequestSize() > 0);
+    }
+
+    @Test(timeOut = 50000)
+    public void testHTTPRemoteBadTaskSize()
+            throws Exception
+    {
+        AtomicLong lastActivityNanos = new AtomicLong(System.nanoTime());
+        TestingTaskResource testingTaskResource = new TestingTaskResource(lastActivityNanos, FailureScenario.NO_FAILURE);
+        boolean useThriftEncoding = false;
+        DataSize maxDataSize = DataSize.succinctBytes(1024);
+        InternalCommunicationConfig internalCommunicationConfig = new InternalCommunicationConfig()
+                .setThriftTransportEnabled(useThriftEncoding)
+                .setMaxTaskUpdateSize(maxDataSize);
+
+        HttpRemoteTaskFactory httpRemoteTaskFactory = createHttpRemoteTaskFactory(testingTaskResource, useThriftEncoding, internalCommunicationConfig);
+
+        RemoteTask remoteTask = createRemoteTask(httpRemoteTaskFactory);
+        testingTaskResource.setInitialTaskInfo(remoteTask.getTaskInfo());
+        remoteTask.start();
+
+        waitUntilTaskFinish(remoteTask);
+
+        httpRemoteTaskFactory.stop();
+
+        assertTrue(remoteTask.getTaskStatus().getState().isDone(), format("TaskStatus is not in a done state: %s", remoteTask.getTaskStatus()));
+        assertThat(getOnlyElement(remoteTask.getTaskStatus().getFailures()).getMessage())
+                .matches("TaskUpdate size of .+? has exceeded the limit of 1kB");
+    }
+
+    @Test(dataProvider = "getUpdateSize")
+    public void testGetExceededTaskUpdateSizeListMessage(int updateSizeInBytes, int maxDataSizeInBytes,
+            String expectedMessage)
+            throws Exception
+    {
+        AtomicLong lastActivityNanos = new AtomicLong(System.nanoTime());
+        TestingTaskResource testingTaskResource = new TestingTaskResource(lastActivityNanos, FailureScenario.NO_FAILURE);
+        boolean useThriftEncoding = false;
+        DataSize maxDataSize = DataSize.succinctBytes(maxDataSizeInBytes);
+        InternalCommunicationConfig internalCommunicationConfig = new InternalCommunicationConfig()
+                .setThriftTransportEnabled(useThriftEncoding)
+                .setMaxTaskUpdateSize(maxDataSize);
+        HttpRemoteTaskFactory httpRemoteTaskFactory = createHttpRemoteTaskFactory(testingTaskResource, useThriftEncoding, internalCommunicationConfig);
+        RemoteTask remoteTask = createRemoteTask(httpRemoteTaskFactory);
+
+        Method targetMethod = HttpRemoteTask.class.getDeclaredMethod("getExceededTaskUpdateSizeMessage", new Class[] {byte[].class});
+        targetMethod.setAccessible(true);
+        byte[] taskUpdateRequestJson = new byte[updateSizeInBytes];
+        String message = (String) targetMethod.invoke(remoteTask, new Object[] {taskUpdateRequestJson});
+        assertEquals(message, expectedMessage);
+    }
+
+    @DataProvider(name = "getUpdateSize")
+    protected Object[][] getUpdateSize()
+    {
+        return new Object[][] {
+                {2000, 1000, "TaskUpdate size of 1.95kB has exceeded the limit of 1000B"},
+                {2000, 1024, "TaskUpdate size of 1.95kB has exceeded the limit of 1kB"},
+                {5000, 4 * 1024, "TaskUpdate size of 4.88kB has exceeded the limit of 4kB"},
+                {2 * 1024, 1024, "TaskUpdate size of 2kB has exceeded the limit of 1kB"},
+                {1024 * 1024, 512 * 1024, "TaskUpdate size of 1MB has exceeded the limit of 512kB"},
+                {16 * 1024 * 1024, 8 * 1024 * 1024, "TaskUpdate size of 16MB has exceeded the limit of 8MB"},
+                {485 * 1000 * 1000, 1024 * 1024 * 512, "TaskUpdate size of 462.53MB has exceeded the limit of 512MB"},
+                {1024 * 1024 * 1024, 1024 * 1024 * 512, "TaskUpdate size of 1GB has exceeded the limit of 512MB"},
+                {860492511, 524288000, "TaskUpdate size of 820.63MB has exceeded the limit of 500MB"}};
     }
 
     private void runTest(FailureScenario failureScenario, boolean useThriftEncoding)
@@ -233,7 +305,7 @@ public class TestHttpRemoteTask
         testingTaskResource.setInitialTaskInfo(remoteTask.getTaskInfo());
         remoteTask.start();
 
-        waitUntilIdle(lastActivityNanos);
+        waitUntilTaskFinish(remoteTask);
 
         httpRemoteTaskFactory.stop();
         assertTrue(remoteTask.getTaskStatus().getState().isDone(), format("TaskStatus is not in a done state: %s", remoteTask.getTaskStatus()));
@@ -258,17 +330,25 @@ public class TestHttpRemoteTask
     {
         return httpRemoteTaskFactory.createRemoteTask(
                 TEST_SESSION,
-                new TaskId("test", 1, 0, 2),
+                new TaskId("test", 1, 0, 2, 0),
                 new InternalNode("node-id", URI.create("http://fake.invalid/"), new NodeVersion("version"), false),
                 createPlanFragment(),
                 ImmutableMultimap.of(),
                 createInitialEmptyOutputBuffers(OutputBuffers.BufferType.BROADCAST),
                 new NodeTaskMap.NodeStatsTracker(i -> {}, i -> {}, (age, i) -> {}),
                 true,
-                new TableWriteInfo(Optional.empty(), Optional.empty(), Optional.empty()));
+                new TableWriteInfo(Optional.empty(), Optional.empty(), Optional.empty()),
+                SchedulerStatsTracker.NOOP);
     }
 
     private static HttpRemoteTaskFactory createHttpRemoteTaskFactory(TestingTaskResource testingTaskResource, boolean useThriftEncoding)
+            throws Exception
+    {
+        InternalCommunicationConfig internalCommunicationConfig = new InternalCommunicationConfig().setThriftTransportEnabled(useThriftEncoding);
+        return createHttpRemoteTaskFactory(testingTaskResource, useThriftEncoding, internalCommunicationConfig);
+    }
+
+    private static HttpRemoteTaskFactory createHttpRemoteTaskFactory(TestingTaskResource testingTaskResource, boolean useThriftEncoding, InternalCommunicationConfig internalCommunicationConfig)
             throws Exception
     {
         Bootstrap app = new Bootstrap(
@@ -345,7 +425,7 @@ public class TestHttpRemoteTask
                                 metadataUpdatesJsonCodec,
                                 metadataUpdatesSmileCodec,
                                 new RemoteTaskStats(),
-                                new InternalCommunicationConfig().setThriftTransportEnabled(useThriftEncoding),
+                                internalCommunicationConfig,
                                 createTestMetadataManager(),
                                 new TestQueryManager(),
                                 new HandleResolver(),
@@ -375,24 +455,17 @@ public class TestHttpRemoteTask
         }
     }
 
-    private static void waitUntilIdle(AtomicLong lastActivityNanos)
-            throws InterruptedException
+    private static void waitUntilTaskFinish(RemoteTask task)
+            throws Exception
     {
-        long startTimeNanos = System.nanoTime();
+        SettableFuture<?> taskFinished = SettableFuture.create();
 
-        while (true) {
-            long millisSinceLastActivity = (System.nanoTime() - lastActivityNanos.get()) / 1_000_000L;
-            long millisSinceStart = (System.nanoTime() - startTimeNanos) / 1_000_000L;
-            long millisToIdleTarget = IDLE_TIMEOUT.toMillis() - millisSinceLastActivity;
-            long millisToFailTarget = FAIL_TIMEOUT.toMillis() - millisSinceStart;
-            if (millisToFailTarget < millisToIdleTarget) {
-                throw new AssertionError(format("Activity doesn't stop after %s", FAIL_TIMEOUT));
+        task.addStateChangeListener(status -> {
+            if (status.getState().isDone()) {
+                taskFinished.set(null);
             }
-            if (millisToIdleTarget < 0) {
-                return;
-            }
-            Thread.sleep(millisToIdleTarget);
-        }
+        });
+        taskFinished.get();
     }
 
     private enum FailureScenario

@@ -20,8 +20,10 @@ import com.facebook.presto.client.FailureInfo;
 import com.facebook.presto.client.QueryError;
 import com.facebook.presto.client.QueryResults;
 import com.facebook.presto.client.StatementStats;
+import com.facebook.presto.common.ErrorCode;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.block.BlockEncodingSerde;
+import com.facebook.presto.common.transaction.TransactionId;
 import com.facebook.presto.common.type.BooleanType;
 import com.facebook.presto.common.type.StandardTypes;
 import com.facebook.presto.common.type.Type;
@@ -32,7 +34,7 @@ import com.facebook.presto.execution.QueryState;
 import com.facebook.presto.execution.StageInfo;
 import com.facebook.presto.execution.buffer.PagesSerdeFactory;
 import com.facebook.presto.operator.ExchangeClient;
-import com.facebook.presto.spi.ErrorCode;
+import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.function.SqlFunctionId;
 import com.facebook.presto.spi.function.SqlInvokedFunction;
@@ -40,7 +42,6 @@ import com.facebook.presto.spi.page.PagesSerde;
 import com.facebook.presto.spi.page.SerializedPage;
 import com.facebook.presto.spi.security.SelectedRole;
 import com.facebook.presto.spi.tracing.Tracer;
-import com.facebook.presto.transaction.TransactionId;
 import com.facebook.presto.transaction.TransactionInfo;
 import com.facebook.presto.transaction.TransactionManager;
 import com.google.common.collect.ImmutableList;
@@ -50,6 +51,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 
@@ -61,6 +63,7 @@ import javax.ws.rs.core.UriBuilder;
 import javax.ws.rs.core.UriInfo;
 
 import java.net.URI;
+import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -77,10 +80,14 @@ import static com.facebook.presto.SystemSessionProperties.getQueryRetryMaxExecut
 import static com.facebook.presto.SystemSessionProperties.getTargetResultSize;
 import static com.facebook.presto.SystemSessionProperties.isExchangeChecksumEnabled;
 import static com.facebook.presto.SystemSessionProperties.isExchangeCompressionEnabled;
+import static com.facebook.presto.SystemSessionProperties.retryQueryWithHistoryBasedOptimizationEnabled;
+import static com.facebook.presto.SystemSessionProperties.trackHistoryBasedPlanStatisticsEnabled;
+import static com.facebook.presto.SystemSessionProperties.useHistoryBasedPlanStatisticsEnabled;
 import static com.facebook.presto.execution.QueryState.FAILED;
 import static com.facebook.presto.execution.QueryState.WAITING_FOR_PREREQUISITES;
 import static com.facebook.presto.server.protocol.QueryResourceUtil.toStatementStats;
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static com.facebook.presto.spi.page.PagesSerdeUtil.writeSerializedPage;
 import static com.facebook.presto.util.Failures.toFailure;
 import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
@@ -94,6 +101,10 @@ import static java.util.Objects.requireNonNull;
 class Query
 {
     private static final Logger log = Logger.get(Query.class);
+    private static final Base64.Encoder BASE64_ENCODER = Base64.getEncoder();
+    private static Optional<QueryId> originalBeforeRetryQueryId = Optional.empty();
+    private static Optional<Integer> previousQueryTopLevelPlanHash = Optional.empty();
+    private static Optional<QueryError> previousQueryFailureError = Optional.empty();
 
     private final QueryManager queryManager;
     private final TransactionManager transactionManager;
@@ -307,7 +318,7 @@ class Query
         return removedSessionFunctions;
     }
 
-    public synchronized ListenableFuture<QueryResults> waitForResults(long token, UriInfo uriInfo, String scheme, Duration wait, DataSize targetResultSize)
+    public synchronized ListenableFuture<QueryResults> waitForResults(long token, UriInfo uriInfo, String scheme, Duration wait, DataSize targetResultSize, boolean binaryResults)
     {
         // before waiting, check if this request has already been processed and cached
         Optional<QueryResults> cachedResult = getCachedResult(token);
@@ -323,7 +334,7 @@ class Query
                 timeoutExecutor);
 
         // when state changes, fetch the next result
-        return Futures.transform(futureStateChange, ignored -> getNextResultWithRetry(token, uriInfo, scheme, targetResultSize), resultsProcessorExecutor);
+        return Futures.transform(futureStateChange, ignored -> getNextResultWithRetry(token, uriInfo, scheme, targetResultSize, binaryResults), resultsProcessorExecutor);
     }
 
     private synchronized ListenableFuture<?> getFutureStateChange()
@@ -376,29 +387,42 @@ class Query
         return Optional.empty();
     }
 
-    private synchronized QueryResults getNextResultWithRetry(long token, UriInfo uriInfo, String scheme, DataSize targetResultSize)
+    private synchronized QueryResults getNextResultWithRetry(long token, UriInfo uriInfo, String scheme, DataSize targetResultSize, boolean binaryResults)
     {
-        QueryResults queryResults = getNextResult(token, uriInfo, scheme, targetResultSize);
-        if (queryResults.getError() == null || !queryResults.getError().isRetriable()) {
+        QueryResults queryResults = getNextResult(token, uriInfo, scheme, targetResultSize, binaryResults);
+
+        if (queryResults.getError() == null) {
             return queryResults;
         }
 
-        // check if we have exceeded the global limit
-        retryCircuitBreaker.incrementFailure();
-        if (!retryCircuitBreaker.isRetryAllowed() || hasProducedResult) {
+        boolean historyBasedOptimizationEnabled = useHistoryBasedPlanStatisticsEnabled(session) && trackHistoryBasedPlanStatisticsEnabled(session);
+        boolean hasNotRetried = queryManager.getQueryRetryCount(queryId) < 1;
+
+        if (historyBasedOptimizationEnabled && hasNotRetried && retryConditionsMet(queryResults) && retryQueryWithHistoryBasedOptimizationEnabled(session)) {
+            originalBeforeRetryQueryId = Optional.of(queryId);
+            previousQueryTopLevelPlanHash = getCurrentTopLevelPlanHash();
+            previousQueryFailureError = Optional.of(queryResults.getError());
+        }
+        else if (queryManager.getQueryRetryCount(queryId) == 1 && retryQueryWithHistoryBasedOptimizationEnabled(session) && retryConditionsMet(queryResults) && historyBasedOptimizationEnabled) {
+            Optional<Integer> currentTopLevelPlanHash = getCurrentTopLevelPlanHash();
+
+            if (previousQueryTopLevelPlanHash.isPresent() && currentTopLevelPlanHash.isPresent() && currentTopLevelPlanHash.equals(previousQueryTopLevelPlanHash)
+                    || (!previousQueryTopLevelPlanHash.isPresent() && !currentTopLevelPlanHash.isPresent())) {
+                queryManager.failQuery(queryId, new PrestoException(GENERIC_INTERNAL_ERROR, "Since the plan hashes did not change, your retry query will not execute." +
+                        "Your original error was " + previousQueryFailureError.get() + ". Original QueryId: " + originalBeforeRetryQueryId +
+                        ". Retry QueryId: " + queryId));
+            }
+
+            originalBeforeRetryQueryId = Optional.empty();
+            previousQueryTopLevelPlanHash = Optional.empty();
+            previousQueryFailureError = Optional.empty();
+
             return queryResults;
         }
-
-        // check if we have exceeded the local limit
-        if (queryManager.getQueryRetryCount(queryId) >= getQueryRetryLimit(session) ||
-                queryManager.getQueryInfo(queryId).getQueryStats().getExecutionTime().toMillis() > getQueryRetryMaxExecutionTime(session).toMillis()) {
-            return queryResults;
-        }
-
-        // no support for transactions
-        if (session.getTransactionId().isPresent() &&
-                !transactionManager.getOptionalTransactionInfo(session.getRequiredTransactionId()).map(TransactionInfo::isAutoCommitContext).orElse(true)) {
-            return queryResults;
+        else {
+            if (!retryConditionsMet(queryResults)) {
+                return queryResults;
+            }
         }
 
         // build a new query with next uri
@@ -410,6 +434,7 @@ class Query
                 createRetryUri(scheme, uriInfo),
                 queryResults.getColumns(),
                 null,
+                null,
                 StatementStats.builder()
                         .setState(WAITING_FOR_PREREQUISITES.toString())
                         .setWaitingForPrerequisites(true)
@@ -420,7 +445,7 @@ class Query
                 queryResults.getUpdateCount());
     }
 
-    private synchronized QueryResults getNextResult(long token, UriInfo uriInfo, String scheme, DataSize targetResultSize)
+    private synchronized QueryResults getNextResult(long token, UriInfo uriInfo, String scheme, DataSize targetResultSize, boolean binaryResults)
     {
         // check if the result for the token have already been created
         Optional<QueryResults> cachedResult = getCachedResult(token);
@@ -442,30 +467,56 @@ class Query
         // last page is removed.  If another thread observes this state before the response is cached
         // the pages will be lost.
         Iterable<List<Object>> data = null;
+        List<String> binaryData = null;
         try {
-            ImmutableList.Builder<RowIterable> pages = ImmutableList.builder();
-            long bytes = 0;
             long rows = 0;
+            long bytes = 0;
             long targetResultBytes = targetResultSize.toBytes();
-            while (bytes < targetResultBytes) {
-                SerializedPage serializedPage = exchangeClient.pollPage();
-                if (serializedPage == null) {
-                    break;
-                }
+            if (binaryResults) {
+                ImmutableList.Builder<String> pages = ImmutableList.builder();
+                while (bytes < targetResultBytes) {
+                    SerializedPage serializedPage = exchangeClient.pollPage();
+                    if (serializedPage == null) {
+                        break;
+                    }
 
-                Page page = serde.deserialize(serializedPage);
-                bytes += page.getLogicalSizeInBytes();
-                rows += page.getPositionCount();
-                pages.add(new RowIterable(session.toConnectorSession(), types, page));
+                    rows += serializedPage.getPositionCount();
+                    bytes += serializedPage.getSizeInBytes();
+
+                    DynamicSliceOutput sliceOutput = new DynamicSliceOutput(1000);
+                    writeSerializedPage(sliceOutput, serializedPage);
+
+                    String encodedPage = BASE64_ENCODER.encodeToString(sliceOutput.slice().byteArray());
+                    pages.add(encodedPage);
+                }
+                if (rows > 0) {
+                    binaryData = pages.build();
+                }
+            }
+            else {
+                ImmutableList.Builder<RowIterable> pages = ImmutableList.builder();
+                while (bytes < targetResultBytes) {
+                    SerializedPage serializedPage = exchangeClient.pollPage();
+                    if (serializedPage == null) {
+                        break;
+                    }
+
+                    Page page = serde.deserialize(serializedPage);
+                    bytes += page.getLogicalSizeInBytes();
+                    rows += page.getPositionCount();
+                    pages.add(new RowIterable(session.toConnectorSession(), types, page));
+                }
+                if (rows > 0) {
+                    // client implementations do not properly handle empty list of data
+                    data = Iterables.concat(pages.build());
+                }
             }
             if (rows > 0) {
-                // client implementations do not properly handle empty list of data
-                data = Iterables.concat(pages.build());
                 hasProducedResult = true;
             }
         }
-        catch (Throwable cause) {
-            queryManager.failQuery(queryId, cause);
+        catch (Exception e) {
+            queryManager.failQuery(queryId, e);
         }
 
         // get the query info before returning
@@ -508,7 +559,7 @@ class Query
 
         URI nextResultsUri = null;
         if (nextToken.isPresent()) {
-            nextResultsUri = createNextResultsUri(scheme, uriInfo, nextToken.getAsLong());
+            nextResultsUri = createNextResultsUri(scheme, uriInfo, nextToken.getAsLong(), binaryResults);
         }
 
         // update catalog, schema, and path
@@ -542,6 +593,7 @@ class Query
                 nextResultsUri,
                 columns,
                 data,
+                binaryData,
                 toStatementStats(queryInfo),
                 toQueryError(queryInfo),
                 queryInfo.getWarnings(),
@@ -596,7 +648,7 @@ class Query
         return Futures.transformAsync(queryManager.getStateChange(queryId, currentState), this::queryDoneFuture, directExecutor());
     }
 
-    private synchronized URI createNextResultsUri(String scheme, UriInfo uriInfo, long nextToken)
+    private synchronized URI createNextResultsUri(String scheme, UriInfo uriInfo, long nextToken, boolean binaryResults)
     {
         UriBuilder uri = uriInfo.getBaseUriBuilder()
                 .scheme(scheme)
@@ -605,6 +657,9 @@ class Query
                 .path(String.valueOf(nextToken))
                 .replaceQuery("")
                 .queryParam("slug", this.slug);
+        if (binaryResults) {
+            uri.queryParam("binaryResults", "true");
+        }
         Optional<DataSize> targetResultSize = getTargetResultSize(session);
         if (targetResultSize.isPresent()) {
             uri = uri.queryParam("targetResultSize", targetResultSize.get());
@@ -650,6 +705,54 @@ class Query
 
         // no matching sub stage, so return this stage
         return stage.getSelf();
+    }
+
+    private boolean retryConditionsMet(QueryResults queryResults)
+    {
+        if (queryResults.getError() == null) {
+            return false;
+        }
+
+        if (!retryQueryWithHistoryBasedOptimizationEnabled(session)) {
+            if (!queryResults.getError().isRetriable()) {
+                return false;
+            }
+
+            // check if we have exceeded the global limit
+            retryCircuitBreaker.incrementFailure();
+            if (!retryCircuitBreaker.isRetryAllowed()) {
+                return false;
+            }
+
+            if (queryManager.getQueryRetryCount(queryId) >= getQueryRetryLimit(session)) {
+                return false;
+            }
+        }
+
+        if (hasProducedResult) {
+            return false;
+        }
+
+        // check if we have exceeded the local limit
+        if (queryManager.getQueryInfo(queryId).getQueryStats().getExecutionTime().toMillis() > getQueryRetryMaxExecutionTime(session).toMillis()) {
+            return false;
+        }
+
+        // no support for transactions
+        if (session.getTransactionId().isPresent() &&
+                !transactionManager.getOptionalTransactionInfo(session.getRequiredTransactionId()).map(TransactionInfo::isAutoCommitContext).orElse(true)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private Optional<Integer> getCurrentTopLevelPlanHash()
+    {
+        if (queryManager.getFullQueryInfo(queryId).getPlanCanonicalInfo().isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(queryManager.getFullQueryInfo(queryId).getPlanCanonicalInfo().get(0).getCanonicalPlan().getPlan().hashCode());
     }
 
     private static QueryError toQueryError(QueryInfo queryInfo)

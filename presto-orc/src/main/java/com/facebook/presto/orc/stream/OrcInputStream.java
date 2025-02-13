@@ -67,7 +67,6 @@ public final class OrcInputStream
     private int currentCompressedBlockOffset;
 
     private byte[] buffer;
-    private OrcDecompressor.OutputBuffer bufferAdapter;
     private int position;
     private int length;
     private int uncompressedOffset;
@@ -108,7 +107,6 @@ public final class OrcInputStream
             this.compressedSliceInput = sliceInput;
             this.buffer = new byte[0];
             this.compressedSliceInputRetainedSizeInBytes = sliceInputRetainedSizeInBytes;
-            this.bufferAdapter = createDecompressorOutputBufferAdapter();
         }
 
         memoryUsage.setBytes(getRetainedSizeInBytes());
@@ -127,12 +125,6 @@ public final class OrcInputStream
             return 0;
         }
         return length - position;
-    }
-
-    @Override
-    public boolean markSupported()
-    {
-        return false;
     }
 
     @Override
@@ -493,7 +485,7 @@ public final class OrcInputStream
                 readCompressed = compressedBuffer.length;
             }
 
-            length = decompressor.get().decompress(compressedBuffer, 0, readCompressed, bufferAdapter);
+            length = decompressor.get().decompress(compressedBuffer, 0, readCompressed, createDecompressorOutputBufferAdapter());
             position = 0;
         }
         uncompressedOffset = position;

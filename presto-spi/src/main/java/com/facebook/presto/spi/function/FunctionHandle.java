@@ -14,6 +14,9 @@
 package com.facebook.presto.spi.function;
 
 import com.facebook.presto.common.CatalogSchemaName;
+import com.facebook.presto.common.type.TypeSignature;
+
+import java.util.List;
 
 /**
  * FunctionHandle is a unique handle to identify the function implementation from namespaces.
@@ -22,4 +25,10 @@ import com.facebook.presto.common.CatalogSchemaName;
 public interface FunctionHandle
 {
     CatalogSchemaName getCatalogSchemaName();
+
+    String getName();
+
+    FunctionKind getKind();
+
+    List<TypeSignature> getArgumentTypes();
 }

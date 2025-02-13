@@ -25,6 +25,7 @@ import org.apache.parquet.hadoop.metadata.ColumnPath;
 import org.apache.parquet.internal.column.columnindex.OffsetIndex;
 import org.apache.parquet.internal.filter2.columnindex.ColumnIndexStore;
 import org.apache.parquet.internal.filter2.columnindex.RowRanges;
+import org.openjdk.jol.info.ClassLayout;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -34,6 +35,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+
+import static io.airlift.slice.SizeOf.sizeOf;
 
 public class ColumnIndexFilterUtils
 {
@@ -85,6 +88,8 @@ public class ColumnIndexFilterUtils
     private static class FilteredOffsetIndex
             implements OffsetIndex
     {
+        private static final int INSTANCE_SIZE = ClassLayout.parseClass(FilteredOffsetIndex.class).instanceSize();
+
         private final OffsetIndex offsetIndex;
         private final int[] indices;
 
@@ -129,11 +134,11 @@ public class ColumnIndexFilterUtils
         public String toString()
         {
             try (Formatter formatter = new Formatter()) {
-                formatter.format("%-12s  %20s  %16s  %20s\n", "", "offset", "compressed size", "first row index");
+                formatter.format("%-12s  %20s  %16s  %20s%n", "", "offset", "compressed size", "first row index");
                 for (int i = 0, n = offsetIndex.getPageCount(); i < n; ++i) {
                     int index = Arrays.binarySearch(indices, i);
                     boolean isHidden = index < 0;
-                    formatter.format("%spage-%-5d  %20d  %16d  %20d\n",
+                    formatter.format("%spage-%-5d  %20d  %16d  %20d%n",
                             isHidden ? "- " : "  ",
                             isHidden ? i : index,
                             offsetIndex.getOffset(i),
@@ -142,6 +147,11 @@ public class ColumnIndexFilterUtils
                 }
                 return formatter.toString();
             }
+        }
+
+        public long getRetainedSizeInBytes()
+        {
+            return INSTANCE_SIZE + sizeOf(indices);
         }
     }
 

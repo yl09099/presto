@@ -105,6 +105,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Collections.nCopies;
 import static java.util.stream.Collectors.toList;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
@@ -862,7 +863,9 @@ public class TestSelectiveOrcReader
 
         tester.testRoundTrip(createCharType(2), newArrayList(limit(cycle(ImmutableList.of("aa", "bb", "cc", "dd")), NUM_ROWS)), IS_NULL);
 
-        tester.testRoundTrip(createCharType(1), newArrayList(limit(cycle(ImmutableList.of("a", "b", "c", "d")), NUM_ROWS)),
+        tester.testRoundTrip(
+                createCharType(1),
+                newArrayList(limit(cycle(ImmutableList.of("a", "b", "c", "d")), NUM_ROWS)),
                 stringIn(false, "a", "b"),
                 stringIn(true, "a", "b"));
 
@@ -874,18 +877,26 @@ public class TestSelectiveOrcReader
                         .collect(toList()));
 
         // char with filter
+        // The values are padded with trailing spaces so that they are all 10 characters long
+        List<?> values = newArrayList(limit(cycle(ImmutableList.of(1, 3, 5, 7, 11, 13, 17)), NUM_ROWS)).stream()
+                .map(i -> toCharValue(i, 10))
+                .collect(toList());
+        // Test with filter c IN {'1','3'}. Note that the values should not have any paddings since the filter passed to the reader is without paddings for CHAR(n).
+        // The filter for the expected values is with the paddings because of the test limitations.
         tester.testRoundTrip(
                 CHAR_10,
-                newArrayList(limit(cycle(ImmutableList.of(1, 3, 5, 7, 11, 13, 17)), NUM_ROWS)).stream()
-                        .map(i -> toCharValue(i, 10))
-                        .collect(toList()),
-                stringIn(true, toCharValue(1, 10), toCharValue(3, 10)));
+                values,
+                ImmutableList.of(ImmutableMap.of(new Subfield("c"), stringIn(true, toCharValue(1, 1), toCharValue(3, 1)))),
+                ImmutableList.of(ImmutableMap.of(new Subfield("c"), stringIn(true, toCharValue(1, 10), toCharValue(3, 10)))));
 
         // char with 0 truncated length
         tester.testRoundTrip(CHAR_10, newArrayList(limit(cycle(toCharValue("", 10)), NUM_ROWS)));
 
-        tester.testRoundTrip(VARCHAR, newArrayList(concat(ImmutableList.of("a"), nCopies(9999, "123"), ImmutableList.of("b"), nCopies(9999, "123"))),
-                stringIn(false, "a", "b"));
+        tester.testRoundTrip(
+                VARCHAR,
+                newArrayList(concat(ImmutableList.of("a"), nCopies(9999, "123"), ImmutableList.of("b"), nCopies(9999, "123"))),
+                ImmutableList.of(ImmutableMap.of(new Subfield("c"), stringIn(false, "a", "b"))),
+                ImmutableList.of(ImmutableMap.of(new Subfield("c"), stringIn(false, "a", "b"))));
     }
 
     @Test
@@ -1007,19 +1018,84 @@ public class TestSelectiveOrcReader
     }
 
     @Test
+    public void testToZeroBasedColumnIndex() throws Exception
+    {
+        List<Type> types = ImmutableList.of(INTEGER, INTEGER, INTEGER);
+        TempFile tempFile = new TempFile();
+
+        List<Integer> column0 = ImmutableList.of(11111);
+        List<Integer> column1 = ImmutableList.of(33333);
+        List<Integer> column2 = ImmutableList.of(437856);
+        List<List<?>> values = ImmutableList.of(column0, column1, column2);
+
+        writeOrcColumnsPresto(tempFile.getFile(), DWRF, NONE, Optional.empty(), types, values, NOOP_WRITER_STATS);
+
+        Map<Integer, Type> includedColumns = ImmutableMap.of(3, INTEGER, 7, INTEGER, -100, INTEGER);
+        List<Integer> outputColumns = ImmutableList.of(-100, 7, 3);
+        try (OrcSelectiveRecordReader recordReader = createCustomOrcSelectiveRecordReader(
+                tempFile.getFile(),
+                DWRF.getOrcEncoding(),
+                OrcPredicate.TRUE,
+                types,
+                MAX_BATCH_SIZE,
+                ImmutableMap.of(),
+                OrcReaderSettings.builder().build().getFilterFunctions(),
+                OrcReaderSettings.builder().build().getFilterFunctionInputMapping(),
+                OrcReaderSettings.builder().build().getRequiredSubfields(),
+                ImmutableMap.of(),
+                ImmutableMap.of(),
+                includedColumns,
+                outputColumns,
+                false,
+                new TestingHiveOrcAggregatedMemoryContext(),
+                false)) {
+            assertEquals(recordReader.toZeroBasedColumnIndex(3).getAsInt(), 2);
+            assertEquals(recordReader.toZeroBasedColumnIndex(7).getAsInt(), 1);
+            assertEquals(recordReader.toZeroBasedColumnIndex(-100).getAsInt(), 0);
+            assertFalse(recordReader.toZeroBasedColumnIndex(1).isPresent());
+        }
+    }
+
+    @Test
     public void testOutputNotRequired()
+            throws Exception
+    {
+        List<String> inputValues = newArrayList(limit(cycle(ImmutableList.of("A", "B", "C")), NUM_ROWS));
+        Map<Subfield, TupleDomainFilter> filters = ImmutableMap.of(new Subfield("c"), stringIn(true, "A", "B", "C"));
+        verifyOutputNotRequired(inputValues, filters, inputValues);
+    }
+
+    @Test
+    public void testOutputNotRequiredNonNullFilterNulls()
+            throws Exception
+    {
+        List<String> inputValues = newArrayList(limit(cycle(Arrays.asList("A", null)), NUM_ROWS));
+        List<String> expectedValues = newArrayList(limit(cycle(Arrays.asList("A")), (NUM_ROWS + 1) / 2));
+
+        Map<Subfield, TupleDomainFilter> filters = ImmutableMap.of(new Subfield("c"), IS_NOT_NULL);
+        verifyOutputNotRequired(inputValues, filters, expectedValues);
+    }
+
+    @Test
+    public void testOutputNotRequiredNonNullFilterNoNulls()
+            throws Exception
+    {
+        List<String> inputValues = newArrayList(limit(cycle(Arrays.asList("A", "B", "C")), NUM_ROWS));
+
+        Map<Subfield, TupleDomainFilter> filters = ImmutableMap.of(new Subfield("c"), IS_NOT_NULL);
+        verifyOutputNotRequired(inputValues, filters, inputValues);
+    }
+
+    private void verifyOutputNotRequired(List<String> inputValues, Map<Subfield, TupleDomainFilter> filters, List<String> expectedValues)
             throws Exception
     {
         List<Type> types = ImmutableList.of(VARCHAR, VARCHAR);
         TempFile tempFile = new TempFile();
 
-        List<String> varcharDirectValues = newArrayList(limit(cycle(ImmutableList.of("A", "B", "C")), NUM_ROWS));
-        List<List<?>> values = ImmutableList.of(varcharDirectValues, varcharDirectValues);
-
+        List<List<?>> values = ImmutableList.of(inputValues, inputValues);
         writeOrcColumnsPresto(tempFile.getFile(), DWRF, NONE, Optional.empty(), types, values, NOOP_WRITER_STATS);
 
         OrcPredicate orcPredicate = createOrcPredicate(types, values, DWRF, false);
-        Map<Subfield, TupleDomainFilter> filters = ImmutableMap.of(new Subfield("c"), stringIn(true, "A", "B", "C")); //ImmutableMap.of(1, stringIn(true, "10", "11"));
         Map<Integer, Type> includedColumns = IntStream.range(0, types.size())
                 .boxed()
                 .collect(toImmutableMap(Function.identity(), types::get));
@@ -1062,11 +1138,11 @@ public class TestSelectiveOrcReader
                 page.getLoadedPage();
 
                 // The output block should be the second block
-                assertBlockPositions(page.getBlock(0), varcharDirectValues.subList(rowsProcessed, rowsProcessed + positionCount));
+                assertBlockPositions(page.getBlock(0), expectedValues.subList(rowsProcessed, rowsProcessed + positionCount));
 
                 rowsProcessed += positionCount;
             }
-            assertEquals(rowsProcessed, NUM_ROWS);
+            assertEquals(rowsProcessed, expectedValues.size());
         }
     }
 
@@ -1416,7 +1492,12 @@ public class TestSelectiveOrcReader
     {
         assertEquals(block.getPositionCount(), expectedValues.size());
         for (int position = 0; position < block.getPositionCount(); position++) {
-            assertEquals(block.getSlice(position, 0, block.getSliceLength(position)), Slices.wrappedBuffer(expectedValues.get(position).getBytes()));
+            if (expectedValues.get(position) == null) {
+                assertTrue(block.isNull(position));
+            }
+            else {
+                assertEquals(block.getSlice(position, 0, block.getSliceLength(position)), Slices.wrappedBuffer(expectedValues.get(position).getBytes()));
+            }
         }
     }
 }

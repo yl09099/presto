@@ -576,7 +576,7 @@ public class TDigest
 
         checkArgument(weight[n - 1] > 1, "Expected weight[n - 1] > 1, but was %s", weight[n - 1]);
         checkArgument(index <= totalWeight, "Expected index <= totalWeight, but index:%s > totalWeight:%s", index, totalWeight);
-        checkArgument(index >= totalWeight - weight[n - 1] / 2, "Expected index >= totalWeight - weight[n - 1] / 2, but" +
+        checkArgument(index >= totalWeight - weight[n - 1] / 2, "Expected index >= totalWeight - weight[n - 1] / 2, but " +
                 "index:%s < %s", index, totalWeight - weight[n - 1] / 2);
 
         // weightSoFar = totalWeight - weight[n - 1] / 2 (very nearly)
@@ -772,7 +772,7 @@ public class TDigest
 
     public String toString()
     {
-        return format("TDigest\nCompression:%s\nCentroid Count:%s\nSize:%s\nMin:%s Median:%s Max:%s",
+        return format("TDigest%nCompression:%s%nCentroid Count:%s%nSize:%s%nMin:%s Median:%s Max:%s",
                 publicCompression, activeCentroids, totalWeight, min, getQuantile(0.5), max);
     }
 }

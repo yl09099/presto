@@ -32,13 +32,16 @@ public class SecurityConfig
     private static final Splitter SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
 
     private List<AuthenticationType> authenticationTypes = ImmutableList.of();
+    private boolean allowForwardedHttps;
+    private boolean authorizedIdentitySelectionEnabled;
 
     public enum AuthenticationType
     {
         CERTIFICATE,
         KERBEROS,
         PASSWORD,
-        JWT
+        JWT,
+        CUSTOM
     }
 
     @NotNull
@@ -54,7 +57,7 @@ public class SecurityConfig
     }
 
     @Config("http-server.authentication.type")
-    @ConfigDescription("Authentication types (supported types: CERTIFICATE, KERBEROS, PASSWORD, JWT)")
+    @ConfigDescription("Authentication types (supported types: CERTIFICATE, KERBEROS, PASSWORD, JWT, CUSTOM)")
     public SecurityConfig setAuthenticationTypes(String types)
     {
         if (types == null) {
@@ -66,5 +69,31 @@ public class SecurityConfig
                 .map(AuthenticationType::valueOf)
                 .collect(toImmutableList());
         return this;
+    }
+
+    public boolean getAllowForwardedHttps()
+    {
+        return allowForwardedHttps;
+    }
+
+    @Config("http-server.authentication.allow-forwarded-https")
+    @ConfigDescription("Allow forwarded HTTPS requests")
+    public SecurityConfig setAllowForwardedHttps(boolean allowForwardedHttps)
+    {
+        this.allowForwardedHttps = allowForwardedHttps;
+        return this;
+    }
+
+    @Config("permissions.authorized-identity-selection-enabled")
+    @ConfigDescription("Authorized identity selection enabled")
+    public SecurityConfig setAuthorizedIdentitySelectionEnabled(boolean authorizedIdentitySelectionEnabled)
+    {
+        this.authorizedIdentitySelectionEnabled = authorizedIdentitySelectionEnabled;
+        return this;
+    }
+
+    public boolean isAuthorizedIdentitySelectionEnabled()
+    {
+        return authorizedIdentitySelectionEnabled;
     }
 }

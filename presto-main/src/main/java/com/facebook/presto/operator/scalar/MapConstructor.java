@@ -30,10 +30,12 @@ import com.facebook.presto.metadata.BoundVariables;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.SqlScalarFunction;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.function.ComplexTypeFunctionDescriptor;
 import com.facebook.presto.spi.function.FunctionKind;
 import com.facebook.presto.spi.function.Signature;
 import com.facebook.presto.spi.function.SqlFunctionVisibility;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 
 import java.lang.invoke.MethodHandle;
 import java.util.Optional;
@@ -43,7 +45,7 @@ import static com.facebook.presto.common.block.MethodHandleUtil.nativeValueGette
 import static com.facebook.presto.common.function.OperatorType.INDETERMINATE;
 import static com.facebook.presto.common.type.StandardTypes.MAP;
 import static com.facebook.presto.common.type.TypeUtils.readNativeValue;
-import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.DEFAULT_NAMESPACE;
+import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.JAVA_BUILTIN_NAMESPACE;
 import static com.facebook.presto.operator.scalar.ScalarFunctionImplementationChoice.ArgumentProperty.valueTypeArgumentProperty;
 import static com.facebook.presto.operator.scalar.ScalarFunctionImplementationChoice.NullConvention.RETURN_NULL_ON_NULL;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
@@ -61,6 +63,8 @@ public final class MapConstructor
         extends SqlScalarFunction
 {
     public static final MapConstructor MAP_CONSTRUCTOR = new MapConstructor();
+
+    private final ComplexTypeFunctionDescriptor descriptor;
 
     private static final MethodHandle METHOD_HANDLE = methodHandle(
             MapConstructor.class,
@@ -80,13 +84,19 @@ public final class MapConstructor
     public MapConstructor()
     {
         super(new Signature(
-                QualifiedObjectName.valueOf(DEFAULT_NAMESPACE, "map"),
+                QualifiedObjectName.valueOf(JAVA_BUILTIN_NAMESPACE, "map"),
                 FunctionKind.SCALAR,
                 ImmutableList.of(comparableTypeParameter("K"), typeVariable("V")),
                 ImmutableList.of(),
                 TypeSignature.parseTypeSignature("map(K,V)"),
                 ImmutableList.of(TypeSignature.parseTypeSignature("array(K)"), TypeSignature.parseTypeSignature("array(V)")),
                 false));
+        descriptor = new ComplexTypeFunctionDescriptor(
+                false,
+                ImmutableList.of(),
+                Optional.of(ImmutableSet.of(1)),
+                Optional.of(ComplexTypeFunctionDescriptor::allSubfieldsRequired),
+                getSignature());
     }
 
     @Override
@@ -105,6 +115,12 @@ public final class MapConstructor
     public String getDescription()
     {
         return DESCRIPTION;
+    }
+
+    @Override
+    public ComplexTypeFunctionDescriptor getComplexTypeFunctionDescriptor()
+    {
+        return descriptor;
     }
 
     @Override
@@ -152,7 +168,7 @@ public final class MapConstructor
             }
 
             if (keyType.getJavaType() == Block.class) {
-                // If it's nto primitive or string, we need to look for nulls in the block.
+                // If it's not primitive or string, we need to look for nulls in the block.
                 Object keyObject = readNativeValue(mapType.getKeyType(), keyBlock, i);
                 try {
                     if ((boolean) keyIndeterminate.invoke(keyObject, false)) {

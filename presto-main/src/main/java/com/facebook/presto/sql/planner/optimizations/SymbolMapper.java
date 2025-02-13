@@ -22,22 +22,22 @@ import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.AggregationNode.Aggregation;
 import com.facebook.presto.spi.plan.Ordering;
 import com.facebook.presto.spi.plan.OrderingScheme;
+import com.facebook.presto.spi.plan.PartitioningScheme;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.spi.plan.StatisticAggregations;
+import com.facebook.presto.spi.plan.StatisticAggregationsDescriptor;
+import com.facebook.presto.spi.plan.TableFinishNode;
+import com.facebook.presto.spi.plan.TableWriterNode;
 import com.facebook.presto.spi.plan.TopNNode;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.planner.PartitioningScheme;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.TypeProvider;
-import com.facebook.presto.sql.planner.plan.StatisticAggregations;
-import com.facebook.presto.sql.planner.plan.StatisticAggregationsDescriptor;
 import com.facebook.presto.sql.planner.plan.StatisticsWriterNode;
-import com.facebook.presto.sql.planner.plan.TableFinishNode;
 import com.facebook.presto.sql.planner.plan.TableWriterMergeNode;
-import com.facebook.presto.sql.planner.plan.TableWriterNode;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.ExpressionRewriter;
 import com.facebook.presto.sql.tree.ExpressionTreeRewriter;
@@ -56,11 +56,10 @@ import java.util.Set;
 import static com.facebook.presto.spi.StandardWarningCode.MULTIPLE_ORDER_BY;
 import static com.facebook.presto.spi.plan.AggregationNode.groupingSets;
 import static com.facebook.presto.sql.analyzer.ExpressionTreeUtils.getNodeLocation;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToRowExpression;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.isExpression;
+import static com.facebook.presto.sql.planner.optimizations.PartitioningUtils.translateVariable;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Objects.requireNonNull;
 
 public class SymbolMapper
@@ -126,9 +125,6 @@ public class SymbolMapper
 
     public RowExpression map(RowExpression value)
     {
-        if (isExpression(value)) {
-            return castToRowExpression(map(castToExpression(value)));
-        }
         return RowExpressionTreeRewriter.rewriteWith(new RowExpressionRewriter<Void>()
         {
             @Override
@@ -190,7 +186,8 @@ public class SymbolMapper
                 mapAndDistinctVariable(node.getPreGroupedVariables()),
                 node.getStep(),
                 node.getHashVariable().map(this::map),
-                node.getGroupIdVariable().map(this::map));
+                node.getGroupIdVariable().map(this::map),
+                node.getAggregationId());
     }
 
     private Aggregation map(Aggregation aggregation)
@@ -244,9 +241,13 @@ public class SymbolMapper
                 .map(this::map)
                 .collect(toImmutableList());
 
+        Set<VariableReferenceExpression> notNullColumnVariables = node.getNotNullColumnVariables().stream()
+                .map(this::map)
+                .collect(toImmutableSet());
         return new TableWriterNode(
                 source.getSourceLocation(),
                 newNodeId,
+                node.getStatsEquivalentPlanNode(),
                 source,
                 node.getTarget(),
                 map(node.getRowCountVariable()),
@@ -254,10 +255,11 @@ public class SymbolMapper
                 map(node.getTableCommitContextVariable()),
                 columns,
                 node.getColumnNames(),
-                node.getNotNullColumnVariables(),
+                notNullColumnVariables,
                 node.getTablePartitioningScheme().map(partitioningScheme -> canonicalize(partitioningScheme, source)),
-                node.getPreferredShufflePartitioningScheme().map(partitioningScheme -> canonicalize(partitioningScheme, source)),
-                node.getStatisticsAggregation().map(this::map));
+                node.getStatisticsAggregation().map(this::map),
+                node.getTaskCountIfScaledWriter(),
+                node.getIsTemporaryTableWriter());
     }
 
     public StatisticsWriterNode map(StatisticsWriterNode node, PlanNode source)
@@ -281,7 +283,8 @@ public class SymbolMapper
                 node.getTarget(),
                 map(node.getRowCountVariable()),
                 node.getStatisticsAggregation().map(this::map),
-                node.getStatisticsAggregationDescriptor().map(descriptor -> descriptor.map(this::map)));
+                node.getStatisticsAggregationDescriptor().map(descriptor -> descriptor.map(this::map)),
+                node.getCteMaterializationInfo());
     }
 
     public TableWriterMergeNode map(TableWriterMergeNode node, PlanNode source)
@@ -298,11 +301,12 @@ public class SymbolMapper
 
     private PartitioningScheme canonicalize(PartitioningScheme scheme, PlanNode source)
     {
-        return new PartitioningScheme(
-                scheme.getPartitioning().translateVariable(this::map),
+        return new PartitioningScheme(translateVariable(scheme.getPartitioning(), this::map),
                 mapAndDistinctVariable(source.getOutputVariables()),
                 scheme.getHashColumn().map(this::map),
                 scheme.isReplicateNullsAndAny(),
+                scheme.isScaleWriters(),
+                scheme.getEncoding(),
                 scheme.getBucketToPartition());
     }
 

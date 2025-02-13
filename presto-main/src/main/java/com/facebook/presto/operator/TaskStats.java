@@ -159,13 +159,13 @@ public class TaskStats
 
             @JsonProperty("cumulativeUserMemory") double cumulativeUserMemory,
             @JsonProperty("cumulativeTotalMemory") double cumulativeTotalMemory,
-            @JsonProperty("userMemoryReservation") long userMemoryReservationInBytes,
+            @JsonProperty("userMemoryReservationInBytes") long userMemoryReservationInBytes,
             @JsonProperty("revocableMemoryReservationInBytes") long revocableMemoryReservationInBytes,
             @JsonProperty("systemMemoryReservationInBytes") long systemMemoryReservationInBytes,
 
             @JsonProperty("peakTotalMemoryInBytes") long peakTotalMemoryInBytes,
             @JsonProperty("peakUserMemoryInBytes") long peakUserMemoryInBytes,
-            @JsonProperty("peakNodeTotalMemoryInbytes") long peakNodeTotalMemoryInBytes,
+            @JsonProperty("peakNodeTotalMemoryInBytes") long peakNodeTotalMemoryInBytes,
 
             @JsonProperty("totalScheduledTimeInNanos") long totalScheduledTimeInNanos,
             @JsonProperty("totalCpuTimeInNanos") long totalCpuTimeInNanos,
@@ -206,14 +206,14 @@ public class TaskStats
         this.queuedDrivers = queuedDrivers;
         checkArgument(queuedPartitionedDrivers >= 0, "queuedPartitionedDrivers is negative");
         this.queuedPartitionedDrivers = queuedPartitionedDrivers;
-        checkArgument(queuedPartitionedSplitsWeight >= 0, "queuedPartitionedSplitsWeight must be positive");
+        checkArgument(queuedPartitionedSplitsWeight >= 0, "queuedPartitionedSplitsWeight must be non-negative");
         this.queuedPartitionedSplitsWeight = queuedPartitionedSplitsWeight;
 
         checkArgument(runningDrivers >= 0, "runningDrivers is negative");
         this.runningDrivers = runningDrivers;
         checkArgument(runningPartitionedDrivers >= 0, "runningPartitionedDrivers is negative");
         this.runningPartitionedDrivers = runningPartitionedDrivers;
-        checkArgument(runningPartitionedSplitsWeight >= 0, "runningPartitionedSplitsWeight must be positive");
+        checkArgument(runningPartitionedSplitsWeight >= 0, "runningPartitionedSplitsWeight must be non-negative");
         this.runningPartitionedSplitsWeight = runningPartitionedSplitsWeight;
 
         checkArgument(blockedDrivers >= 0, "blockedDrivers is negative");

@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.sql.planner.iterative.rule;
 
+import com.facebook.presto.spi.plan.JoinType;
 import com.facebook.presto.spi.plan.ProjectNode;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.TestTableConstraintsConnectorFactory;
@@ -20,7 +21,6 @@ import com.facebook.presto.sql.planner.assertions.ExpectedValueProvider;
 import com.facebook.presto.sql.planner.iterative.properties.LogicalPropertiesProviderImpl;
 import com.facebook.presto.sql.planner.iterative.rule.test.BaseRuleTest;
 import com.facebook.presto.sql.planner.iterative.rule.test.RuleTester;
-import com.facebook.presto.sql.planner.plan.JoinNode;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.facebook.presto.sql.tree.FunctionCall;
 import com.google.common.collect.ImmutableList;
@@ -53,7 +53,7 @@ public class TestRedundantAggregateDistinctRemoval
     public final void setUp()
     {
         tester = new RuleTester(emptyList(), ImmutableMap.of(USE_MARK_DISTINCT, Boolean.toString(false), "exploit_constraints", Boolean.toString(true)), Optional.of(1), new TestTableConstraintsConnectorFactory(1));
-        logicalPropertiesProvider = new LogicalPropertiesProviderImpl(new FunctionResolution(tester.getMetadata().getFunctionAndTypeManager()));
+        logicalPropertiesProvider = new LogicalPropertiesProviderImpl(new FunctionResolution(tester.getMetadata().getFunctionAndTypeManager().getFunctionAndTypeResolver()));
     }
 
     @Test
@@ -67,6 +67,17 @@ public class TestRedundantAggregateDistinctRemoval
         //linenumber, orderkey is a unique key, so count's distinct can be removed
         tester().assertThat(ImmutableSet.of(new RemoveRedundantAggregateDistinct()), logicalPropertiesProvider)
                 .on("SELECT count(distinct linenumber), avg(distinct tax) FROM lineitem GROUP BY orderkey")
+                .matches(output(
+                        node(ProjectNode.class,
+                                aggregation(aggregations,
+                                        tableScan("lineitem")))));
+
+        aggregations = ImmutableMap.of(
+                "count", functionCall("count", false, ImmutableList.of(anySymbol())),
+                "avg", functionCall("avg", false, ImmutableList.of(anySymbol())));
+
+        tester().assertThat(ImmutableSet.of(new RemoveRedundantAggregateDistinct()), logicalPropertiesProvider)
+                .on("SELECT count(distinct linenumber), avg(tax) FROM lineitem GROUP BY orderkey")
                 .matches(output(
                         node(ProjectNode.class,
                                 aggregation(aggregations,
@@ -120,6 +131,17 @@ public class TestRedundantAggregateDistinctRemoval
                         node(ProjectNode.class,
                                 aggregation(aggregations,
                                         tableScan("lineitem")))));
+
+        aggregations = ImmutableMap.of(
+                "count", functionCall("count", true, ImmutableList.of(anySymbol())),
+                "avg", functionCall("avg", true, ImmutableList.of(anySymbol())));
+
+        // Multiple grouping sets, so distinct's cannot be removed, even for unique groups
+        tester().assertThat(ImmutableSet.of(new RemoveRedundantAggregateDistinct()), logicalPropertiesProvider)
+                .on("SELECT count(distinct linenumber), avg(distinct tax) FROM lineitem GROUP BY GROUPING SETS ((orderkey), (partkey))")
+                .matches(anyTree(
+                        aggregation(aggregations,
+                                anyTree(tableScan("lineitem")))));
     }
 
     @Test
@@ -131,7 +153,7 @@ public class TestRedundantAggregateDistinctRemoval
                 .matches(output(anyTree(
                         aggregation(
                                 aggregations,
-                                join(JoinNode.Type.INNER,
+                                join(JoinType.INNER,
                                         ImmutableList.of(equiJoinClause("custkey", "custkey_0")),
                                         tableScan("orders", ImmutableMap.of("totalprice", "totalprice", "orderkey", "orderkey", "custkey", "custkey")),
                                         tableScan("customer", ImmutableMap.of("custkey_0", "custkey")))))));

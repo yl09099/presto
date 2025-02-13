@@ -1,7 +1,7 @@
 	{
 	  "id": "0",
 	  "root": {
-	    "@type": "com.facebook.presto.sql.planner.plan.OutputNode",
+	    "@type": ".OutputNode",
 	    "id": "9",
 	    "source": {
 	      "@type": ".FilterNode",
@@ -34,7 +34,9 @@
 	              "type": "varchar(1)"
 	            }
 	          ],
-	          "replicateNullsAndAny": false
+	          "replicateNullsAndAny": false,
+			  "scaleWriters": false,
+              "encoding":"COLUMNAR"
 	        },
 	        "sources": [
 	          {
@@ -202,6 +204,8 @@
 	      }
 	    ],
 	    "replicateNullsAndAny": false,
+		"scaleWriters": false,
+		"encoding":"COLUMNAR",
 	    "bucketToPartition": [
 	      0
 	    ]

@@ -23,10 +23,8 @@ import com.facebook.presto.common.type.NamedTypeSignature;
 import com.facebook.presto.common.type.RealType;
 import com.facebook.presto.common.type.RowFieldName;
 import com.facebook.presto.common.type.SmallintType;
-import com.facebook.presto.common.type.SqlTimestamp;
 import com.facebook.presto.common.type.SqlVarbinary;
 import com.facebook.presto.common.type.StandardTypes;
-import com.facebook.presto.common.type.TimeZoneKey;
 import com.facebook.presto.common.type.TinyintType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.common.type.TypeSignatureParameter;
@@ -39,7 +37,6 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
 import org.testng.annotations.Test;
 
-import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -65,10 +62,8 @@ import static com.facebook.presto.orc.TestMapFlatBatchStreamReader.ExpectedValue
 import static com.facebook.presto.orc.TestingOrcPredicate.createOrcPredicate;
 import static com.facebook.presto.testing.TestingConnectorSession.SESSION;
 import static com.google.common.collect.Iterators.advance;
-import static com.google.common.io.Resources.getResource;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.lang.Math.toIntExact;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 
@@ -440,7 +435,7 @@ public class TestMapFlatBatchStreamReader
             throws Exception
     {
         OrcDataSource orcDataSource = new FileOrcDataSource(
-                new File(getResource(testOrcFileName).getFile()),
+                OrcReaderTestingUtils.getResourceFile(testOrcFileName),
                 new DataSize(1, MEGABYTE),
                 new DataSize(1, MEGABYTE),
                 new DataSize(1, MEGABYTE),
@@ -502,11 +497,6 @@ public class TestMapFlatBatchStreamReader
     private static boolean intToBoolean(int i)
     {
         return i % 2 == 0;
-    }
-
-    private static SqlTimestamp intToTimestamp(int i)
-    {
-        return new SqlTimestamp(i, TimeZoneKey.UTC_KEY, MILLISECONDS);
     }
 
     private static List<Integer> intToList(int i)

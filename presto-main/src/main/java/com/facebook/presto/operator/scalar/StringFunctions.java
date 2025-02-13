@@ -267,13 +267,15 @@ public final class StringFunctions
             return 1;
         }
 
+        String stringUtf8 = string.toStringUtf8();
+        String substringUtf8 = substring.toStringUtf8();
         int foundInstances = 0;
         // set the initial index just after the end of the string
         // this is to allow for the initial index decrement
-        int index = string.length();
+        int index = stringUtf8.length();
         do {
             // step backwards through string
-            index = string.toStringUtf8().lastIndexOf(substring.toStringUtf8(), index - 1);
+            index = stringUtf8.lastIndexOf(substringUtf8, index - 1);
             if (index < 0) {
                 return 0;
             }
@@ -281,7 +283,9 @@ public final class StringFunctions
         }
         while (foundInstances < instance);
 
-        return countCodePoints(string, 0, index) + 1;
+        // stringPositionFromStart function returns countCodePoints(string, 0, index) + 1 because it directly works on Slice and use indexOf function of Slice,
+        // Here we convert Slice to Utf8 string call lastIndexOf function of String to get index, hence directly return index+1
+        return index + 1;
     }
 
     @Description("suffix starting at given index")
@@ -917,5 +921,33 @@ public final class StringFunctions
         result.setBytes(leftLength, right);
 
         return result;
+    }
+
+    @SqlNullable
+    @Description("Returns whether the first string starts with the second")
+    @ScalarFunction("starts_with")
+    @LiteralParameters({"x", "y"})
+    @SqlType(StandardTypes.BOOLEAN)
+    public static Boolean startsWith(@SqlType("varchar(x)") Slice x, @SqlType("varchar(y)") Slice y)
+    {
+        if (x.length() < y.length()) {
+            return false;
+        }
+
+        return x.equals(0, y.length(), y, 0, y.length());
+    }
+
+    @SqlNullable
+    @Description("Returns whether the first string ends with the second")
+    @ScalarFunction("ends_with")
+    @LiteralParameters({"x", "y"})
+    @SqlType(StandardTypes.BOOLEAN)
+    public static Boolean endsWith(@SqlType("varchar(x)") Slice x, @SqlType("varchar(y)") Slice y)
+    {
+        if (x.length() < y.length()) {
+            return false;
+        }
+
+        return x.equals(x.length() - y.length(), y.length(), y, 0, y.length());
     }
 }

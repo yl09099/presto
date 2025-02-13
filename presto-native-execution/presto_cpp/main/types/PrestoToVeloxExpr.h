@@ -14,37 +14,39 @@
 #pragma once
 
 #include <stdexcept>
-#include "presto_cpp/presto_protocol/presto_protocol.h"
+#include "presto_cpp/main/common/Configs.h"
+#include "presto_cpp/main/common/Utils.h"
+#include "presto_cpp/main/types/TypeParser.h"
+#include "presto_cpp/presto_protocol/core/presto_protocol_core.h"
 #include "velox/core/Expressions.h"
-
-using namespace facebook::velox::core;
 
 namespace facebook::presto {
 
 class VeloxExprConverter {
  public:
-  explicit VeloxExprConverter(velox::memory::MemoryPool* pool) : pool_(pool) {}
+  VeloxExprConverter(velox::memory::MemoryPool* pool, TypeParser* typeParser)
+      : pool_(pool), typeParser_(typeParser) {}
 
-  std::shared_ptr<const ConstantTypedExpr> toVeloxExpr(
+  std::shared_ptr<const velox::core::ConstantTypedExpr> toVeloxExpr(
       std::shared_ptr<protocol::ConstantExpression> pexpr) const;
 
-  std::shared_ptr<const ITypedExpr> toVeloxExpr(
+  velox::core::TypedExprPtr toVeloxExpr(
       std::shared_ptr<protocol::SpecialFormExpression> pexpr) const;
 
-  std::shared_ptr<const FieldAccessTypedExpr> toVeloxExpr(
+  velox::core::FieldAccessTypedExprPtr toVeloxExpr(
       std::shared_ptr<protocol::VariableReferenceExpression> pexpr) const;
 
-  std::shared_ptr<const LambdaTypedExpr> toVeloxExpr(
+  std::shared_ptr<const velox::core::LambdaTypedExpr> toVeloxExpr(
       std::shared_ptr<protocol::LambdaDefinitionExpression> pexpr) const;
 
   // TODO Remove when protocols are updated to use shared_ptr
-  std::shared_ptr<const FieldAccessTypedExpr> toVeloxExpr(
+  std::shared_ptr<const velox::core::FieldAccessTypedExpr> toVeloxExpr(
       const protocol::VariableReferenceExpression& pexpr) const;
 
-  std::shared_ptr<const ITypedExpr> toVeloxExpr(
+  velox::core::TypedExprPtr toVeloxExpr(
       const protocol::CallExpression& pexpr) const;
 
-  std::shared_ptr<const ITypedExpr> toVeloxExpr(
+  velox::core::TypedExprPtr toVeloxExpr(
       std::shared_ptr<protocol::RowExpression> pexpr) const;
 
   // Deserializes Presto Block of a scalar type into a variant.
@@ -53,16 +55,17 @@ class VeloxExprConverter {
       const protocol::Block& block) const;
 
  private:
-  std::vector<std::shared_ptr<const ITypedExpr>> toVeloxExpr(
+  std::vector<velox::core::TypedExprPtr> toVeloxExpr(
       std::vector<std::shared_ptr<protocol::RowExpression>> pexpr) const;
 
-  std::optional<std::shared_ptr<const ITypedExpr>> tryConvertLike(
+  std::optional<velox::core::TypedExprPtr> tryConvertLike(
       const protocol::CallExpression& pexpr) const;
 
-  std::optional<std::shared_ptr<const ITypedExpr>> tryConvertDate(
+  std::optional<velox::core::TypedExprPtr> tryConvertDate(
       const protocol::CallExpression& pexpr) const;
 
-  velox::memory::MemoryPool* pool_;
+  velox::memory::MemoryPool* const pool_;
+  TypeParser* const typeParser_;
 };
 
 } // namespace facebook::presto

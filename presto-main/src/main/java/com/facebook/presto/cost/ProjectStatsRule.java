@@ -24,9 +24,9 @@ import com.facebook.presto.sql.planner.iterative.Lookup;
 import java.util.Map;
 import java.util.Optional;
 
+import static com.facebook.presto.spi.statistics.SourceInfo.ConfidenceLevel;
+import static com.facebook.presto.spi.statistics.SourceInfo.ConfidenceLevel.LOW;
 import static com.facebook.presto.sql.planner.plan.Patterns.project;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToExpression;
-import static com.facebook.presto.sql.relational.OriginalExpressionUtils.isExpression;
 import static java.util.Objects.requireNonNull;
 
 public class ProjectStatsRule
@@ -52,18 +52,16 @@ public class ProjectStatsRule
     protected Optional<PlanNodeStatsEstimate> doCalculate(ProjectNode node, StatsProvider statsProvider, Lookup lookup, Session session, TypeProvider types)
     {
         PlanNodeStatsEstimate sourceStats = statsProvider.getStats(node.getSource());
+
+        boolean noChange = noChangeToSourceColumns(node);
+        ConfidenceLevel newConfidence = noChange ? sourceStats.confidenceLevel() : LOW;
         PlanNodeStatsEstimate.Builder calculatedStats = PlanNodeStatsEstimate.builder()
                 .setOutputRowCount(sourceStats.getOutputRowCount())
-                .setConfident(sourceStats.isConfident() && noChangeToSourceColumns(node));
+                .setConfidence(newConfidence);
 
         for (Map.Entry<VariableReferenceExpression, RowExpression> entry : node.getAssignments().entrySet()) {
             RowExpression expression = entry.getValue();
-            if (isExpression(expression)) {
-                calculatedStats.addVariableStatistics(entry.getKey(), scalarStatsCalculator.calculate(castToExpression(expression), sourceStats, session, types));
-            }
-            else {
-                calculatedStats.addVariableStatistics(entry.getKey(), scalarStatsCalculator.calculate(expression, sourceStats, session));
-            }
+            calculatedStats.addVariableStatistics(entry.getKey(), scalarStatsCalculator.calculate(expression, sourceStats, session));
         }
         return Optional.of(calculatedStats.build());
     }

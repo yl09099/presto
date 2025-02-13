@@ -22,7 +22,6 @@ import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
 import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
-import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.assertions.BasePlanTest;
 import com.facebook.presto.sql.planner.iterative.rule.test.PlanBuilder;
 import com.facebook.presto.testing.TestingTransactionHandle;
@@ -42,16 +41,14 @@ import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.plan.AggregationNode.Step.FINAL;
 import static com.facebook.presto.spi.plan.AggregationNode.Step.PARTIAL;
 import static com.facebook.presto.spi.plan.AggregationNode.groupingSets;
+import static com.facebook.presto.spi.plan.JoinType.INNER;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.LOCAL;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE_STREAMING;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.REPARTITION;
-import static com.facebook.presto.sql.planner.plan.JoinNode.Type.INNER;
 
 public class TestValidateAggregationsWithDefaultValues
         extends BasePlanTest
 {
-    private static final SqlParser SQL_PARSER = new SqlParser();
-
     private Metadata metadata;
     private PlanBuilder builder;
     private VariableReferenceExpression variable;
@@ -186,12 +183,12 @@ public class TestValidateAggregationsWithDefaultValues
         validatePlan(root, true);
     }
 
-    private void validatePlan(PlanNode root, boolean forceSingleNode)
+    private void validatePlan(PlanNode root, boolean noExchange)
     {
         getQueryRunner().inTransaction(session -> {
             // metadata.getCatalogHandle() registers the catalog for the transaction
             session.getCatalog().ifPresent(catalog -> metadata.getCatalogHandle(session, catalog));
-            new ValidateAggregationsWithDefaultValues(forceSingleNode).validate(root, session, metadata, SQL_PARSER, builder.getTypes(), WarningCollector.NOOP);
+            new ValidateAggregationsWithDefaultValues(noExchange, false).validate(root, session, metadata, WarningCollector.NOOP);
             return null;
         });
     }

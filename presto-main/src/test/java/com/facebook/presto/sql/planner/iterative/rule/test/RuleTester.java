@@ -15,7 +15,7 @@ package com.facebook.presto.sql.planner.iterative.rule.test;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.security.AccessControl;
+import com.facebook.presto.metadata.SessionPropertyManager;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.Plugin;
@@ -23,8 +23,10 @@ import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.connector.ConnectorFactory;
 import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.plan.LogicalPropertiesProvider;
+import com.facebook.presto.spi.security.AccessControl;
 import com.facebook.presto.split.PageSourceManager;
 import com.facebook.presto.split.SplitManager;
+import com.facebook.presto.sql.expressions.ExpressionOptimizerManager;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.RuleStatsRecorder;
 import com.facebook.presto.sql.planner.assertions.OptimizerAssert;
@@ -42,6 +44,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.facebook.presto.metadata.SessionPropertyManager.createTestingSessionPropertyManager;
 import static com.facebook.presto.testing.TestingSession.testSessionBuilder;
 import static java.util.Collections.emptyList;
 
@@ -59,6 +62,7 @@ public class RuleTester
     private final PageSourceManager pageSourceManager;
     private final AccessControl accessControl;
     private final SqlParser sqlParser;
+    private ExpressionOptimizerManager expressionOptimizerManager;
 
     public RuleTester()
     {
@@ -82,7 +86,12 @@ public class RuleTester
 
     public RuleTester(List<Plugin> plugins, Map<String, String> sessionProperties, Optional<Integer> nodeCountForStats, ConnectorFactory connectorFactory)
     {
-        Session.SessionBuilder sessionBuilder = testSessionBuilder()
+        this(plugins, sessionProperties, createTestingSessionPropertyManager(), nodeCountForStats, connectorFactory);
+    }
+
+    public RuleTester(List<Plugin> plugins, Map<String, String> sessionProperties, SessionPropertyManager sessionPropertyManager, Optional<Integer> nodeCountForStats, ConnectorFactory connectorFactory)
+    {
+        Session.SessionBuilder sessionBuilder = testSessionBuilder(sessionPropertyManager)
                 .setCatalog(CATALOG_ID)
                 .setSchema("tiny")
                 .setSystemProperty("task_concurrency", "1"); // these tests don't handle exchanges from local parallel
@@ -100,6 +109,7 @@ public class RuleTester
                 connectorFactory,
                 ImmutableMap.of());
         plugins.stream().forEach(queryRunner::installPlugin);
+        expressionOptimizerManager = queryRunner.getExpressionManager();
 
         this.metadata = queryRunner.getMetadata();
         this.transactionManager = queryRunner.getTransactionManager();
@@ -122,6 +132,7 @@ public class RuleTester
     public OptimizerAssert assertThat(Set<Rule<?>> rules)
     {
         PlanOptimizer optimizer = new IterativeOptimizer(
+                getMetadata(),
                 new RuleStatsRecorder(),
                 queryRunner.getStatsCalculator(),
                 queryRunner.getCostCalculator(),
@@ -132,6 +143,7 @@ public class RuleTester
     public OptimizerAssert assertThat(Set<Rule<?>> rules, LogicalPropertiesProvider logicalPropertiesProvider)
     {
         PlanOptimizer optimizer = new IterativeOptimizer(
+                getMetadata(),
                 new RuleStatsRecorder(),
                 queryRunner.getStatsCalculator(),
                 queryRunner.getCostCalculator(),
@@ -185,7 +197,12 @@ public class RuleTester
     {
         return queryRunner.inTransaction(transactionSession -> {
             metadata.getCatalogHandle(transactionSession, session.getCatalog().get());
-            return metadata.getTableMetadata(transactionSession, tableHandle).getMetadata().getTableConstraints();
+            return metadata.getTableMetadata(transactionSession, tableHandle).getMetadata().getTableConstraintsHolder().getTableConstraintsWithColumnHandles();
         });
+    }
+
+    public ExpressionOptimizerManager getExpressionManager()
+    {
+        return expressionOptimizerManager;
     }
 }

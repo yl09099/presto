@@ -20,20 +20,20 @@ import com.facebook.presto.spi.plan.PlanVisitor;
 
 import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkArgument;
-
 public abstract class InternalPlanNode
         extends PlanNode
 {
-    protected InternalPlanNode(Optional<SourceLocation> sourceLocation, PlanNodeId planNodeId)
+    protected InternalPlanNode(Optional<SourceLocation> sourceLocation, PlanNodeId planNodeId, Optional<PlanNode> statsEquivalentPlanNode)
     {
-        super(sourceLocation, planNodeId);
+        super(sourceLocation, planNodeId, statsEquivalentPlanNode);
     }
 
     public final <R, C> R accept(PlanVisitor<R, C> visitor, C context)
     {
-        checkArgument(visitor instanceof InternalPlanVisitor, "PlanVisitor is only for connector to use; InternalPlanNode should never use it");
-        return accept((InternalPlanVisitor<R, C>) visitor, context);
+        if (visitor instanceof InternalPlanVisitor) {
+            return accept((InternalPlanVisitor<R, C>) visitor, context);
+        }
+        return visitor.visitPlan(this, context);
     }
 
     public <R, C> R accept(InternalPlanVisitor<R, C> visitor, C context)

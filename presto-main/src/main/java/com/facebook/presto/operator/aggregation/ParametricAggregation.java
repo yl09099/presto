@@ -85,7 +85,7 @@ public class ParametricAggregation
         // Build state factory and serializer
         Class<?> stateClass = concreteImplementation.getStateClass();
         AccumulatorStateSerializer<?> stateSerializer = getAccumulatorStateSerializer(concreteImplementation, variables, functionAndTypeManager, stateClass, classLoader);
-        AccumulatorStateFactory<?> stateFactory = StateCompiler.generateStateFactory(stateClass, classLoader);
+        AccumulatorStateFactory<?> stateFactory = StateCompiler.generateStateFactory(stateClass, variables.getTypeVariables(), classLoader);
 
         // Bind provided dependencies to aggregation method handlers
         MethodHandle inputHandle = bindDependencies(concreteImplementation.getInputFunction(), concreteImplementation.getInputDependencies(), variables, functionAndTypeManager);
@@ -144,6 +144,12 @@ public class ParametricAggregation
         return details.getDescription().orElse("");
     }
 
+    @Override
+    public boolean isCalledOnNullInput()
+    {
+        return details.isCalledOnNullInput();
+    }
+
     private AggregationImplementation findMatchingImplementation(Signature boundSignature, BoundVariables variables, FunctionAndTypeManager functionAndTypeManager)
     {
         Optional<AggregationImplementation> foundImplementation = Optional.empty();
@@ -182,7 +188,7 @@ public class ParametricAggregation
             }
         }
         else {
-            stateSerializer = generateStateSerializer(stateClass, classLoader);
+            stateSerializer = generateStateSerializer(stateClass, variables.getTypeVariables(), classLoader);
         }
         return stateSerializer;
     }

@@ -13,17 +13,17 @@ clause to specify the window as follows::
         [frame]
     )
 
-A ``frame`` is one of::
+A ``frame`` is one of:
 
-    {RANGE|ROWS} frame_start
-    {RANGE|ROWS} BETWEEN frame_start AND frame_end
+    {RANGE|ROWS|GROUPS} frame_start 
+    {RANGE|ROWS|GROUPS} BETWEEN frame_start AND frame_end
 
 ``frame_start`` and ``frame_end`` can be any of::
 
     UNBOUNDED PRECEDING
-    expression PRECEDING  -- only allowed in ROWS mode
+    expression PRECEDING
     CURRENT ROW
-    expression FOLLOWING  -- only allowed in ROWS mode
+    expression FOLLOWING
     UNBOUNDED FOLLOWING
 
 
@@ -38,20 +38,30 @@ The window definition has 3 components:
   the ordering is undefined.
   **Note that the ORDER BY clause within window functions does not support ordinals. You need to use actual expressions**
 * The ``frame`` clause specifies the sliding window of rows to be processed by the
-  function for a given input row.  A frame can be ``ROWS`` type or ``RANGE`` type,
+  function for a given input row.  A frame can be ``ROWS`` type, ``RANGE`` type or ``GROUPS`` type,
   and it runs from ``frame_start`` to ``frame_end``. If ``frame_end`` is not specified,
   a default value of ``CURRENT ROW`` is used.
 
-  In ``ROWS`` mode, ``CURRENT ROW`` refers specifically to the current row. In ``RANGE``
+  In ``ROWS`` mode, ``CURRENT ROW`` refers specifically to the current row. In ``RANGE`` and ``GROUPS``
   mode, ``CURRENT ROW`` refers to any peer row of the current row for the purpose
   of the ``ORDER BY``. If no ``ORDER BY`` is specified, all rows are considered peers
-  of the current row. In ``RANGE`` mode a frame start of ``CURRENT ROW`` refers to
+  of the current row. In ``RANGE`` and ``GROUPS`` mode a frame start of ``CURRENT ROW`` refers to
   the first peer row of the current row, while a frame end of ``CURRENT ROW`` refers to
   the last peer row of the current row.
 
-  Frame starts and ends of ``expression PRECEDING`` or ``expression FOLLOWING`` are currently
-  only allowed in ``ROWS`` mode. They define the start or end of the frame as the specified number
+  In ``ROWS`` mode, frame starts and ends of ``expression PRECEDING`` or ``expression FOLLOWING``
+  define the start or end of the frame as the specified number
   of rows before or after the current row. The ``expression`` must be of type ``INTEGER``.
+
+  In ``RANGE`` mode, frame starts and ends of ``expression PRECEDING`` or ``expression FOLLOWING``
+  define the start or end of the frame as the value difference of the sort key from
+  the current row. The sort key must either be the same type of ``expression`` or can be coerced to the
+  same type as ``expression``.
+
+  In ``GROUPS`` mode, frame starts and ends of ``expression PRECEDING`` or ``expression FOLLOWING``
+  define the start or end of the frame as the number of groups from the current row.
+  A group includes all rows with the same value on the sort key.
+  The type of ``expression`` must be INTEGER or BIGINT.
 
   If no frame is specified, a default frame of ``RANGE UNBOUNDED PRECEDING`` is used.
 
@@ -65,6 +75,32 @@ The following query ranks orders for each clerk by price::
                         ORDER BY totalprice DESC) AS rnk
     FROM orders
     ORDER BY clerk, rnk
+
+The following queries demonstrate the difference between ``ROWS``, ``RANGE`` and ``GROUPS`` in frame definition::
+
+    SELECT
+        ARRAY_AGG(v) OVER (
+            ORDER BY k ASC ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+        )
+    FROM (
+        VALUES (1, 'a'), (1, 'b'), (3, 'c'), (3, 'd'), (5, 'e')
+    ) t(k, v); -- ['a', 'b'], ['a', 'b', 'c'], ['b', 'c', 'd'], ['c', 'd', 'e'], ['d', 'e']
+
+    SELECT
+        ARRAY_AGG(v) OVER (
+            ORDER BY k ASC RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING
+        )
+    FROM (
+        VALUES (1, 'a'), (1, 'b'), (3, 'c'), (3, 'd'), (5, 'e')
+    ) t(k, v); -- ['a', 'b'], ['a', 'b'], ['c', 'd'], ['c', 'd'], ['e']
+
+    SELECT
+        ARRAY_AGG(v) OVER (
+            ORDER BY k ASC GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+        )
+    FROM (
+        VALUES (1, 'a'), (1, 'b'), (3, 'c'), (3, 'd'), (5, 'e')
+    ) t(k, v); -- ['a', 'b', 'c', 'd'], ['a', 'b', 'c', 'd'], ['a', 'b', 'c', 'd', 'e'], ['a', 'b', 'c', 'd', 'e'], ['c', 'd', 'e']
 
 Aggregate Functions
 -------------------
@@ -85,7 +121,7 @@ by day for each clerk::
 Ranking Functions
 -----------------
 
-.. function:: cume_dist() -> bigint
+.. function:: cume_dist() -> double
 
     Returns the cumulative distribution of a value in a group of values.
     The result is the number of rows preceding or peer with the row in the
@@ -96,7 +132,7 @@ Ranking Functions
 .. function:: dense_rank() -> bigint
 
     Returns the rank of a value in a group of values. This is similar to
-    :func:`rank`, except that tie values do not produce gaps in the sequence.
+    :func:`!rank`, except that tie values do not produce gaps in the sequence.
 
 .. function:: ntile(n) -> bigint
 
@@ -112,7 +148,7 @@ Ranking Functions
 .. function:: percent_rank() -> double
 
     Returns the percentage ranking of a value in group of values. The result
-    is ``(r - 1) / (n - 1)`` where ``r`` is the :func:`rank` of the row and
+    is ``(r - 1) / (n - 1)`` where ``r`` is the :func:`!rank` of the row and
     ``n`` is the total number of rows in the window partition.
 
 .. function:: rank() -> bigint
@@ -154,16 +190,18 @@ null for all rows, the ``default_value`` is returned, or if it is not specified,
 
 .. function:: lead(x[, offset [, default_value]]) -> [same as input]
 
-    Returns the value at ``offset`` rows after the current row in the window.
+    Returns the value at ``offset`` rows after the current row in the window partition.
     Offsets start at ``0``, which is the current row. The
     offset can be any scalar expression. The default ``offset`` is ``1``. If the
-    offset is null or larger than the window, the ``default_value`` is returned,
-    or if it is not specified ``null`` is returned.
+    offset is ``null``, ``null`` is returned. If the offset refers to a row that is not
+    within the partition, the ``default_value`` is returned, or if it is not specified
+    ``null`` is returned.
 
 .. function:: lag(x[, offset [, default_value]]) -> [same as input]
 
-    Returns the value at ``offset`` rows before the current row in the window
+    Returns the value at ``offset`` rows before the current row in the window partition.
     Offsets start at ``0``, which is the current row. The
     offset can be any scalar expression. The default ``offset`` is ``1``. If the
-    offset is null or larger than the window, the ``default_value`` is returned,
-    or if it is not specified ``null`` is returned.
+    offset is ``null``, ``null`` is returned. If the offset refers to a row that is not
+    within the partition, the ``default_value`` is returned, or if it is not specified
+    ``null`` is returned.

@@ -49,7 +49,7 @@ public class PrioritizedSplitRunner
     private final TaskHandle taskHandle;
     private final int splitId;
     private final long workerId;
-    private final SplitRunner split;
+    private final SplitRunner splitRunner;
 
     private final Ticker ticker;
 
@@ -76,7 +76,7 @@ public class PrioritizedSplitRunner
 
     PrioritizedSplitRunner(
             TaskHandle taskHandle,
-            SplitRunner split,
+            SplitRunner splitRunner,
             Ticker ticker,
             CounterStat globalCpuTimeMicros,
             CounterStat globalScheduledTimeMicros,
@@ -85,7 +85,7 @@ public class PrioritizedSplitRunner
     {
         this.taskHandle = taskHandle;
         this.splitId = taskHandle.getNextSplitId();
-        this.split = split;
+        this.splitRunner = splitRunner;
         this.ticker = ticker;
         this.workerId = NEXT_WORKER_ID.getAndIncrement();
         this.globalCpuTimeMicros = globalCpuTimeMicros;
@@ -115,7 +115,7 @@ public class PrioritizedSplitRunner
     {
         destroyed.set(true);
         try {
-            split.close();
+            splitRunner.close();
         }
         catch (RuntimeException e) {
             log.error(e, "Error closing split for task %s", taskHandle.getTaskId());
@@ -129,7 +129,7 @@ public class PrioritizedSplitRunner
 
     public boolean isFinished()
     {
-        boolean finished = split.isFinished();
+        boolean finished = splitRunner.isFinished();
         if (finished) {
             finishedFuture.set(null);
         }
@@ -161,18 +161,18 @@ public class PrioritizedSplitRunner
 
             waitNanos.getAndAdd(startNanos - lastReady.get());
 
-            long wallStart = System.nanoTime();
             long cpuStart = THREAD_MX_BEAN.getCurrentThreadCpuTime();
-            ListenableFuture<?> blocked = split.processFor(SPLIT_RUN_QUANTA);
-            long quantaCpuNanos = THREAD_MX_BEAN.getCurrentThreadCpuTime() - cpuStart;
-            Duration wallDuration = new Duration(System.nanoTime() - wallStart, NANOSECONDS);
+            ListenableFuture<?> blocked = splitRunner.processFor(SPLIT_RUN_QUANTA);
 
-            long quantaScheduledNanos = ticker.read() - startNanos;
+            long quantaCpuNanos = THREAD_MX_BEAN.getCurrentThreadCpuTime() - cpuStart;
+            long endNanos = ticker.read();
+            long quantaScheduledNanos = endNanos - startNanos;
             scheduledNanos.addAndGet(quantaScheduledNanos);
 
             priority.set(taskHandle.addScheduledNanos(quantaScheduledNanos));
-            lastRun.set(ticker.read());
+            lastRun.set(endNanos);
 
+            Duration wallDuration = new Duration(quantaScheduledNanos, NANOSECONDS);
             if (blocked == NOT_BLOCKED) {
                 unblockedQuantaWallTime.add(wallDuration);
             }
@@ -248,7 +248,7 @@ public class PrioritizedSplitRunner
         return String.format("Split %-15s-%d %s (start = %s, wall = %s ms, cpu = %s ms, wait = %s ms, calls = %s)",
                 taskHandle.getTaskId(),
                 splitId,
-                split.getInfo(),
+                splitRunner.getInfo(),
                 start.get() / 1.0e6,
                 (int) ((ticker.read() - start.get()) / 1.0e6),
                 (int) (cpuTimeNanos.get() / 1.0e6),
